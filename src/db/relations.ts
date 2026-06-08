@@ -7,7 +7,7 @@ export const relations = defineRelations(schema, (r) => ({
       from: r.songsTable.eraId,
       to: r.erasTable.id,
     }),
-    filesTable: r.many.filesTable({
+    filesTable: r.one.filesTable({
       from: r.songsTable.url,
       to: r.filesTable.url,
     }),

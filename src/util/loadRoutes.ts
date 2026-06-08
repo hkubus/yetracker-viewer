@@ -31,7 +31,7 @@ export async function loadRoutes(path: string, instance: FastifyInstance, initia
       console.log(transformedPath);
       Object.entries(route.routes).forEach(([method, { handler }]) => {
         if (!handler) {
-          console.log(transformedPath, "no handler :(");
+          console.log(transformedPath, 'no handler :(');
           return;
         }
         if (method === 'post') console.log(`${transformedPath} b`);

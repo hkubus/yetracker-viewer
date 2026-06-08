@@ -1,21 +1,35 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { eq, isNull } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { youtubeDl } from 'youtube-dl-exec';
 import { filesTable } from '../db/schema.ts';
 
+const path = join(import.meta.dirname, '../..', 'files');
 export async function downloader(db: ReturnType<typeof drizzle>) {
-  const path = join(import.meta.dirname, '../..', 'files');
   if (!existsSync(path)) await mkdir(path);
+
+  const dirContents = await readdir(path);
+  const hashToExtension = new Map<string, string>();
+  for (const f of dirContents) {
+    const [hash, extension] = f.split('.');
+    hashToExtension.set(hash, extension);
+  }
 
   const files = await db.select().from(filesTable).where(isNull(filesTable.downloaded)).execute();
   console.log('starting download of', files.length, 'files');
   let i = 0;
   for (const file of files) {
     if (i % 50 === 0) console.log('downloaded', i, 'of', files.length, 'files');
-    let filename = file.filename;
+    let filename = createHash('sha256').update(file.url).digest('hex');
+    if (hashToExtension.has(filename)) {
+      filename = `${filename}.${hashToExtension.get(filename)}`;
+      await db.update(filesTable).set({ downloaded: 1, filename }).where(eq(filesTable.url, file.url)).execute();
+      i++;
+      continue;
+    }
     try {
       // console.log(file.url);
       const url = new URL(file.url);
@@ -27,9 +41,8 @@ export async function downloader(db: ReturnType<typeof drizzle>) {
           const data = await fetch(`https://api.pillows.su/api/download/${hash}`);
           const buffer = await data.arrayBuffer();
           const fileExtension = data.headers.get('content-disposition')?.split('.').at(-1)?.slice(0, -1);
-          filename = `${hash}.${fileExtension}`;
-          const path = join(import.meta.dirname, '../..', 'files', filename);
-          await writeFile(path, Buffer.from(buffer));
+          filename = `${filename}.${fileExtension}`;
+          await writeFile(join(path, filename), Buffer.from(buffer));
           // console.log(`Downloaded ${path}`);
 
           break;
@@ -67,7 +80,7 @@ export async function downloader(db: ReturnType<typeof drizzle>) {
   }
 }
 async function downloadYtdlp(url: URL, filename: string) {
-  const path = join(import.meta.dirname, '../..', 'files', filename);
+  const outputPath = join(path, filename);
   console.log(url.toString());
   const timestamp = url?.toString()?.split('t=')[1] || undefined;
   console.log(timestamp);
@@ -75,8 +88,8 @@ async function downloadYtdlp(url: URL, filename: string) {
     extractAudio: true,
     audioQuality: 0,
     audioFormat: 'opus',
-    output: path,
+    output: outputPath,
     downloadSections: timestamp ? `*${timestamp}-inf` : undefined,
   });
-  rename(`${path}.opus`, `${path}`);
+  rename(`${outputPath}.opus`, `${outputPath}`);
 }

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { parse } from 'node-html-parser';
@@ -119,7 +120,8 @@ export async function importData(db: ReturnType<typeof drizzle>) {
         }
         if (songData.url && songData.name) {
           if (songData.url === 'N/A' || songData.url === 'Link Needed' || songData.quality === 'Not Available') return;
-          urls.push({ url: songData.url, filename: `${songData.id} - ${songData.name.replace('\n', '')}` });
+          const hash = createHash('sha256').update(songData.url).digest('hex');
+          urls.push({ url: songData.url, filename: `${hash}` });
         }
         songs.push(songData);
         break;
