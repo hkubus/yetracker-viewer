@@ -1,14 +1,24 @@
-import { defineRelations } from 'drizzle-orm'
-import * as schema from './schema.ts'
+import { defineRelations } from 'drizzle-orm';
+import * as schema from './schema.ts';
 
 export const relations = defineRelations(schema, (r) => ({
-  songs: {
-    era: r.one.eras({
-      from: r.songs.eraId,
-      to: r.eras.id,
+  songsTable: {
+    erasTable: r.one.erasTable({
+      from: r.songsTable.eraId,
+      to: r.erasTable.id,
+    }),
+    filesTable: r.many.filesTable({
+      from: r.songsTable.url,
+      to: r.filesTable.url,
     }),
   },
-  eras: {
-    songs: r.many.songs(),
+  filesTable: {
+    songsTable: r.one.songsTable({
+      from: r.filesTable.url,
+      to: r.songsTable.url,
+    }),
   },
-}))
+  erasTable: {
+    songsTable: r.many.songsTable(),
+  },
+}));

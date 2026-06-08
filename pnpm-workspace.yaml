@@ -1,2 +1,4 @@
 onlyBuiltDependencies:
   - esbuild
+  - youtube-dl-exec
+  - yt-dlp-exec

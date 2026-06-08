@@ -1,7 +1,7 @@
 export const routes = {
   get: {
     handler: async () => {
-      return { message: "Hello, World!" };
+      return { message: 'Hello, World!' };
     },
   },
-}
+};

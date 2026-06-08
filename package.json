@@ -5,20 +5,26 @@
   "main": "src/index.ts",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node --env-file .env src/index.ts"
+    "start": "node --env-file .env src/index.ts",
+    "resetDb": "rm db.sqlite3 && rm -r files && drizzle-kit push"
   },
   "keywords": [],
   "author": "hkubus",
   "license": "MIT",
   "packageManager": "pnpm@10.30.0",
   "dependencies": {
+    "@biomejs/biome": "^2.4.16",
+    "@types/mime-types": "^3.0.1",
     "drizzle-orm": "1.0.0-beta.22",
     "fastify": "^5.8.5",
-    "node-html-parser": "^7.1.0"
+    "mime-types": "^3.0.2",
+    "node-html-parser": "^7.1.0",
+    "youtube-dl-exec": "^3.1.7"
   },
   "type": "module",
   "devDependencies": {
     "@types/node": "^25.9.2",
-    "drizzle-kit": "1.0.0-beta.22"
+    "drizzle-kit": "1.0.0-beta.22",
+    "typescript": "^6.0.3"
   }
 }
