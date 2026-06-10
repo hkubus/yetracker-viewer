@@ -1,17 +1,16 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest, HTTPMethods } from 'fastify';
+import type { Context, Hono } from 'hono';
+import type { HandlerResponse } from 'hono/types';
 export type Route = 'get' | 'post' | 'put' | 'delete' | 'patch';
 export type Routes = Record<
   Route,
   {
-    handler: (req: FastifyRequest, res: FastifyReply) => void;
+    handler: (c: Context) => HandlerResponse<'json' | 'text'>;
   }
 >;
-export function routesPlugin(instance: FastifyInstance, opts: FastifyPluginOptions, done) {
-  loadRoutes(opts.path, instance).then(done);
-}
-export async function loadRoutes(path: string, instance: FastifyInstance, initialPath: string = path) {
+
+export async function loadRoutes(path: string, instance: Hono, initialPath: string = path) {
   const files = await readdir(path, { withFileTypes: true });
   for (const file of files) {
     if (file.isDirectory() || (!file.name.endsWith('.js') && !file.name.endsWith('.ts'))) {
@@ -35,11 +34,7 @@ export async function loadRoutes(path: string, instance: FastifyInstance, initia
           return;
         }
         if (method === 'post') console.log(`${transformedPath} b`);
-        instance.route({
-          method: method.toUpperCase() as HTTPMethods,
-          handler,
-          url: transformedPath,
-        });
+        instance.on(method, [transformedPath], handler);
       });
     }
   }

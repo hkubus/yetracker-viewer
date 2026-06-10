@@ -1,13 +1,12 @@
 import { count, eq, getColumns } from 'drizzle-orm';
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { Context } from 'hono';
 import { erasTable, songsTable } from '../../db/schema.ts';
-
+import { db } from '../../index.ts';
 export const routes = {
   get: {
-    handler: async (req: FastifyRequest, res: FastifyReply) => {
-      console.log('test?');
+    handler: async (c: Context) => {
       const { imageUrl, ...rest } = getColumns(erasTable);
-      const eras = await req.db
+      const eras = await db
         .select({
           ...rest,
           songsCount: count(songsTable.id),
@@ -15,7 +14,7 @@ export const routes = {
         .from(erasTable)
         .leftJoin(songsTable, eq(erasTable.id, songsTable.eraId))
         .groupBy(erasTable.id);
-      res.send(eras);
+      return c.json(eras);
     },
   },
 };

@@ -1,22 +1,24 @@
 import { eq, getColumns } from 'drizzle-orm';
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { erasTable } from '../../../db/schema.ts';
+import { db } from '../../../index.ts';
 
 export const routes = {
   get: {
-    handler: async (req: FastifyRequest, res: FastifyReply) => {
-      const { id } = req.params as { id: string };
+    handler: async (c: Context) => {
+      const id = c.req.param('id') as string;
       const { imageUrl, ...rest } = getColumns(erasTable);
 
-      const era = await req.db
+      const era = await db
         .select(rest)
         .from(erasTable)
         .where(eq(erasTable.id, parseInt(id, 10)))
         .limit(1);
       if (!era) {
-        return res.status(404).send({ message: 'Era not found' });
+        throw new HTTPException(404, { message: 'Era does not exist' });
       }
-      return res.send(era[0]);
+      return c.json(era[0]);
     },
   },
 };
