@@ -1,0 +1,52 @@
+---
+import type { Era } from '@yetracker/types';
+
+const era = Astro.props.era as Era;
+---
+<div style={`--dominantColor: #${era.dominantColor};   `}>
+    <img src={`http://localhost:3000/eras/${era.id}/cover`} alt={`${era.name} cover`} />
+    <h2>{era.name}</h2>
+    <p>{era.songsCount} songs</p>
+</div>
+
+<style>
+div:hover {
+    border: 3px solid var(--dominantColor);
+    background-color: color-mix(in srgb, var(--dominantColor) 35%, transparent);
+    color: color-mix(in oklab, var(--dominantColor) 20%, white);
+    transform: scale(1.05);
+}
+div {
+    transition: all 0.2s;
+    display: flex;
+    flex-direction: column;
+    color: color-mix(in oklab, var(--dominantColor) 30%, white);
+    background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
+    border: 3px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
+    /*align-items: center;*/
+h2 {
+        margin-top: 8px;
+        margin-left: 0px;
+        margin-bottom: 0px;
+        font-size: 1.475em;
+    }
+    p {
+        margin-top: auto;
+        font-size: 0.9em;
+        font-weight: 300;
+        align-self: flex-end;
+        justify-self: flex-end;
+        margin-bottom: 0;
+    }
+    border-radius: 0.7em;
+    padding: 0.7em;
+    /*aspect-ratio: 20/8;*/
+    img {
+        aspect-ratio : 1;
+        margin-bottom: 0px;
+        border-radius: 0.7em;
+        width: 100%;
+        /*height: 100%;*/
+    }
+}
+</style>

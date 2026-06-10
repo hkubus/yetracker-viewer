@@ -1,29 +1,19 @@
 {
   "name": "yetracker-viewer",
-  "version": "1.0.0",
-  "description": "",
-  "main": "src/index.ts",
+  "private": true,
+  "packageManager": "pnpm@11.5.1+sha512.93f7b57422ea7068257235b4c16eb60762eb68e1dc23723199cc739043ea9be2c4143274a399d8c6defa2b1176226d9ca1c4b63482d6200c1a8fbaa78c1d1485",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node --env-file .env src/index.ts",
-    "resetDb": "rm db.sqlite3 && drizzle-kit push"
+    "dev": "pnpm -r --recursive dev",
+    "dev:api": "pnpm --filter @yetracker/api dev",
+    "dev:web": "pnpm --filter @yetracker/web dev",
+    "build": "pnpm -r --recursive build",
+    "typecheck": "pnpm -r --recursive typecheck",
+    "lint": "biome check .",
+    "format": "biome format --write ."
   },
-  "keywords": [],
-  "author": "hkubus",
-  "license": "MIT",
-  "packageManager": "pnpm@10.30.0",
-  "dependencies": {
-    "drizzle-orm": "1.0.0-beta.22",
-    "fastify": "^5.8.5",
-    "ffmpeg-stream": "^1.0.1",
-    "node-html-parser": "^7.1.0",
-    "youtube-dl-exec": "^3.1.7"
-  },
-  "type": "module",
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",
-    "@types/node": "^25.9.2",
-    "drizzle-kit": "1.0.0-beta.22",
+    "turbo": "^2.9.16",
     "typescript": "^6.0.3"
   }
 }

@@ -1,4 +1,14 @@
+allowBuilds:
+  esbuild: true
+  sharp: true
+  youtube-dl-exec: true
+minimumReleaseAgeExclude:
+  - astro@6.4.5
+  - '@astrojs/node@10.1.4'
 onlyBuiltDependencies:
   - esbuild
   - youtube-dl-exec
   - yt-dlp-exec
+packages:
+  - "apps/*"
+  - "packages/*"

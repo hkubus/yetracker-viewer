@@ -1,0 +1,19 @@
+{
+  "name": "@yetracker/types",
+  "version": "1.0.0",
+  "description": "Shared types for the yetracker viewer backend and frontend",
+  "private": true,
+  "exports": {
+    "types": "./src/index.d.ts",
+    "import": null
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc"
+  },
+  "author": "xiboon",
+  "license": "MIT"
+}

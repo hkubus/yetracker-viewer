@@ -1,0 +1,21 @@
+---
+import type { Era } from '@yetracker/types';
+import EraComponent from './Era.astro';
+
+const req = await fetch('http://localhost:3000/eras');
+const eras: Era[] = await req.json();
+---
+<div>
+    {eras.map(e => <EraComponent era={e}/>)}
+</div>
+
+<style>
+div {
+    display: grid;
+    /*grid-auto-rows: 400px;*/
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    /*grid-template-columns: 1fr 1fr 1fr 1fr 1fr;*/
+    padding: 1.5vw;
+    gap: 1vw;
+}
+</style>
