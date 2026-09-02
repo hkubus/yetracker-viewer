@@ -1,0 +1,145 @@
+---
+import type { Song } from '@yetracker/types';
+import BackButton from '../../components/BackButton.astro';
+import Pagination from '../../components/Pagination.astro';
+import SongList from '../../components/SongList.astro';
+import { ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../../config';
+import Layout from '../../layouts/Layout.astro';
+
+type Category = {
+  id: string;
+  name: string;
+  description: string;
+  songsCount: number;
+  sourceUrl: string;
+};
+
+const id = Astro.params.id ?? '';
+const pageValue = Astro.url.searchParams.get('page') ?? '1';
+const parsedPage = Number(pageValue);
+const currentPage = /^\d+$/.test(pageValue) && Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+const offset = (currentPage - 1) * ERA_PAGE_SIZE;
+const [categoryReq, songsReq] = await Promise.all([
+  fetchApi(`/categories/${id}`),
+  fetchApi(`/categories/${id}/songs?limit=${ERA_PAGE_SIZE}&offset=${offset}`),
+]);
+const [category, songData]: [Category, (Song & { url?: string; playable: boolean; duration: number | null })[]] =
+  await Promise.all([categoryReq.json(), songsReq.json()]);
+const totalSongs = Number(songsReq.headers.get('x-total-count') ?? songData.length);
+const pageCount = Math.max(1, Math.ceil(totalSongs / ERA_PAGE_SIZE));
+if (currentPage > pageCount) {
+  return Astro.redirect(`/categories/${id}${pageCount > 1 ? `?page=${pageCount}` : ''}`);
+}
+---
+
+<Layout title={`${category.name} | Ye Tracker`}>
+  <div class="main" style="--dominantColor: #777777">
+    <BackButton />
+    <header class="category-header">
+      <div>
+        <p class="eyebrow">Yetracker category</p>
+        <h1>{category.name}</h1>
+        <p class="description">{category.description}</p>
+      </div>
+      <div class="category-meta">
+        <p>{category.songsCount.toLocaleString()} {category.songsCount === 1 ? 'song' : 'songs'}</p>
+        <a href={category.sourceUrl} target="_blank" rel="noreferrer">Open spreadsheet ↗</a>
+      </div>
+    </header>
+    <div class="list">
+      <Pagination
+        currentPage={currentPage}
+        pageCount={pageCount}
+        totalItems={totalSongs}
+        pageSize={ERA_PAGE_SIZE}
+        basePath={`/categories/${id}`}
+        paginationId="category-pagination-top"
+      />
+      <SongList eraId={`category-${id}`} scopeName="category" songs={songData} apiBaseUrl={publicApiBaseUrl} />
+      <Pagination
+        currentPage={currentPage}
+        pageCount={pageCount}
+        totalItems={totalSongs}
+        pageSize={ERA_PAGE_SIZE}
+        basePath={`/categories/${id}`}
+      />
+    </div>
+  </div>
+</Layout>
+
+<style>
+  .main {
+    min-height: 100vh;
+    padding: 1vh;
+    color: #efefef;
+  }
+
+  .category-header,
+  .list {
+    border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
+    border-radius: 16px;
+    background-color: color-mix(in srgb, var(--dominantColor) 20%, transparent);
+  }
+
+  .category-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 2rem;
+    padding: clamp(1rem, 2vw, 2rem);
+  }
+
+  .eyebrow {
+    margin: 0 0 0.5rem;
+    color: #bdbdbd;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(2rem, 5vw, 3.5rem);
+  }
+
+  .description {
+    max-width: 48rem;
+    margin: 0.7rem 0 0;
+    color: #c3c3c3;
+    line-height: 1.5;
+  }
+
+  .category-meta {
+    flex: none;
+    text-align: right;
+  }
+
+  .category-meta p {
+    margin: 0 0 0.7rem;
+    color: #d9d9d9;
+    font-size: 0.9rem;
+  }
+
+  .category-meta a {
+    color: #fff;
+    font-size: 0.85rem;
+  }
+
+  .list {
+    margin-top: 2vh;
+    padding: 1vh;
+  }
+
+  @media (max-width: 700px) {
+    .category-header {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .category-meta {
+      text-align: left;
+    }
+  }
+</style>

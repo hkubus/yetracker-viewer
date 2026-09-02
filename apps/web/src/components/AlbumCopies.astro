@@ -1,0 +1,296 @@
+---
+import { Icon } from 'astro-icon/components';
+import { apiUrl } from '../config';
+
+type AlbumCopy = {
+  id: number;
+  eraId: number | null;
+  eraName: string | null;
+  name: string | null;
+  notes: string | null;
+  trackLength: number | null;
+  fileDate: number | null;
+  availableLength: string | null;
+  quality: string | null;
+  url: string | null;
+  playable: boolean;
+  duration: number | null;
+  coverVersion: string | null;
+};
+
+type AlbumCopyGroup = {
+  name: string;
+  copies: AlbumCopy[];
+};
+
+const groups = Astro.props.groups as AlbumCopyGroup[];
+const apiBaseUrl = Astro.props.apiBaseUrl as string;
+const sourceUrl = Astro.props.sourceUrl as string;
+const shortDate = new Intl.DateTimeFormat('en-US', { dateStyle: 'short' });
+
+function formatDate(timestamp: number | null) {
+  return timestamp ? shortDate.format(new Date(timestamp * 1000)) : '';
+}
+---
+
+<section class="album-copies" aria-labelledby="album-copies-heading">
+  <div class="album-copies__header">
+    <div>
+      <p class="eyebrow">Main-page collection</p>
+      <h2 id="album-copies-heading">Album copies</h2>
+      <p>Complete albums and demo tapes, grouped when the same copy has multiple versions.</p>
+    </div>
+    <a href={sourceUrl} target="_blank" rel="noreferrer">Open spreadsheet ↗</a>
+  </div>
+
+  {groups.length > 0 ? (
+    <div class="copy-groups">
+      {groups.map((group, index) => (
+        <details class="copy-group" open={index < 2}>
+          <summary>
+            <span class="copy-group__name">{group.name}</span>
+            <span class="copy-group__count">
+              {group.copies.length} {group.copies.length === 1 ? 'copy' : 'copies'}
+            </span>
+          </summary>
+          <div class="copy-rows">
+            {group.copies.map((copy) => (
+              <div class="copy-row">
+                <div class="copy-row__info">
+                  <strong>{copy.eraName ?? 'Unassigned era'}</strong>
+                  <span>
+                    {[copy.availableLength, copy.quality, formatDate(copy.fileDate)].filter(Boolean).join(' · ')}
+                  </span>
+                  {copy.notes ? <small>{copy.notes}</small> : null}
+                </div>
+                <div class="copy-row__actions">
+                  {copy.playable && copy.eraId ? (
+                    <>
+                      <button
+                        class="play-song"
+                        type="button"
+                        data-id={copy.id}
+                        data-title={group.name}
+                        data-eraId={copy.eraId}
+                        data-track-length={copy.duration ?? copy.trackLength ?? 0}
+                        data-cover-version={copy.coverVersion}
+                        aria-label={`Play ${group.name}`}
+                        title="Play"
+                      >
+                        <Icon name="play" />
+                      </button>
+                      <a
+                        class="download-song"
+                        href={apiUrl(apiBaseUrl, `/songs/${copy.id}/download`)}
+                        aria-label={`Download ${group.name}`}
+                        title="Download original file"
+                        download
+                      >
+                        <Icon name="download" />
+                      </a>
+                    </>
+                  ) : copy.url ? (
+                    <a
+                      class="source-link"
+                      href={copy.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={`Open source for ${group.name}`}
+                      title="Open source"
+                    >
+                      <Icon name="link" />
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ))}
+    </div>
+  ) : (
+    <p class="album-copies__empty">No album copies are available yet.</p>
+  )}
+</section>
+
+<style>
+  .album-copies {
+    margin: 1rem clamp(0.75rem, 1.5vw, 1.5rem) 2rem;
+    padding: clamp(1rem, 2vw, 1.5rem);
+    border: 2px solid #363636;
+    border-radius: 1rem;
+    background: linear-gradient(145deg, #242424, #191919);
+  }
+
+  .album-copies__header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .album-copies__header p:last-of-type {
+    max-width: 42rem;
+    margin: 0.55rem 0 0;
+    color: #aaa;
+  }
+
+  .album-copies__header a {
+    flex: none;
+    color: #ddd;
+    font-size: 0.85rem;
+  }
+
+  .eyebrow {
+    margin: 0 0 0.35rem;
+    color: #999;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  h2 {
+    margin: 0;
+    color: #f3f3f3;
+    font-size: clamp(1.6rem, 3vw, 2.2rem);
+  }
+
+  .copy-groups {
+    display: grid;
+    gap: 0.55rem;
+  }
+
+  .copy-group {
+    overflow: hidden;
+    border: 1px solid #3b3b3b;
+    border-radius: 0.75rem;
+    background: #1b1b1b;
+  }
+
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.8rem 1rem;
+    cursor: pointer;
+    color: #f0f0f0;
+    list-style-position: inside;
+  }
+
+  summary::marker {
+    color: #aaa;
+  }
+
+  .copy-group__name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-weight: 700;
+  }
+
+  .copy-group__count {
+    flex: none;
+    color: #999;
+    font-size: 0.8rem;
+  }
+
+  .copy-rows {
+    border-top: 1px solid #333;
+  }
+
+  .copy-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1rem 0.75rem 2rem;
+  }
+
+  .copy-row + .copy-row {
+    border-top: 1px solid #2b2b2b;
+  }
+
+  .copy-row__info {
+    display: grid;
+    min-width: 0;
+    gap: 0.2rem;
+  }
+
+  .copy-row__info strong {
+    color: #ddd;
+    font-size: 0.9rem;
+  }
+
+  .copy-row__info span,
+  .copy-row__info small {
+    overflow-wrap: anywhere;
+    color: #999;
+    font-size: 0.78rem;
+  }
+
+  .copy-row__info small {
+    color: #aaa;
+  }
+
+  .copy-row__actions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 0.2rem;
+  }
+
+  .play-song,
+  .download-song,
+  .source-link {
+    display: inline-grid;
+    width: 2rem;
+    height: 2rem;
+    box-sizing: border-box;
+    place-items: center;
+    border: 1px solid #555;
+    border-radius: 0.45rem;
+    color: #ddd;
+    background: #292929;
+  }
+
+  .play-song {
+    cursor: pointer;
+  }
+
+  .play-song:hover,
+  .play-song:focus-visible,
+  .download-song:hover,
+  .download-song:focus-visible,
+  .source-link:hover,
+  .source-link:focus-visible {
+    border-color: #aaa;
+    color: #fff;
+    outline: none;
+  }
+
+  .play-song :global(svg),
+  .download-song :global(svg),
+  .source-link :global(svg) {
+    width: 1rem;
+    height: 1rem;
+  }
+
+  .album-copies__empty {
+    margin: 0;
+    color: #aaa;
+  }
+
+  @media (max-width: 640px) {
+    .album-copies__header {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .copy-row {
+      align-items: flex-start;
+      padding-left: 1.5rem;
+    }
+  }
+</style>

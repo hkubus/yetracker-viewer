@@ -1,7 +1,118 @@
 ---
-import ErasList from '../components/ErasList.astro';
+import type { Era } from '@yetracker/types';
+import AlbumCopies from '../components/AlbumCopies.astro';
+import CategoryComponent from '../components/Category.astro';
+import EraComponent from '../components/Era.astro';
+import GlobalSongSearch from '../components/GlobalSongSearch.astro';
+import { ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../config';
 import Layout from '../layouts/Layout.astro';
+
+type Category = {
+  id: string;
+  name: string;
+  description: string;
+  songsCount: number;
+};
+
+type AlbumCopyGroup = {
+  name: string;
+  copies: unknown[];
+};
+
+const [erasRequest, categoriesRequest, albumCopiesRequest] = await Promise.all([
+  fetchApi('/eras'),
+  fetchApi('/categories'),
+  fetchApi('/album-copies'),
+]);
+const [eras, categories, albumCopies]: [Era[], Category[], AlbumCopyGroup[]] = await Promise.all([
+  erasRequest.json(),
+  categoriesRequest.json(),
+  albumCopiesRequest.json(),
+]);
+const songsCount = eras.reduce((total, era) => total + (era.songsCount ?? 0), 0);
 ---
-<Layout>
-    <ErasList />
+
+<Layout title="Ye Tracker">
+    <GlobalSongSearch
+        songsCount={songsCount}
+        eras={eras}
+        apiBaseUrl={publicApiBaseUrl}
+        eraPageSize={ERA_PAGE_SIZE}
+    />
+    <div class="era-grid">
+        {
+            eras.map((e, index) => (
+                <EraComponent
+                    era={e}
+                    apiBaseUrl={publicApiBaseUrl}
+                    priority={index < 3}
+                />
+            ))
+        }
+    </div>
+    <AlbumCopies
+        groups={albumCopies}
+        apiBaseUrl={publicApiBaseUrl}
+        sourceUrl="https://yetracker.net/#gid=1297512832"
+    />
+    <section class="categories" aria-labelledby="categories-heading">
+        <div class="categories__header">
+            <p class="eyebrow">More from Ye Tracker</p>
+            <h2 id="categories-heading">Other categories</h2>
+            <p>Browse the additional Yetracker sheets alongside the main eras.</p>
+        </div>
+        <div class="category-grid">
+            {
+                categories.map((category) => <CategoryComponent category={category} />)
+            }
+        </div>
+    </section>
 </Layout>
+
+<style>
+    .era-grid {
+        display: grid;
+        grid-template-columns: repeat(
+            auto-fit,
+            minmax(min(100%, 240px), 1fr)
+        );
+        align-items: stretch;
+        gap: clamp(0.75rem, 1vw, 1rem);
+        padding: clamp(0.75rem, 1.5vw, 1.5rem);
+    }
+
+    .categories {
+        padding: 0 clamp(0.75rem, 1.5vw, 1.5rem) 2rem;
+    }
+
+    .categories__header {
+        max-width: 42rem;
+        margin: 1rem 0 1rem;
+    }
+
+    .eyebrow {
+        margin: 0 0 0.35rem;
+        color: #999;
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+
+    h2 {
+        margin: 0;
+        color: #f3f3f3;
+        font-size: clamp(1.6rem, 3vw, 2.2rem);
+    }
+
+    .categories__header p:last-child {
+        margin: 0.55rem 0 0;
+        color: #aaa;
+    }
+
+    .category-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+        gap: clamp(0.75rem, 1vw, 1rem);
+    }
+</style>

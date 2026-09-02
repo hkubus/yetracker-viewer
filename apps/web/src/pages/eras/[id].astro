@@ -1,0 +1,157 @@
+---
+import type { Era, Song } from '@yetracker/types';
+import BackButton from '../../components/BackButton.astro';
+import Pagination from '../../components/Pagination.astro';
+import SongList from '../../components/SongList.astro';
+import { apiUrl, ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../../config';
+import Layout from '../../layouts/Layout.astro';
+import { colorValue } from '../../utils/color';
+
+const { id } = Astro.params;
+const pageValue = Astro.url.searchParams.get('page') ?? '1';
+const parsedPage = Number(pageValue);
+const currentPage = /^\d+$/.test(pageValue) && Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+const offset = (currentPage - 1) * ERA_PAGE_SIZE;
+const [req, songsReq] = await Promise.all([
+  fetchApi(`/eras/${id}`),
+  fetchApi(`/eras/${id}/songs?limit=${ERA_PAGE_SIZE}&offset=${offset}`),
+]);
+const [data, songData]: [Era, (Song & { url: string; downloaded: number })[]] = await Promise.all([
+  req.json(),
+  songsReq.json(),
+]);
+const totalSongs = Number(songsReq.headers.get('x-total-count') ?? songData.length);
+const pageCount = Math.max(1, Math.ceil(totalSongs / ERA_PAGE_SIZE));
+if (currentPage > pageCount) {
+  return Astro.redirect(`/eras/${id}${pageCount > 1 ? `?page=${pageCount}` : ''}`);
+}
+const dominantColor = colorValue(data.dominantColor);
+const coverVersion = data.coverVersion ?? dominantColor.slice(1);
+const coverUrl = `${apiUrl(publicApiBaseUrl, `/eras/${id}/cover`)}?v=${encodeURIComponent(coverVersion)}`;
+---
+
+<Layout title={`${data.name} | Ye Tracker`}>
+  <div class="main" style={`--dominantColor: ${dominantColor}`}>
+    <BackButton />
+    <div class="data">
+      <img src={coverUrl} alt="" />
+      <div class="text">
+        <h1>{data.name}</h1>
+        <p>{data.description}</p>
+      </div>
+      <div class="divider"></div>
+      <p class="notes">{data.notes}</p>
+    </div>
+    <div class="list">
+      <Pagination
+        currentPage={currentPage}
+        pageCount={pageCount}
+        totalItems={totalSongs}
+        pageSize={ERA_PAGE_SIZE}
+        basePath={`/eras/${id}`}
+        paginationId="song-pagination-top"
+      />
+      <SongList
+        eraId={id}
+        songs={songData}
+        apiBaseUrl={publicApiBaseUrl}
+        coverVersion={coverVersion}
+      />
+      <Pagination
+        currentPage={currentPage}
+        pageCount={pageCount}
+        totalItems={totalSongs}
+        pageSize={ERA_PAGE_SIZE}
+        basePath={`/eras/${id}`}
+      />
+    </div>
+  </div>
+</Layout>
+
+<style>
+  img {
+    border-radius: 16px;
+    max-height: 25vh;
+    flex-shrink: 0;
+  }
+  h1 {
+    font-size: 2.5em;
+    margin-bottom: 0;
+  }
+  p {
+    font-size: 1.1em;
+  }
+  .main {
+    padding: 1vh;
+    color: color-mix(in oklab, var(--dominantColor) 10%, white);
+  }
+  .notes {
+    min-width: 15%;
+    max-width: 25%;
+    font-size: 1em;
+    white-space: pre-line;
+  }
+  .divider {
+    border: 1px solid color-mix(in srgb, var(--dominantColor) 30%, transparent);
+    align-self: stretch;
+    height: auto;
+    margin-right: 0.75vw;
+    margin-top: -1vh;
+    margin-bottom: -1vh;
+  }
+
+  .data {
+    display: flex;
+    color: color-mix(in oklab, var(--dominantColor) 20%, white);
+    flex-direction: row;
+    align-items: center;
+    padding: 1vh;
+    border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
+    background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
+    border-radius: 16px;
+  }
+  .list {
+    border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
+    border-radius: 16px;
+    padding: 1vh;
+    background-color: color-mix(in srgb, var(--dominantColor) 20%, transparent);
+    margin-top: 2vh;
+  }
+  .text {
+    padding: 1vw;
+    padding-right: 0.25vw;
+  }
+
+  @media (max-width: 700px) {
+    .data {
+      align-items: stretch;
+      flex-direction: column;
+      padding: 0.75rem;
+    }
+
+    .data img {
+      width: min(100%, 20rem);
+      max-height: none;
+      align-self: center;
+    }
+
+    .text {
+      padding: 0.5rem 0;
+    }
+
+    h1 {
+      margin-top: 0.5rem;
+      font-size: 2rem;
+    }
+
+    .divider {
+      display: none;
+    }
+
+    .notes {
+      min-width: 0;
+      max-width: none;
+      margin-bottom: 0;
+    }
+  }
+</style>

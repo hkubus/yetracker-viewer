@@ -1,7 +1,8 @@
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 export const songsTable = sqliteTable('songs', {
   id: integer('id').primaryKey(),
   eraId: integer('era'),
+  catalogId: text('catalog_id').notNull().default('unreleased'),
   name: text('name'),
   notes: text('notes'),
   fileDate: integer('file_date'),
@@ -18,9 +19,11 @@ export const erasTable = sqliteTable('eras', {
   imageUrl: text('image_url'),
   description: text('description'),
   dominantColor: text('dominant_color'),
+  isMain: integer('is_main').notNull().default(1),
 });
 export const filesTable = sqliteTable('files', {
   url: text('url').primaryKey(),
   downloaded: integer('downloaded'),
   filename: text('filename'),
+  duration: real('duration'),
 });

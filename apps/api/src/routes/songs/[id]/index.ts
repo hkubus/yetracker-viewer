@@ -1,16 +1,13 @@
 import { eq } from 'drizzle-orm';
 import type { Context } from 'hono';
+import { db } from '../../../db/client.ts';
 import { songsTable } from '../../../db/schema.ts';
-import { db } from '../../../index.ts';
+import { positiveInteger } from '../../../util/request.ts';
 export const routes = {
   get: {
     handler: async (c: Context) => {
-      const id = c.req.param('id') as string;
-      const song = await db
-        .select()
-        .from(songsTable)
-        .where(eq(songsTable.id, parseInt(id, 10)))
-        .limit(1);
+      const id = positiveInteger(c.req.param('id'), 'song id');
+      const song = await db.select().from(songsTable).where(eq(songsTable.id, id)).limit(1);
       return c.json(song);
     },
   },

@@ -5,8 +5,10 @@
   "scripts": {
     "dev": "pnpm -r --recursive dev",
     "dev:api": "pnpm --filter @yetracker/api dev",
-    "dev:web": "pnpm --filter @yetracker/web dev",
+    "dev:web": "pnpm --filter web dev",
     "build": "pnpm -r --recursive build",
+    "start:api": "pnpm --filter @yetracker/api start",
+    "start:web": "pnpm --filter web start",
     "typecheck": "pnpm -r --recursive typecheck",
     "lint": "biome check .",
     "format": "biome format --write ."

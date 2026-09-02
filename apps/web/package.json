@@ -6,15 +6,18 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro preview",
-    "start": "node dist/server/entry.mjs",
+    "dev": "node --env-file-if-exists ../../.env node_modules/astro/bin/astro.mjs dev",
+    "build": "node --env-file-if-exists ../../.env node_modules/astro/bin/astro.mjs build",
+    "preview": "node --env-file-if-exists ../../.env node_modules/astro/bin/astro.mjs preview",
+    "start": "node --env-file-if-exists ../../.env server.mjs",
     "astro": "astro"
   },
   "dependencies": {
+    "@astrojs/node": "^11.0.3",
+    "@nanostores/persistent": "^1.3.4",
     "@yetracker/types": "workspace:*",
-    "@astrojs/node": "^10.1.4",
-    "astro": "^6.4.5"
+    "astro": "^7.1.5",
+    "astro-icon": "^1.1.5",
+    "nanostores": "^1.3.0"
   }
 }

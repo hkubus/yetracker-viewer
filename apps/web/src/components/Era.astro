@@ -1,52 +1,73 @@
 ---
 import type { Era } from '@yetracker/types';
+import { apiUrl } from '../config';
+import { colorValue } from '../utils/color';
 
 const era = Astro.props.era as Era;
+const apiBaseUrl = Astro.props.apiBaseUrl as string;
+const priority = (Astro.props.priority as boolean | undefined) ?? false;
+const dominantColor = colorValue(era.dominantColor);
+const coverVersion = era.coverVersion ?? dominantColor.slice(1);
+const coverUrl = `${apiUrl(apiBaseUrl, `/eras/${era.id}/cover`)}?v=${encodeURIComponent(coverVersion)}`;
 ---
-<div style={`--dominantColor: #${era.dominantColor};   `}>
-    <img src={`http://localhost:3000/eras/${era.id}/cover`} alt={`${era.name} cover`} />
+<a href={`/eras/${era.id}`}>
+<div style={`--dominantColor: ${dominantColor};`}>
+    <img
+        src={coverUrl}
+        alt={`${era.name} cover`}
+        loading={priority ? 'eager' : 'lazy'}
+        fetchpriority={priority ? 'high' : 'auto'}
+        decoding="async"
+    />
     <h2>{era.name}</h2>
     <p>{era.songsCount} songs</p>
 </div>
-
+</a>
 <style>
-div:hover {
-    border: 3px solid var(--dominantColor);
-    background-color: color-mix(in srgb, var(--dominantColor) 35%, transparent);
-    color: color-mix(in oklab, var(--dominantColor) 20%, white);
-    transform: scale(1.05);
-}
-div {
-    transition: all 0.2s;
-    display: flex;
-    flex-direction: column;
-    color: color-mix(in oklab, var(--dominantColor) 30%, white);
-    background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
-    border: 3px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
-    /*align-items: center;*/
-h2 {
-        margin-top: 8px;
-        margin-left: 0px;
-        margin-bottom: 0px;
+    a {
+        display: block;
+        min-width: 0;
+        height: 100%;
+        text-decoration: none;
+    }
+    div:hover {
+        border-color: var(--dominantColor);
+        background-color: color-mix(in srgb, var(--dominantColor) 35%, transparent);
+        color: color-mix(in oklab, var(--dominantColor) 20%, white);
+        transform: translateY(-0.25rem);
+    }
+    div {
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        padding: 0.7em;
+        border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
+        border-radius: 0.7em;
+        color: color-mix(in oklab, var(--dominantColor) 30%, white);
+        background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
+        transition:
+            transform 0.2s,
+            border-color 0.2s,
+            background-color 0.2s,
+            color 0.2s;
+    }
+    h2 {
+        margin: 8px 0 0;
+        overflow-wrap: anywhere;
         font-size: 1.475em;
     }
     p {
-        margin-top: auto;
+        align-self: flex-end;
+        margin: auto 0 0;
         font-size: 0.9em;
         font-weight: 300;
-        align-self: flex-end;
-        justify-self: flex-end;
-        margin-bottom: 0;
     }
-    border-radius: 0.7em;
-    padding: 0.7em;
-    /*aspect-ratio: 20/8;*/
     img {
-        aspect-ratio : 1;
-        margin-bottom: 0px;
-        border-radius: 0.7em;
         width: 100%;
-        /*height: 100%;*/
+        aspect-ratio: 1;
+        border-radius: 0.7em;
+        object-fit: cover;
     }
-}
 </style>

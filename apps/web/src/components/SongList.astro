@@ -1,0 +1,348 @@
+---
+import type { Song } from '@yetracker/types';
+import { Icon } from 'astro-icon/components';
+import { apiUrl } from '../config';
+import { convertDuration } from '../utils/convertDuration';
+
+const songs = Astro.props.songs as (Song & {
+  url: string;
+  downloaded: number;
+  playable: boolean;
+  duration: number | null;
+})[];
+const eraId = Astro.props.eraId;
+const scopeName = (Astro.props.scopeName as string | undefined) ?? 'era';
+const apiBaseUrl = Astro.props.apiBaseUrl as string;
+const coverVersion = Astro.props.coverVersion as string | undefined;
+const shortDate = new Intl.DateTimeFormat('en-US', {
+  dateStyle: 'short',
+});
+---
+
+<section class="song-list" data-song-list>
+    <div class="song-search">
+        <label for={`song-search-${eraId}`}>Search songs on this page</label>
+        <div class="song-search__controls">
+            <input
+                id={`song-search-${eraId}`}
+                type="search"
+                placeholder={`Search songs in this ${scopeName}…`}
+                autocomplete="off"
+                data-song-search
+            />
+            <p class="song-count" aria-live="polite" data-song-count>
+                {songs.length} {songs.length === 1 ? "song" : "songs"}
+            </p>
+        </div>
+    </div>
+
+    <table>
+        <tr>
+            <th></th>
+            <th>Title</th>
+            <th>Notes</th>
+            <th>Quality</th>
+            <th>Available Length</th>
+            <th>File Date</th>
+            <th>Leak Date</th>
+        </tr>
+        {
+            songs.map((e) => (
+                <tr
+                    id={`song-${e.id}`}
+                    class="song-row"
+                    data-song-name={e.name}
+                >
+                    <td class="song-actions-cell">
+                        {e.playable ? (
+                            <div class="song-actions">
+                                <button
+                                    class="play-song"
+                                    type="button"
+                                    data-id={e.id}
+                                    data-title={e.name}
+                                    data-eraId={e.eraId ?? eraId}
+                                    data-track-length={e.duration ?? e.trackLength ?? 0}
+                                    data-cover-version={coverVersion}
+                                    aria-label={`Play ${e.name}`}
+                                    title="Play"
+                                >
+                                    <Icon name="play" />
+                                </button>
+                                <a
+                                    class="download-song"
+                                    href={apiUrl(apiBaseUrl, `/songs/${e.id}/download`)}
+                                    aria-label={`Download ${e.name}`}
+                                    title="Download original file"
+                                    download
+                                >
+                                    <Icon name="download" />
+                                </a>
+                            </div>
+                        ) : e.url ? (
+                            <a
+                                class="source-link"
+                                href={e.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={`Open source for ${e.name}`}
+                                title="Open source"
+                            >
+                                <Icon name="link" />
+                            </a>
+                        ) : null}
+                    </td>
+                    <th class="title">{e.name}</th>
+                    <td class="notes">{e.notes}</td>
+                    <td class="quality">{e.quality}</td>
+                    <td class="availableLength">
+                        {e.availableLength}
+                        {e.duration ? ` - ${convertDuration(e.duration)}` : ""}
+                    </td>
+                    <td class="fileDate">
+                        {e.fileDate === 0
+                            ? ""
+                            : shortDate.format(new Date(e.fileDate! * 1000))}
+                    </td>
+                    <td class="leakDate">
+                        {e.leakDate === 0
+                            ? ""
+                            : shortDate.format(new Date(e.leakDate! * 1000))}
+                    </td>
+                </tr>
+            ))
+        }
+    </table>
+    <p class="song-empty" data-song-empty hidden>
+        No songs match your search.
+    </p>
+</section>
+
+<script is:inline data-astro-rerun>
+    (() => {
+        document.querySelectorAll("[data-song-list]").forEach((songList) => {
+            if (songList.dataset.searchBound === "true") return;
+
+            const input = songList.querySelector("[data-song-search]");
+            const count = songList.querySelector("[data-song-count]");
+            const empty = songList.querySelector("[data-song-empty]");
+            const rows = [...songList.querySelectorAll(".song-row")];
+
+            if (!(input instanceof HTMLInputElement) || !count || !empty) return;
+
+            songList.dataset.searchBound = "true";
+
+            const updateResults = () => {
+                const normalize = (value) =>
+                    value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+                const query = normalize(input.value);
+                let visible = 0;
+
+                rows.forEach((row) => {
+                    const songName = normalize(row.dataset.songName ?? "");
+                    const matches = songName.includes(query);
+
+                    row.hidden = !matches;
+                    if (matches) visible += 1;
+                });
+
+                count.textContent = query
+                    ? `${visible} of ${rows.length} songs`
+                    : `${rows.length} ${rows.length === 1 ? "song" : "songs"}`;
+                empty.hidden = visible !== 0;
+            };
+
+            input.addEventListener("input", updateResults);
+            updateResults();
+        });
+    })();
+</script>
+
+<style>
+    .song-search {
+        margin-inline: 1vh;
+        margin-bottom: 0.8rem;
+    }
+    .song-search label {
+        display: block;
+        margin-bottom: 0.35rem;
+        color: color-mix(in srgb, var(--dominantColor) 30%, white);
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+    .song-search__controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    .song-search input {
+        box-sizing: border-box;
+        min-width: 0;
+        width: 100%;
+        padding: 0.7rem 0.85rem;
+        border: 2px solid
+            color-mix(in srgb, var(--dominantColor) 50%, transparent);
+        border-radius: 0.6rem;
+        outline: none;
+        background: color-mix(in srgb, var(--dominantColor) 12%, #111);
+        color: white;
+        font: inherit;
+        transition:
+            border-color 120ms ease,
+            box-shadow 120ms ease;
+    }
+    .song-search input::placeholder {
+        color: color-mix(in srgb, var(--dominantColor) 20%, #aaa);
+    }
+    .song-search input:focus-visible {
+        border-color: color-mix(
+            in srgb,
+            var(--dominantColor) 75%,
+            white
+        );
+        box-shadow: 0 0 0 3px
+            color-mix(in srgb, var(--dominantColor) 25%, transparent);
+    }
+    .song-count {
+        flex: none;
+        min-width: 7rem;
+        margin: 0;
+        color: color-mix(in srgb, var(--dominantColor) 25%, #ccc);
+        font-size: 0.85rem;
+        text-align: right;
+    }
+    .song-empty {
+        margin: 1rem 1vh 0.25rem;
+        color: color-mix(in srgb, var(--dominantColor) 25%, #ccc);
+        text-align: center;
+    }
+    .song-empty[hidden],
+    .song-row[hidden] {
+        display: none;
+    }
+    .song-row:target th,
+    .song-row:target td {
+        background-color: color-mix(
+            in srgb,
+            var(--dominantColor) 35%,
+            #242424
+        );
+    }
+    .song-list {
+        min-width: 0;
+        width: calc(100% + 2vh);
+        margin-inline: -1vh;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+    @media (max-width: 640px) {
+        .song-search__controls {
+            align-items: stretch;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .song-count {
+            min-width: 0;
+            text-align: left;
+        }
+    }
+    .song-actions-cell {
+        width: 4.5rem;
+    }
+    .song-actions {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.2rem;
+    }
+    .play-song,
+    .download-song,
+    .source-link {
+        color: color-mix(in oklab, var(--dominantColor) 10%, white);
+        cursor: pointer;
+        display: inline-grid;
+        place-items: center;
+        width: 2rem;
+        height: 2rem;
+        border-radius: 999px;
+        transition:
+            color 120ms ease,
+            background-color 120ms ease;
+        svg {
+            width: 1.25em;
+            height: 1.25em;
+        }
+        background-color: transparent;
+        border: 0;
+    }
+    .download-song,
+    .source-link {
+        text-decoration: none;
+    }
+    .play-song:hover,
+    .play-song:focus-visible,
+    .download-song:hover,
+    .download-song:focus-visible,
+    .source-link:hover,
+    .source-link:focus-visible {
+        color: white;
+        background-color: color-mix(
+            in srgb,
+            var(--dominantColor) 42%,
+            transparent
+        );
+        outline: none;
+    }
+    .leakDate,
+    .quality,
+    .availableLength,
+    .fileDate {
+        text-align: center;
+    }
+    th {
+        background-color: color-mix(
+            in srgb,
+            var(--dominantColor) 25%,
+            transparent
+        );
+    }
+    th,
+    td {
+        border: 2px solid
+            color-mix(in srgb, var(--dominantColor) 50%, transparent);
+    }
+    th {
+        padding: 0.5vh;
+    }
+    td {
+        padding: 0.75vh;
+    }
+    table {
+        width: 100%;
+        min-width: 56rem;
+        margin: 0;
+        border-collapse: collapse;
+        border-spacing: 0;
+    }
+    tr:first-child th,
+    tr:first-child td {
+        border-top: none;
+    }
+
+    tr:last-child th,
+    tr:last-child td {
+        border-bottom: none;
+    }
+
+    th:first-child,
+    td:first-child {
+        border-left: none;
+    }
+
+    th:last-child,
+    td:last-child {
+        border-right: none;
+    }
+</style>

@@ -1,39 +1,84 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadImage } from '@napi-rs/canvas';
 import { eq, isNull } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
-import { storagePath } from '../config.ts';
+import { songsPath, storagePath } from '../config.ts';
 import { erasTable, filesTable } from '../db/schema.ts';
 import { getDominantColor } from '../util/getDominantColor.ts';
+import { refreshSongPlayable, setSongPlayable } from '../util/playableFiles.ts';
 
-const run = promisify(exec);
+const run = promisify(execFile);
 export async function downloadCovers(db: ReturnType<typeof drizzle>) {
-  const eras = await db.select({ id: erasTable.id, imageUrl: erasTable.imageUrl }).from(erasTable);
+  const eras = await db.select().from(erasTable).where(eq(erasTable.isMain, 1));
   for (const era of eras) {
-    if (!era.imageUrl) return console.log('no image url for era id ', era.id);
-    const req = await fetch(era.imageUrl);
-    const data = await req.bytes();
-    const imageCanvas = await loadImage(data);
-    const dominantColor = await getDominantColor(imageCanvas);
-    const dominantColorHex = dominantColor.map((e) => e.toString(16).padStart(2, '0')).join('');
-    // const image = await sharp(data).resize(512, 512).avif({ effort: 8, quality: 70 }).toBuffer();\
-    const tempPath = join(storagePath, 'covers', `${era.id}.temp`);
-    await writeFile(tempPath, data);
-    await run(
-      `ffmpeg -i ${tempPath} -vf scale=512:512 -c:v libsvtav1 -crf 18 -preset 1 -still-picture 1 ${join(storagePath, 'covers', `${era.id}.avif`)}`,
-    );
-    await unlink(tempPath);
-    db.update(erasTable).set({ dominantColor: dominantColorHex }).where(eq(erasTable.id, era.id));
+    try {
+      if (!era.imageUrl) {
+        console.log('no image url for era id ', era.id);
+        continue;
+      }
+      const req = await fetch(era.imageUrl, { signal: AbortSignal.timeout(30_000) });
+      if (!req.ok) throw new Error(`Failed to download cover ${era.id}: HTTP ${req.status}`);
+      const contentLength = Number(req.headers.get('content-length') ?? 0);
+      if (contentLength > 20 * 1024 * 1024) {
+        throw new Error(`Cover ${era.id} exceeds the 20 MiB size limit`);
+      }
+      const data = await req.bytes();
+      if (data.byteLength > 20 * 1024 * 1024) {
+        throw new Error(`Cover ${era.id} exceeds the 20 MiB size limit`);
+      }
+      const tempPath = join(storagePath, 'covers', `${era.id}.source.tmp`);
+      const encodedPath = join(storagePath, 'covers', `${era.id}.tmp.avif`);
+      const coverPath = join(storagePath, 'covers', `${era.id}.avif`);
+
+      try {
+        await writeFile(tempPath, data);
+        await run('ffmpeg', [
+          '-y',
+          '-i',
+          tempPath,
+          '-vf',
+          'scale=512:512',
+          '-c:v',
+          'libsvtav1',
+          '-crf',
+          '18',
+          '-preset',
+          '3',
+          '-still-picture',
+          '1',
+          encodedPath,
+        ]);
+        await rename(encodedPath, coverPath);
+      } finally {
+        await unlink(tempPath).catch(() => undefined);
+        await unlink(encodedPath).catch(() => undefined);
+      }
+
+      let dominantColorHex = '666666';
+      try {
+        const imageCanvas = await loadImage(data);
+        const dominantColor = await getDominantColor(imageCanvas);
+        const extractedColor = dominantColor.map((e) => e.toString(16).padStart(2, '0')).join('');
+        if (/^[\da-f]{6}$/i.test(extractedColor)) dominantColorHex = extractedColor;
+      } catch (error) {
+        console.error(`dominant color extraction failed for era ${era.id} (${era.name})`, error);
+      }
+
+      // workaround for late registration
+      if (era.name === 'Late Registration') dominantColorHex = '5a240a';
+      await db.update(erasTable).set({ dominantColor: dominantColorHex }).where(eq(erasTable.id, era.id)).execute();
+    } catch (error) {
+      console.error(`cover processing failed for era ${era.id} (${era.name})`, error);
+    }
   }
 }
 
 export async function downloadSongs(db: ReturnType<typeof drizzle>) {
-  const songsPath = join(storagePath, 'songs');
   if (!existsSync(songsPath)) await mkdir(songsPath, { recursive: true });
 
   const dirContents = await readdir(songsPath);
@@ -52,6 +97,7 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
     if (hashToExtension.has(filename)) {
       filename = `${filename}.${hashToExtension.get(filename)}`;
       await db.update(filesTable).set({ downloaded: 1, filename }).where(eq(filesTable.url, file.url)).execute();
+      await refreshSongPlayable(filename);
       i++;
       continue;
     }
@@ -65,7 +111,8 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
           const hash = url.pathname.split('/').at(-1);
           const data = await fetch(`https://api.pillows.su/api/download/${hash}`);
           const buffer = await data.arrayBuffer();
-          const fileExtension = data.headers.get('content-disposition')?.split('.').at(-1)?.slice(0, -1);
+          const reportedExtension = data.headers.get('content-disposition')?.split('.').at(-1)?.slice(0, -1);
+          const fileExtension = reportedExtension?.toLowerCase().match(/^[a-z0-9]{1,8}$/)?.[0] ?? 'bin';
           filename = `${filename}.${fileExtension}`;
           await writeFile(join(songsPath, filename), Buffer.from(buffer));
           // console.log(`Downloaded ${path}`);
@@ -97,20 +144,24 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
           console.log('unknown host', domain);
           break;
       }
-    } catch (e) {
-      console.log(e, file.url);
+    } catch {
+      await db.update(filesTable).set({ downloaded: 0, filename }).where(eq(filesTable.url, file.url)).execute();
+      if (filename) setSongPlayable(filename, false);
+      filename = '';
     }
-    if (filename)
+    if (filename !== '') {
       await db.update(filesTable).set({ downloaded: 1, filename }).where(eq(filesTable.url, file.url)).execute();
+      await refreshSongPlayable(filename);
+    }
     i++;
   }
 }
 async function downloadYtdlp(url: URL, filename: string) {
-  const path = join(storagePath, 'songs');
-  console.log('test');
-  const outputPath = join(path, filename);
-  const timestamp = url?.toString()?.split('t=')[1] || undefined;
-  await run(
-    `yt-dlp -x --audio-quality 0 --audio-format opus -o ${outputPath} ${timestamp ? `--download-sections "*${timestamp}-inf"` : ''} ${url.toString()} && mv ${outputPath}.opus ${outputPath}.ogg`,
-  );
+  const outputPath = join(songsPath, filename);
+  const timestamp = url.searchParams.get('t');
+  const args = ['-x', '--audio-quality', '0', '--audio-format', 'opus', '-o', outputPath];
+  if (timestamp) args.push('--download-sections', `*${timestamp}-inf`);
+  args.push(url.toString());
+  await run('yt-dlp', args, { timeout: 30 * 60_000 });
+  await rename(`${outputPath}.opus`, `${outputPath}.ogg`);
 }

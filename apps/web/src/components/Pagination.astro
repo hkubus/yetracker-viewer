@@ -1,0 +1,147 @@
+---
+const {
+  currentPage,
+  pageCount,
+  totalItems,
+  pageSize,
+  basePath,
+  paginationId = 'song-pagination',
+} = Astro.props as {
+  currentPage: number;
+  pageCount: number;
+  totalItems: number;
+  pageSize: number;
+  basePath: string;
+  paginationId?: string;
+};
+
+const firstItem = totalItems === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+const lastItem = Math.min(currentPage * pageSize, totalItems);
+const visiblePages = Array.from(
+  new Set([1, pageCount, currentPage - 2, currentPage - 1, currentPage, currentPage + 1, currentPage + 2]),
+)
+  .filter((page) => page >= 1 && page <= pageCount)
+  .sort((left, right) => left - right);
+const href = (page: number) => (page === 1 ? basePath : `${basePath}?page=${page}`);
+---
+
+<nav id={paginationId} class="pagination" aria-label="Song pages">
+  <p class="pagination__summary">
+    Showing {firstItem.toLocaleString()}–{lastItem.toLocaleString()} of {totalItems.toLocaleString()} songs
+  </p>
+
+  {
+    pageCount > 1 && (
+      <div class="pagination__links">
+        <a
+          class:list={['pagination__direction', { disabled: currentPage === 1 }]}
+          href={href(Math.max(1, currentPage - 1))}
+          aria-disabled={currentPage === 1 ? 'true' : undefined}
+        >
+          Previous
+        </a>
+        <div class="pagination__pages" data-page-count={pageCount}>
+          {visiblePages.map((page, index) => (
+            <>
+              {index > 0 && page - visiblePages[index - 1] > 1 && <span aria-hidden="true">…</span>}
+              <a href={href(page)} aria-current={page === currentPage ? 'page' : undefined}>
+                {page}
+              </a>
+            </>
+          ))}
+        </div>
+        <a
+          class:list={['pagination__direction', { disabled: currentPage === pageCount }]}
+          href={href(Math.min(pageCount, currentPage + 1))}
+          aria-disabled={currentPage === pageCount ? 'true' : undefined}
+        >
+          Next
+        </a>
+      </div>
+    )
+  }
+</nav>
+
+<style>
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 1rem 0;
+    color: color-mix(in oklab, var(--dominantColor) 15%, white);
+  }
+
+  .pagination__summary {
+    margin: 0;
+    color: #b9b9b9;
+    font-size: 0.9rem;
+  }
+
+  .pagination__links,
+  .pagination__pages {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  a {
+    display: inline-flex;
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    padding: 0.45rem 0.65rem;
+    border: 2px solid color-mix(in srgb, var(--dominantColor) 55%, #555);
+    border-radius: 0.55rem;
+    color: inherit;
+    text-decoration: none;
+    transition:
+      border-color 120ms ease,
+      background-color 120ms ease;
+  }
+
+  a:hover,
+  a:focus-visible,
+  a[aria-current='page'] {
+    border-color: var(--dominantColor);
+    background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
+  }
+
+  a[aria-current='page'] {
+    font-weight: 700;
+  }
+
+  a.disabled {
+    pointer-events: none;
+    opacity: 0.4;
+  }
+
+  .pagination__direction {
+    min-width: 5.5rem;
+  }
+
+  @media (max-width: 700px) {
+    .pagination {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .pagination__links {
+      justify-content: space-between;
+    }
+
+    .pagination__pages a {
+      display: none;
+    }
+
+    .pagination__pages a[aria-current='page'] {
+      display: inline-flex;
+    }
+
+    .pagination__pages::after {
+      content: 'of ' attr(data-page-count);
+    }
+  }
+</style>

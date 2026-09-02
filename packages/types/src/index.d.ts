@@ -1,8 +1,19 @@
-export type Quality = 'Low Quality' | 'High Quality' | 'CD Quality' | 'Not Available' | 'Recording';
-export type AvailableLength = 'Full' | 'Snippet' | 'Confirmed' | 'Beat Only' | 'Partial' | 'Tagged' | 'OG File';
+export type Quality = 'Low Quality' | 'High Quality' | 'CD Quality' | 'Lossless' | 'Not Available' | 'Recording';
+export type AvailableLength =
+  | 'Full'
+  | 'Snippet'
+  | 'Confirmed'
+  | 'Beat Only'
+  | 'Partial'
+  | 'Tagged'
+  | 'OG File'
+  | 'Stem Bounce'
+  | 'Rumored'
+  | 'Conflicting Sources';
 export type Song = {
   id?: number;
   eraId?: number;
+  catalogId?: string;
   name?: string;
   notes?: string;
   trackLength?: number;
@@ -16,8 +27,8 @@ export type Era = {
   id: number;
   name: string;
   dominantColor: string;
+  coverVersion?: string;
   notes: string;
-  imageUrl: string;
   description: string;
   songsCount?: number;
 };

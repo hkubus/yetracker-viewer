@@ -1,0 +1,429 @@
+---
+const apiBaseUrl = Astro.props.apiBaseUrl as string;
+---
+
+<div
+    class="player"
+    hidden
+    transition:name="audio-player"
+    transition:persist
+    transition:animate="none"
+    data-api-base-url={apiBaseUrl}
+>
+    <audio id="audio" preload="metadata"></audio>
+    <div class="data">
+        <div class="info">
+            <img src="" alt="" />
+            <div class="metadata">
+                <p class="eyebrow">Now playing</p>
+                <p class="title"></p>
+            </div>
+        </div>
+        <div class="controls" aria-label="Playback controls">
+            <label class="quality-control">
+                <span>Quality</span>
+                <select id="quality" aria-label="Playback quality">
+                    <option value="">Original</option>
+                    <option value="64">64 kbps</option>
+                    <option value="128" selected>128 kbps</option>
+                    <option value="192">192 kbps</option>
+                    <option value="256">256 kbps</option>
+                    <option value="320">320 kbps</option>
+                </select>
+            </label>
+            <button id="play" type="button" aria-label="Play" title="Play">
+                <svg
+                    class="play-icon"
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                >
+                    <path d="M7 5.5v13L18.5 12z"></path>
+                </svg>
+                <svg
+                    class="pause-icon"
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                >
+                    <rect x="6.5" y="5.5" width="4" height="13" rx="1.1"></rect>
+                    <rect x="13.5" y="5.5" width="4" height="13" rx="1.1"></rect>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div class="progress">
+        <p id="timestamp">0:00</p>
+        <input type="range" id="progressBar" value="0" min="0" step="0.1" aria-label="Track progress" />
+        <p id="duration">0:00</p>
+    </div>
+</div>
+<script>
+    import { convertDuration } from "../utils/convertDuration";
+    type PlayerElement = HTMLElement & { dataset: DOMStringMap };
+
+    const mainElement = document.querySelector(".player") as PlayerElement;
+
+    if (!mainElement.dataset.playerBound) {
+        mainElement.dataset.playerBound = "true";
+
+        const player = mainElement.querySelector("#audio") as HTMLAudioElement;
+        const progressBar = mainElement.querySelector("#progressBar") as HTMLInputElement;
+        const durationEl = mainElement.querySelector("#duration") as HTMLParagraphElement;
+        const timestampEl = mainElement.querySelector("#timestamp") as HTMLParagraphElement;
+        const imgEl = mainElement.querySelector("img") as HTMLImageElement;
+        const title = mainElement.querySelector(".title") as HTMLElement;
+        const playButton = mainElement.querySelector("#play") as HTMLButtonElement;
+        const qualitySelect = mainElement.querySelector("#quality") as HTMLSelectElement;
+        const apiBaseUrl = mainElement.dataset.apiBaseUrl?.replace(/\/+$/, "") ?? "";
+        let catalogDuration = 0;
+        let currentSongId: number | null = null;
+        let streamRevision = 0;
+
+        function getStreamUrl(id: number) {
+            const baseUrl = `${apiBaseUrl}/songs/${id}/stream`;
+            return qualitySelect.value
+                ? `${baseUrl}?quality=${qualitySelect.value}`
+                : baseUrl;
+        }
+
+        function startPlayback() {
+            void player.play().catch(() => undefined);
+        }
+
+        function updateDuration() {
+            const duration = Number.isFinite(player.duration) ? player.duration : catalogDuration;
+            progressBar.max = String(duration || 0);
+            durationEl.innerText = duration > 0 ? convertDuration(duration) : "—";
+        }
+
+        function getCoverUrl(eraId: number, coverVersion: string) {
+            const version = coverVersion || `play-${Date.now()}`;
+            return `${apiBaseUrl}/eras/${eraId}/cover?v=${encodeURIComponent(version)}`;
+        }
+
+        function playSong({
+            id,
+            name,
+            eraId,
+            trackLength,
+            accentColor,
+            coverVersion,
+        }: {
+            id: number;
+            name: string;
+            eraId: number;
+            trackLength: number;
+            accentColor: string;
+            coverVersion: string;
+        }) {
+            currentSongId = id;
+            streamRevision += 1;
+            qualitySelect.disabled = false;
+            mainElement.hidden = false;
+            mainElement.style.setProperty("--dominantColor", accentColor);
+            imgEl.src = getCoverUrl(eraId, coverVersion);
+            title.textContent = name;
+            catalogDuration = trackLength;
+            progressBar.value = "0";
+            timestampEl.innerText = "0:00";
+            updateDuration();
+            player.src = getStreamUrl(id);
+            player.load();
+            startPlayback();
+
+            if (!(trackLength > 0)) {
+                void fetch(`${apiBaseUrl}/songs/${id}/duration`)
+                    .then((response) => (response.ok ? response.json() : null))
+                    .then((data: { duration?: number } | null) => {
+                        if (player.src.includes(`/songs/${id}/`) && data?.duration) {
+                            catalogDuration = data.duration;
+                            updateDuration();
+                        }
+                    })
+                    .catch(() => undefined);
+            }
+        }
+
+        qualitySelect.addEventListener("change", () => {
+            if (currentSongId === null) return;
+
+            const revision = ++streamRevision;
+            const resumeAt = player.currentTime;
+            const shouldResume = !player.paused;
+            qualitySelect.disabled = true;
+
+            const restorePlayback = () => {
+                if (revision !== streamRevision) return;
+
+                player.removeEventListener("error", handleStreamError);
+                qualitySelect.disabled = false;
+                if (Number.isFinite(resumeAt) && resumeAt > 0) {
+                    try {
+                        player.currentTime = resumeAt;
+                    } catch {
+                        // Some streamed formats only become seekable after buffering.
+                    }
+                }
+                if (shouldResume) startPlayback();
+            };
+
+            const handleStreamError = () => {
+                player.removeEventListener("loadedmetadata", restorePlayback);
+                if (revision === streamRevision) qualitySelect.disabled = false;
+            };
+
+            player.addEventListener("loadedmetadata", restorePlayback, { once: true });
+            player.addEventListener("error", handleStreamError, { once: true });
+            player.src = getStreamUrl(currentSongId);
+            player.load();
+        });
+
+        function setPlayButton(isPlaying: boolean) {
+            playButton.dataset.playing = String(isPlaying);
+            playButton.ariaLabel = isPlaying ? "Pause" : "Play";
+            playButton.title = playButton.ariaLabel;
+        }
+
+        playButton.onclick = () => {
+            if (player.paused) startPlayback();
+            else player.pause();
+        };
+
+        document.addEventListener("keydown", (event) => {
+            if (
+                !["Space", "ArrowLeft", "ArrowRight"].includes(event.code) ||
+                (event.code === "Space" && event.repeat) ||
+                !player.currentSrc
+            ) {
+                return;
+            }
+
+            const target = event.target;
+            if (
+                target instanceof HTMLElement &&
+                (target.isContentEditable ||
+                    target.closest("input, textarea, select, #play, [role='textbox']"))
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            if (event.code === "Space") {
+                if (player.paused) startPlayback();
+                else player.pause();
+                return;
+            }
+
+            const progressDuration = Number(progressBar.max);
+            const duration =
+                progressDuration > 0
+                    ? progressDuration
+                    : Number.isFinite(player.duration)
+                      ? player.duration
+                      : Number.POSITIVE_INFINITY;
+            const offset = event.code === "ArrowRight" ? 5 : -5;
+            player.currentTime = Math.min(duration, Math.max(0, player.currentTime + offset));
+        });
+
+        document.addEventListener("click", (event) => {
+            if (!(event.target instanceof Element)) return;
+            const button = event.target.closest<HTMLButtonElement>(".play-song");
+            if (!button) return;
+
+            const { id, title: name, eraid, trackLength, coverVersion } = button.dataset;
+            if (!id || !name || !eraid) return;
+
+            playSong({
+                id: Number(id),
+                name,
+                eraId: Number(eraid),
+                trackLength: Number(trackLength),
+                accentColor: window.getComputedStyle(button).getPropertyValue("--dominantColor"),
+                coverVersion: coverVersion || window.getComputedStyle(button).getPropertyValue("--dominantColor"),
+            });
+        });
+
+        player.addEventListener("play", () => setPlayButton(true));
+        player.addEventListener("pause", () => setPlayButton(false));
+        player.addEventListener("loadedmetadata", () => {
+            updateDuration();
+        });
+        player.addEventListener("timeupdate", () => {
+            progressBar.value = String(player.currentTime);
+            timestampEl.innerText = convertDuration(player.currentTime);
+        });
+        progressBar.addEventListener("input", () => {
+            player.currentTime = Number(progressBar.value);
+        });
+    }
+</script>
+<style>
+    .player[hidden] {
+        display: none;
+    }
+    .player {
+        --player-text: color-mix(in oklab, var(--dominantColor) 16%, white);
+        position: fixed;
+        z-index: 10;
+        left: 50%;
+        bottom: max(0.75rem, env(safe-area-inset-bottom));
+        box-sizing: border-box;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.75rem;
+        width: min(52rem, calc(100vw - 2rem));
+        padding: 0.75rem 1rem;
+        transform: translateX(-50%);
+        border: 1px solid color-mix(in srgb, var(--dominantColor) 60%, transparent);
+        border-radius: 1rem;
+        backdrop-filter: blur(16px);
+        box-shadow: 0 1rem 3rem rgb(0 0 0 / 35%);
+        color: var(--player-text);
+        background: color-mix(in oklab, var(--dominantColor) 40%, var(--bg-color) 60%);
+    }
+    .data {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+    .info {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 0.75rem;
+        img {
+            width: 3rem;
+            height: 3rem;
+            flex: 0 0 auto;
+            object-fit: cover;
+            border-radius: 0.65rem;
+            background: rgb(0 0 0 / 20%);
+        }
+    }
+    .metadata {
+        min-width: 0;
+    }
+    .eyebrow,
+    .title,
+    .progress p {
+        margin: 0;
+    }
+    .eyebrow {
+        margin-bottom: 0.15rem;
+        color: color-mix(in oklab, var(--player-text) 65%, transparent);
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+    .title {
+        overflow: hidden;
+        color: var(--player-text);
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .controls {
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .quality-control {
+        display: grid;
+        gap: 0.2rem;
+        color: color-mix(in oklab, var(--player-text) 68%, transparent);
+        font-size: 0.58rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        line-height: 1;
+        text-transform: uppercase;
+    }
+    .quality-control select {
+        min-width: 5.75rem;
+        border: 1px solid color-mix(in srgb, var(--player-text) 20%, transparent);
+        border-radius: 0.6rem;
+        padding: 0.42rem 0.55rem;
+        color: var(--player-text);
+        background: color-mix(in srgb, var(--player-text) 8%, transparent);
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: none;
+    }
+    .quality-control select:hover,
+    .quality-control select:focus-visible {
+        border-color: color-mix(in srgb, var(--player-text) 65%, transparent);
+        outline: none;
+    }
+    .quality-control select:disabled {
+        cursor: wait;
+        opacity: 0.65;
+    }
+    .controls button {
+        display: grid;
+        width: 2.75rem;
+        height: 2.75rem;
+        padding: 0;
+        place-items: center;
+        border: 0;
+        border-radius: 999px;
+        color: var(--bg-color);
+        background: var(--player-text);
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: transform 150ms ease, background-color 150ms ease;
+    }
+    .controls button:hover {
+        transform: scale(1.06);
+    }
+    .controls button:focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--player-text) 80%, transparent);
+        outline-offset: 3px;
+    }
+    .controls button svg {
+        width: 1.5rem;
+        height: 1.5rem;
+        fill: currentColor;
+    }
+    .controls button .play-icon {
+        transform: translateX(0.1rem);
+    }
+    .controls button .pause-icon,
+    .controls button[data-playing="true"] .play-icon {
+        display: none;
+    }
+    .controls button[data-playing="true"] .pause-icon {
+        display: block;
+    }
+    .progress {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        color: color-mix(in oklab, var(--player-text) 75%, transparent);
+        font-size: 0.75rem;
+    }
+    #progressBar {
+        min-width: 0;
+        width: 100%;
+        height: 0.35rem;
+        accent-color: var(--player-text);
+        cursor: pointer;
+    }
+    @media (max-width: 32rem) {
+        .player {
+            bottom: 0;
+            width: 100%;
+            border-right: 0;
+            border-bottom: 0;
+            border-left: 0;
+            border-radius: 1rem 1rem 0 0;
+        }
+        .progress {
+            font-size: 0.7rem;
+        }
+    }
+</style>

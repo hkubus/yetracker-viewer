@@ -1,0 +1,905 @@
+---
+import type { Era } from '@yetracker/types';
+
+const songsCount = Astro.props.songsCount as number;
+const eras = Astro.props.eras as Era[];
+const apiBaseUrl = Astro.props.apiBaseUrl as string;
+const eraPageSize = Astro.props.eraPageSize as number;
+const eraRange = eras.map(({ id, name, dominantColor }) => ({
+  id,
+  name,
+  dominantColor,
+}));
+---
+
+<section
+    class="global-search"
+    data-global-song-search
+    data-api-base-url={apiBaseUrl}
+    data-era-page-size={eraPageSize}
+    data-eras={JSON.stringify(eraRange)}
+>
+    <div class="global-search__header">
+        <div>
+            <label for="global-song-search">Find a track</label>
+        </div>
+        <p class="global-search__count" aria-live="polite" data-global-search-count>
+            {songsCount} songs
+        </p>
+    </div>
+
+    <div class="global-search__field">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="6.5"></circle>
+            <path d="m16 16 4 4"></path>
+        </svg>
+        <input
+            id="global-song-search"
+            type="search"
+            placeholder="Search songs, artists, notes…"
+            autocomplete="off"
+            data-global-search-input
+        />
+    </div>
+
+    <div class="global-search__filters" aria-label="Search filters">
+        <div class="global-search__timeline">
+            <div class="global-search__timeline-heading">
+                <span>Era range</span>
+                <output data-era-range-status>All eras</output>
+            </div>
+            <div class="global-search__range" data-era-range>
+                <div class="global-search__range-track" aria-hidden="true">
+                    <span></span>
+                </div>
+                <input
+                    type="range"
+                    min="0"
+                    max={Math.max(eras.length - 1, 0)}
+                    value="0"
+                    aria-label="Earliest era"
+                    data-era-range-start
+                />
+                <input
+                    type="range"
+                    min="0"
+                    max={Math.max(eras.length - 1, 0)}
+                    value={Math.max(eras.length - 1, 0)}
+                    aria-label="Latest era"
+                    data-era-range-end
+                />
+            </div>
+            <div class="global-search__range-names">
+                <span data-era-start-name>{eras.at(0)?.name}</span>
+                <span data-era-end-name>{eras.at(-1)?.name}</span>
+            </div>
+        </div>
+
+        <label class="global-search__playable">
+            <input type="checkbox" data-playable-filter />
+            <span class="global-search__checkmark">
+                <svg aria-hidden="true" viewBox="0 0 16 16">
+                    <path d="m3.5 8 3 3 6-6"></path>
+                </svg>
+            </span>
+            <strong>Playable only</strong>
+        </label>
+        <button
+            type="button"
+            class="global-search__clear"
+            data-search-clear
+            disabled
+            aria-label="Clear filters"
+            title="Clear filters"
+        >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="m7 7 10 10M17 7 7 17"></path>
+            </svg>
+            <span>Clear</span>
+        </button>
+    </div>
+
+    <div class="global-search__results" data-global-search-results hidden>
+        <ul data-global-search-list></ul>
+        <p class="global-search__empty" data-global-search-empty hidden>
+            No songs match your search.
+        </p>
+    </div>
+</section>
+
+<script is:inline data-astro-rerun>
+    (() => {
+        const MAX_RESULTS = 50;
+        const DESCRIPTION_LIMIT = 120;
+        const TOTAL_SONGS = Number(
+            document
+                .querySelector("[data-global-song-search]")
+                ?.querySelector("[data-global-search-count]")
+                ?.textContent?.match(/\d+/)?.[0] ?? 0,
+        );
+
+        document
+            .querySelectorAll("[data-global-song-search]")
+            .forEach((searchRoot) => {
+                if (searchRoot.dataset.searchBound === "true") return;
+
+                const input = searchRoot.querySelector(
+                    "[data-global-search-input]",
+                );
+                const count = searchRoot.querySelector(
+                    "[data-global-search-count]",
+                );
+                const resultsPanel = searchRoot.querySelector(
+                    "[data-global-search-results]",
+                );
+                const empty = searchRoot.querySelector(
+                    "[data-global-search-empty]",
+                );
+                const list = searchRoot.querySelector(
+                    "[data-global-search-list]",
+                );
+                const eraStart = searchRoot.querySelector(
+                    "[data-era-range-start]",
+                );
+                const eraEnd = searchRoot.querySelector(
+                    "[data-era-range-end]",
+                );
+                const eraRange = searchRoot.querySelector("[data-era-range]");
+                const eraStartName = searchRoot.querySelector(
+                    "[data-era-start-name]",
+                );
+                const eraEndName = searchRoot.querySelector(
+                    "[data-era-end-name]",
+                );
+                const eraRangeNames = searchRoot.querySelector(
+                    ".global-search__range-names",
+                );
+                const eraRangeStatus = searchRoot.querySelector(
+                    "[data-era-range-status]",
+                );
+                const playableOnly = searchRoot.querySelector(
+                    "[data-playable-filter]",
+                );
+                const clearFilters = searchRoot.querySelector(
+                    "[data-search-clear]",
+                );
+
+                if (
+                    !(input instanceof HTMLInputElement) ||
+                    !count ||
+                    !resultsPanel ||
+                    !empty ||
+                    !list ||
+                    !(eraStart instanceof HTMLInputElement) ||
+                    !(eraEnd instanceof HTMLInputElement) ||
+                    !(eraRange instanceof HTMLElement) ||
+                    !eraStartName ||
+                    !eraEndName ||
+                    !(eraRangeNames instanceof HTMLElement) ||
+                    !eraRangeStatus ||
+                    !(playableOnly instanceof HTMLInputElement) ||
+                    !(clearFilters instanceof HTMLButtonElement)
+                ) {
+                    return;
+                }
+
+                searchRoot.dataset.searchBound = "true";
+                const apiBaseUrl = searchRoot.dataset.apiBaseUrl?.replace(/\/+$/, "") ?? "";
+                const eraPageSize = Number(searchRoot.dataset.eraPageSize) || 100;
+                const eraData = JSON.parse(searchRoot.dataset.eras ?? "[]");
+                const lastEraIndex = Math.max(eraData.length - 1, 0);
+                const normalize = (value) =>
+                    value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+                const truncateDescription = (value) => {
+                    const description = value.trim().replace(/\s+/g, " ");
+                    if (description.length <= DESCRIPTION_LIMIT) {
+                        return description;
+                    }
+                    return `${description
+                        .slice(0, DESCRIPTION_LIMIT - 1)
+                        .trimEnd()}…`;
+                };
+                let debounceTimer;
+                let activeRequest;
+
+                const updateTimeline = () => {
+                    const startIndex = Number(eraStart.value);
+                    const endIndex = Number(eraEnd.value);
+                    const divisor = Math.max(lastEraIndex, 1);
+                    const startPercent = (startIndex / divisor) * 100;
+                    const endPercent = (endIndex / divisor) * 100;
+                    eraRange.style.setProperty(
+                        "--range-start",
+                        `${startPercent}%`,
+                    );
+                    eraRange.style.setProperty(
+                        "--range-end",
+                        `${endPercent}%`,
+                    );
+                    eraRange.style.setProperty(
+                        "--range-start-color",
+                        `#${String(eraData[startIndex]?.dominantColor ?? "d8d8d8").replace(/^#/, "")}`,
+                    );
+                    eraRange.style.setProperty(
+                        "--range-end-color",
+                        `#${String(eraData[endIndex]?.dominantColor ?? "d8d8d8").replace(/^#/, "")}`,
+                    );
+                    eraStartName.textContent =
+                        eraData[startIndex]?.name ?? "First era";
+                    eraEndName.textContent =
+                        eraData[endIndex]?.name ?? "Last era";
+                    const positionLabel = (label, percent) => {
+                        label.style.left = `${percent}%`;
+                        label.dataset.align =
+                            percent === 0
+                                ? "start"
+                                : percent === 100
+                                  ? "end"
+                                  : "center";
+                    };
+                    positionLabel(eraStartName, startPercent);
+                    positionLabel(eraEndName, endPercent);
+                    eraRangeNames.removeAttribute("data-close");
+                    const labelContainerBounds =
+                        eraRangeNames.getBoundingClientRect();
+                    const constrainLabel = (label) => {
+                        const bounds = label.getBoundingClientRect();
+                        if (bounds.left < labelContainerBounds.left) {
+                            label.dataset.align = "start";
+                        } else if (
+                            bounds.right > labelContainerBounds.right
+                        ) {
+                            label.dataset.align = "end";
+                        }
+                    };
+                    constrainLabel(eraStartName);
+                    constrainLabel(eraEndName);
+                    const startLabelBounds =
+                        eraStartName.getBoundingClientRect();
+                    const endLabelBounds = eraEndName.getBoundingClientRect();
+                    eraRangeNames.toggleAttribute(
+                        "data-close",
+                        startLabelBounds.right + 12 >
+                            endLabelBounds.left,
+                    );
+                    eraStart.setAttribute(
+                        "aria-valuetext",
+                        eraData[startIndex]?.name ?? "First era",
+                    );
+                    eraEnd.setAttribute(
+                        "aria-valuetext",
+                        eraData[endIndex]?.name ?? "Last era",
+                    );
+                    eraRange.toggleAttribute(
+                        "data-collapsed",
+                        startIndex === endIndex,
+                    );
+                    eraRangeStatus.textContent =
+                        startIndex === 0 && endIndex === lastEraIndex
+                            ? "All eras"
+                            : startIndex === endIndex
+                              ? "1 era"
+                              : `${endIndex - startIndex + 1} eras`;
+                };
+
+                const searchState = () => {
+                    const query = normalize(input.value);
+                    const startIndex = Number(eraStart.value);
+                    const endIndex = Number(eraEnd.value);
+                    const params = new URLSearchParams({
+                        limit: String(MAX_RESULTS),
+                    });
+                    if (query) params.set("q", query);
+                    if (startIndex > 0) {
+                        params.set("eraFrom", String(eraData[startIndex].id));
+                    }
+                    if (endIndex < lastEraIndex) {
+                        params.set("eraTo", String(eraData[endIndex].id));
+                    }
+                    if (playableOnly.checked) params.set("playable", "true");
+                    return {
+                        query,
+                        hasFilters:
+                            startIndex > 0 ||
+                            endIndex < lastEraIndex ||
+                            playableOnly.checked,
+                        params,
+                    };
+                };
+
+                const renderResults = (songs, total) => {
+                    list.replaceChildren();
+
+                    songs.forEach((song) => {
+                        const item = document.createElement("li");
+                        item.dataset.globalSearchResult = "";
+                        item.style.setProperty(
+                            "--result-color",
+                            `#${String(song.dominantColor ?? "666666").replace(/^#/, "")}`,
+                        );
+
+                        const link = document.createElement("a");
+                        const page = Math.ceil(Number(song.eraPosition ?? 1) / eraPageSize);
+                        link.href =
+                            page > 1
+                                ? `/eras/${song.eraId}?page=${page}#song-${song.id}`
+                                : `/eras/${song.eraId}#song-${song.id}`;
+
+                        const title = document.createElement("span");
+                        title.className = "global-search__song";
+                        title.textContent = song.name ?? "Untitled";
+
+                        const era = document.createElement("span");
+                        era.className = "global-search__era";
+                        era.textContent = song.eraName ?? "Unknown era";
+
+                        link.append(title, era);
+
+                        if (song.notes) {
+                            const notes = document.createElement("span");
+                            notes.className = "global-search__notes";
+                            notes.textContent = truncateDescription(song.notes);
+                            notes.title = song.notes.trim().replace(/\s+/g, " ");
+                            link.append(notes);
+                        }
+
+                        item.append(link);
+                        list.append(item);
+                    });
+
+                    empty.textContent = "No songs match your search.";
+                    empty.hidden = total !== 0;
+                    count.textContent =
+                        total > MAX_RESULTS
+                            ? `${songs.length} of ${total} matches`
+                            : `${total} ${total === 1 ? "match" : "matches"}`;
+                };
+
+                const updateResults = () => {
+                    updateTimeline();
+                    const state = searchState();
+                    clearFilters.disabled = !state.hasFilters;
+                    if (!state.query) {
+                        clearTimeout(debounceTimer);
+                        activeRequest?.abort();
+                        list.replaceChildren();
+                        resultsPanel.hidden = true;
+                        empty.hidden = true;
+                        count.textContent = `${TOTAL_SONGS} songs`;
+                        return;
+                    }
+
+                    resultsPanel.hidden = false;
+                    empty.hidden = true;
+                    count.textContent = "Searching…";
+                    clearTimeout(debounceTimer);
+
+                    debounceTimer = setTimeout(async () => {
+                        activeRequest?.abort();
+                        activeRequest = new AbortController();
+                        const requestState = state.params.toString();
+
+                        try {
+                            const response = await fetch(
+                                `${apiBaseUrl}/songs?${requestState}`,
+                                { signal: activeRequest.signal },
+                            );
+                            if (!response.ok) throw new Error("Search failed");
+
+                            const data = await response.json();
+                            if (
+                                searchState().params.toString() !== requestState
+                            ) {
+                                return;
+                            }
+                            renderResults(data.songs, data.total);
+                        } catch (error) {
+                            if (error.name === "AbortError") return;
+                            list.replaceChildren();
+                            empty.textContent =
+                                "Search is temporarily unavailable.";
+                            empty.hidden = false;
+                            count.textContent = "Search failed";
+                        }
+                    }, 150);
+                };
+
+                input.addEventListener("input", updateResults);
+                eraStart.addEventListener("input", () => {
+                    if (Number(eraStart.value) > Number(eraEnd.value)) {
+                        eraEnd.value = eraStart.value;
+                    }
+                    updateResults();
+                });
+                eraEnd.addEventListener("input", () => {
+                    if (Number(eraEnd.value) < Number(eraStart.value)) {
+                        eraStart.value = eraEnd.value;
+                    }
+                    updateResults();
+                });
+                playableOnly.addEventListener("change", updateResults);
+                clearFilters.addEventListener("click", () => {
+                    eraStart.value = "0";
+                    eraEnd.value = String(lastEraIndex);
+                    playableOnly.checked = false;
+                    updateResults();
+                });
+                updateResults();
+            });
+    })();
+</script>
+
+<style>
+    @property --range-start-color {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #cfcfcf;
+    }
+    @property --range-end-color {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #cfcfcf;
+    }
+    .global-search {
+        --search-accent: #d7d7d7;
+        --search-border: #414141;
+        margin: clamp(0.75rem, 1.5vw, 1.5rem);
+        margin-bottom: 0;
+        padding: clamp(1rem, 1.6vw, 1.35rem);
+        border: 1px solid var(--search-border);
+        border-radius: 1rem;
+        box-shadow:
+            0 1px 0 rgb(255 255 255 / 4%) inset,
+            0 14px 35px rgb(0 0 0 / 16%);
+        background: #202020;
+        color: #f3f3f3;
+    }
+    .global-search__header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.8rem;
+    }
+    .global-search__header label {
+        color: #f3f3f3;
+        font-size: clamp(1.1rem, 1.7vw, 1.35rem);
+        font-weight: 700;
+        letter-spacing: -0.025em;
+    }
+    .global-search__field {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+        min-height: 3.2rem;
+        box-sizing: border-box;
+        padding: 0 0.95rem;
+        border: 1px solid #515151;
+        border-radius: 0.75rem;
+        background: #161616;
+        transition:
+            border-color 140ms ease,
+            box-shadow 140ms ease,
+            background-color 140ms ease;
+    }
+    .global-search__field:focus-within {
+        border-color: color-mix(
+            in srgb,
+            var(--search-accent) 75%,
+            #777
+        );
+        box-shadow: 0 0 0 3px rgb(255 255 255 / 9%);
+        background: #181818;
+    }
+    .global-search__field svg {
+        flex: none;
+        width: 1.15rem;
+        color: #8b8b8b;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-width: 1.8;
+    }
+    .global-search__field:focus-within svg {
+        color: var(--search-accent);
+    }
+    .global-search__field input {
+        box-sizing: border-box;
+        min-width: 0;
+        width: 100%;
+        padding: 0.78rem 0;
+        border: 0;
+        outline: none;
+        background: transparent;
+        color: white;
+        font: inherit;
+    }
+    .global-search__field input::placeholder {
+        color: #777;
+    }
+    .global-search__count {
+        flex: none;
+        margin: 0 0 0.16rem;
+        color: #929292;
+        font-size: 0.78rem;
+        text-align: right;
+    }
+    .global-search__filters {
+        display: grid;
+        grid-template-columns: minmax(15rem, 1fr) auto auto;
+        align-items: center;
+        gap: 0.8rem;
+        margin-top: 0.65rem;
+        padding: 0.8rem 0.85rem;
+        border: 1px solid #3e3e3e;
+        border-radius: 0.75rem;
+        background: #181818;
+    }
+    .global-search__timeline {
+        min-width: 0;
+    }
+    .global-search__timeline-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.15rem;
+    }
+    .global-search__timeline-heading > span {
+        color: #9a9a9a;
+        font-size: 0.64rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+    }
+    .global-search__timeline-heading output {
+        color: #b8b8b8;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
+    .global-search__range {
+        --range-start: 0%;
+        --range-end: 100%;
+        position: relative;
+        height: 1.45rem;
+        margin-inline: 0.45rem;
+        transition:
+            --range-start-color 180ms ease-out,
+            --range-end-color 180ms ease-out;
+    }
+    .global-search__range-track {
+        position: absolute;
+        top: calc(50% - 2px);
+        right: 0;
+        left: 0;
+        height: 4px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #3f3f3f;
+    }
+    .global-search__range-track span {
+        position: absolute;
+        top: 0;
+        right: calc(100% - var(--range-end));
+        bottom: 0;
+        left: var(--range-start);
+        background: linear-gradient(
+            90deg,
+            var(--range-start-color, #cfcfcf),
+            var(--range-end-color, #cfcfcf)
+        );
+        background: linear-gradient(
+            90deg in oklab,
+            var(--range-start-color, #cfcfcf),
+            var(--range-end-color, #cfcfcf)
+        );
+    }
+    .global-search__range input {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 1.45rem;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        outline: none;
+        appearance: none;
+        pointer-events: none;
+        background: transparent;
+    }
+    .global-search__range input::-webkit-slider-runnable-track {
+        height: 4px;
+        background: transparent;
+    }
+    .global-search__range input::-webkit-slider-thumb {
+        width: 1rem;
+        height: 1rem;
+        margin-top: -6px;
+        border: 3px solid #202020;
+        border-radius: 50%;
+        appearance: none;
+        box-shadow: 0 0 0 1px #d8d8d8;
+        background: #f1f1f1;
+        cursor: grab;
+        pointer-events: auto;
+    }
+    .global-search__range
+        input:first-of-type::-webkit-slider-thumb {
+        background: var(--range-start-color, #f1f1f1);
+    }
+    .global-search__range
+        input:last-of-type::-webkit-slider-thumb {
+        background: var(--range-end-color, #f1f1f1);
+    }
+    .global-search__range input::-moz-range-track {
+        height: 4px;
+        background: transparent;
+    }
+    .global-search__range input::-moz-range-thumb {
+        width: 0.65rem;
+        height: 0.65rem;
+        border: 3px solid #202020;
+        border-radius: 50%;
+        box-shadow: 0 0 0 1px #d8d8d8;
+        background: #f1f1f1;
+        cursor: grab;
+        pointer-events: auto;
+    }
+    .global-search__range input:first-of-type::-moz-range-thumb {
+        background: var(--range-start-color, #f1f1f1);
+    }
+    .global-search__range input:last-of-type::-moz-range-thumb {
+        background: var(--range-end-color, #f1f1f1);
+    }
+    .global-search__range input:focus-visible::-webkit-slider-thumb {
+        box-shadow:
+            0 0 0 1px white,
+            0 0 0 4px rgb(255 255 255 / 16%);
+    }
+    .global-search__range input:focus-visible::-moz-range-thumb {
+        box-shadow:
+            0 0 0 1px white,
+            0 0 0 4px rgb(255 255 255 / 16%);
+    }
+    .global-search__range[data-collapsed]
+        input:first-of-type::-webkit-slider-thumb {
+        transform: translateX(-4px);
+    }
+    .global-search__range[data-collapsed]
+        input:last-of-type::-webkit-slider-thumb {
+        transform: translateX(4px);
+    }
+    .global-search__range[data-collapsed]
+        input:first-of-type::-moz-range-thumb {
+        transform: translateX(-4px);
+    }
+    .global-search__range[data-collapsed]
+        input:last-of-type::-moz-range-thumb {
+        transform: translateX(4px);
+    }
+    .global-search__range-names {
+        position: relative;
+        height: 1rem;
+        margin-inline: 0.45rem;
+        color: #d5d5d5;
+        font-size: 0.7rem;
+        font-weight: 600;
+        transition: height 140ms ease;
+    }
+    .global-search__range-names span {
+        position: absolute;
+        top: 0;
+        max-width: min(45%, 15rem);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: top 140ms ease;
+        white-space: nowrap;
+    }
+    .global-search__range-names span[data-align="start"] {
+        transform: translateX(0);
+    }
+    .global-search__range-names span[data-align="center"] {
+        transform: translateX(-50%);
+        text-align: center;
+    }
+    .global-search__range-names span[data-align="end"] {
+        transform: translateX(-100%);
+        text-align: right;
+    }
+    .global-search__range-names[data-close] {
+        height: 2rem;
+    }
+    .global-search__range-names[data-close] span:last-child {
+        top: 1rem;
+    }
+    .global-search__playable {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        min-width: 10.5rem;
+        padding: 0.55rem 0.65rem;
+        border: 1px solid #424242;
+        border-radius: 0.65rem;
+        color: #d7d7d7;
+        cursor: pointer;
+        background: #202020;
+    }
+    .global-search__playable:hover {
+        border-color: #5a5a5a;
+    }
+    .global-search__playable > input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+    }
+    .global-search__checkmark {
+        display: grid;
+        flex: none;
+        width: 1.1rem;
+        height: 1.1rem;
+        place-items: center;
+        border: 1px solid #6a6a6a;
+        border-radius: 0.3rem;
+        background: #151515;
+    }
+    .global-search__checkmark svg {
+        width: 0.75rem;
+        fill: none;
+        stroke: #181818;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 2.2;
+        opacity: 0;
+    }
+    .global-search__playable > input:checked + .global-search__checkmark {
+        border-color: #e2e2e2;
+        background: #e2e2e2;
+    }
+    .global-search__playable
+        > input:checked
+        + .global-search__checkmark
+        svg {
+        opacity: 1;
+    }
+    .global-search__playable
+        > input:focus-visible
+        + .global-search__checkmark {
+        outline: 3px solid rgb(255 255 255 / 14%);
+    }
+    .global-search__playable strong {
+        font-size: 0.75rem;
+        line-height: 1.15;
+    }
+    .global-search__clear {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.3rem;
+        min-height: 2.3rem;
+        padding: 0 0.55rem;
+        border: 1px solid transparent;
+        border-radius: 0.6rem;
+        background: transparent;
+        color: #909090;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+    .global-search__clear svg {
+        width: 0.9rem;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-width: 1.8;
+    }
+    .global-search__clear:focus-visible {
+        border-color: #777;
+        outline: none;
+    }
+    .global-search__clear:hover:not(:disabled) {
+        color: #eee;
+        background: #2b2b2b;
+    }
+    .global-search__clear:disabled {
+        cursor: default;
+        opacity: 0.3;
+    }
+    .global-search__results {
+        margin-top: 0.85rem;
+        border-top: 1px solid #444;
+        padding-top: 0.85rem;
+    }
+    .global-search__results[hidden],
+    .global-search__empty[hidden] {
+        display: none;
+    }
+    [data-global-search-list] {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+        gap: 0.5rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    [data-global-search-list] :global(a) {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.2rem 0.75rem;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 0.7rem 0.8rem;
+        border: 1px solid
+            color-mix(in srgb, var(--result-color) 65%, #444);
+        border-radius: 0.55rem;
+        box-shadow: inset 3px 0 0
+            color-mix(in srgb, var(--result-color) 85%, white);
+        color: white;
+        background: color-mix(in srgb, var(--result-color) 22%, #292929);
+        text-decoration: none;
+        transition:
+            border-color 120ms ease,
+            background-color 120ms ease;
+    }
+    [data-global-search-list] :global(a:hover),
+    [data-global-search-list] :global(a:focus-visible) {
+        border-color: color-mix(
+            in srgb,
+            var(--result-color) 85%,
+            white
+        );
+        outline: none;
+        background: color-mix(in srgb, var(--result-color) 32%, #333);
+    }
+    [data-global-search-list] :global(.global-search__song) {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        font-weight: 700;
+    }
+    [data-global-search-list] :global(.global-search__era) {
+        color: color-mix(in oklab, var(--result-color) 35%, white);
+        font-size: 0.8rem;
+        text-align: right;
+    }
+    [data-global-search-list] :global(.global-search__notes) {
+        display: -webkit-box;
+        grid-column: 1 / -1;
+        overflow: hidden;
+        color: #aaa;
+        font-size: 0.82rem;
+        line-height: 1.35;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+    }
+    .global-search__empty {
+        margin: 0.35rem 0 0;
+        color: #aaa;
+        text-align: center;
+    }
+    @media (max-width: 640px) {
+        .global-search {
+            padding: 0.9rem;
+        }
+        .global-search__filters {
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 0.7rem 0.45rem;
+            margin-top: 0.55rem;
+            padding: 0.75rem;
+        }
+        .global-search__timeline {
+            grid-column: 1 / -1;
+        }
+        .global-search__playable {
+            min-width: 0;
+        }
+        .global-search__clear {
+            align-self: center;
+        }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .global-search__range {
+            transition: none;
+        }
+    }
+</style>
