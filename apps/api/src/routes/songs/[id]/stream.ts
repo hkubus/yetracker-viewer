@@ -73,7 +73,7 @@ export const routes = {
           return stream(c, async (stream) => {
             activeTranscodes++;
             try {
-              const response = await transcode(path, `${qualityParsed}k`);
+              const response = await transcode(path, `${qualityParsed}k`, c.req.raw.signal);
               // @ts-expect-error
               await stream.pipe(response);
             } finally {
