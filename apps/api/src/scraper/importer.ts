@@ -139,47 +139,67 @@ function ensureEra(state: ImportState, name: string, isMain: boolean, metadata?:
   return era.id;
 }
 
-function findHeaderRow(rows: ReturnType<ReturnType<typeof parse>['querySelectorAll']>) {
-  return rows.findIndex((row) => {
-    const headers = row.querySelectorAll('td').map((cell) => normalizeHeader(cell.textContent));
-    return (
-      headers.some((header) => header === 'era') &&
-      headers.some((header) => header === 'name' || header.startsWith('name '))
-    );
-  });
+type RowCells = ReturnType<ReturnType<typeof parse>['querySelectorAll']>;
+
+function* iterTableRowHtml(text: string): Generator<string> {
+  // Yield one <tr>…</tr> fragment at a time so huge sheets never need a
+  // full-document DOM in memory. Parsing the main catalog in one go retains
+  // hundreds of MB of heap that the runtime is slow to hand back to the OS.
+  const pattern = /<tr[\s>][\s\S]*?<\/tr\s*>/gi;
+  for (const match of text.matchAll(pattern)) {
+    yield match[0];
+  }
+}
+
+function isHeaderRow(cells: RowCells) {
+  const headers = cells.map((cell) => normalizeHeader(cell.textContent));
+  return (
+    headers.some((header) => header === 'era') &&
+    headers.some((header) => header === 'name' || header.startsWith('name '))
+  );
 }
 
 function importCatalog(text: string, catalog: CatalogDefinition, state: ImportState) {
-  const rows = parse(text).querySelectorAll('tr');
-  const headerRowIndex = findHeaderRow(rows);
-  if (headerRowIndex < 0) {
-    throw new Error(`Catalog ${catalog.name} did not contain a recognizable header row`);
-  }
-
-  const headerCells = rows[headerRowIndex].querySelectorAll('td');
-  const headers = headerCells.map((cell) => normalizeHeader(cell.textContent));
-  const eraColumn = findColumn(headers, (header) => header === 'era' || header === 'main era');
-  const nameColumn = findColumn(headers, (header) => header === 'name' || header.startsWith('name '));
-  const notesColumn = findColumn(headers, (header) => header === 'notes');
-  const trackLengthColumn = findColumn(
-    headers,
-    (header) =>
-      header === 'track length' || header === 'length' || header === 'full length' || header === 'copy length',
-  );
-  const fileDateColumn = findColumn(
-    headers,
-    (header) => header === 'file date' || header === 'date made' || header === 'release date',
-  );
-  const leakDateColumn = findColumn(headers, (header) => header === 'leak date');
-  const availableLengthColumn = findColumn(headers, (header) => header === 'available length');
-  const qualityColumn = findColumn(headers, (header) => header === 'quality');
-  const linkColumn = findColumn(headers, (header) => header.startsWith('link'));
-  const typeColumn = findColumn(headers, (header) => header === 'type');
-  const streamingColumn = findColumn(headers, (header) => header === 'streaming');
+  let headers: string[] | null = null;
+  let eraColumn = -1;
+  let nameColumn = -1;
+  let notesColumn = -1;
+  let trackLengthColumn = -1;
+  let fileDateColumn = -1;
+  let leakDateColumn = -1;
+  let availableLengthColumn = -1;
+  let qualityColumn = -1;
+  let linkColumn = -1;
+  let typeColumn = -1;
+  let streamingColumn = -1;
   let importedSongs = 0;
 
-  for (let rowIndex = headerRowIndex + 1; rowIndex < rows.length; rowIndex++) {
-    const cells = rows[rowIndex].querySelectorAll('td');
+  for (const rowHtml of iterTableRowHtml(text)) {
+    const cells = parse(rowHtml).querySelectorAll('td');
+
+    if (headers === null) {
+      if (!isHeaderRow(cells)) continue;
+      headers = cells.map((cell) => normalizeHeader(cell.textContent));
+      eraColumn = findColumn(headers, (header) => header === 'era' || header === 'main era');
+      nameColumn = findColumn(headers, (header) => header === 'name' || header.startsWith('name '));
+      notesColumn = findColumn(headers, (header) => header === 'notes');
+      trackLengthColumn = findColumn(
+        headers,
+        (header) =>
+          header === 'track length' || header === 'length' || header === 'full length' || header === 'copy length',
+      );
+      fileDateColumn = findColumn(
+        headers,
+        (header) => header === 'file date' || header === 'date made' || header === 'release date',
+      );
+      leakDateColumn = findColumn(headers, (header) => header === 'leak date');
+      availableLengthColumn = findColumn(headers, (header) => header === 'available length');
+      qualityColumn = findColumn(headers, (header) => header === 'quality');
+      linkColumn = findColumn(headers, (header) => header.startsWith('link'));
+      typeColumn = findColumn(headers, (header) => header === 'type');
+      streamingColumn = findColumn(headers, (header) => header === 'streaming');
+      continue;
+    }
 
     if (catalog.id === PRIMARY_CATALOG_ID && cells.length === 5) {
       const name = normalizeEraName((cells[1]?.textContent ?? '').split(/\r?\n/)[0] ?? '');
@@ -249,6 +269,10 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
     state.songs.push(song);
     importedSongs++;
     if (catalogId === PRIMARY_CATALOG_ID) state.mainSongCount++;
+  }
+
+  if (headers === null) {
+    throw new Error(`Catalog ${catalog.name} did not contain a recognizable header row`);
   }
 
   return importedSongs;
