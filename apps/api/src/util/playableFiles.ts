@@ -2,7 +2,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { songsPath } from '../config.ts';
 
-const playableFiles = new Set<string>();
+let playableFiles = new Set<string>();
 const SCAN_CONCURRENCY = 32;
 
 export async function refreshPlayableFiles() {
@@ -24,8 +24,14 @@ export async function refreshPlayableFiles() {
   }
 
   await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, filenames.length) }, () => worker()));
-  playableFiles.clear();
-  for (const filename of nextPlayableFiles) playableFiles.add(filename);
+  // Atomic swap: publish the freshly built set so concurrent readers never
+  // observe a partially populated (cleared) set.
+  playableFiles = nextPlayableFiles;
+}
+
+/** Immutable snapshot of currently playable filenames. */
+export function getPlayableFilesSnapshot(): ReadonlySet<string> {
+  return playableFiles;
 }
 
 export function isSongPlayable(filename: string | null) {

@@ -1,6 +1,15 @@
 export const PRIMARY_CATALOG_ID = 'unreleased';
 
-export const CATALOGS = [
+export type CatalogDefinition = {
+  id: string;
+  name: string;
+  gid: string;
+  description: string;
+  mainPageSection?: boolean;
+  downloadable?: boolean;
+};
+
+export const CATALOGS: CatalogDefinition[] = [
   {
     id: PRIMARY_CATALOG_ID,
     name: 'Unreleased',
@@ -69,16 +78,14 @@ export const CATALOGS = [
     description: 'Documented fake leaks, rumors, and misattributions.',
     downloadable: false,
   },
-] as const;
-
-export type CatalogDefinition = (typeof CATALOGS)[number];
+];
 
 export function getCatalog(id: string) {
   return CATALOGS.find((catalog) => catalog.id === id);
 }
 
 export function getCategoryCatalogs() {
-  return CATALOGS.filter((catalog) => catalog.id !== PRIMARY_CATALOG_ID && !('mainPageSection' in catalog));
+  return CATALOGS.filter((catalog) => catalog.id !== PRIMARY_CATALOG_ID && catalog.mainPageSection !== true);
 }
 
 export function catalogSourceUrl(gid: string) {

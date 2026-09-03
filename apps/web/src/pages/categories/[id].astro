@@ -18,18 +18,23 @@ const id = Astro.params.id ?? '';
 const pageValue = Astro.url.searchParams.get('page') ?? '1';
 const parsedPage = Number(pageValue);
 const currentPage = /^\d+$/.test(pageValue) && Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+const rawQuery = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 200);
 const offset = (currentPage - 1) * ERA_PAGE_SIZE;
-const [categoryReq, songsReq] = await Promise.all([
-  fetchApi(`/categories/${id}`),
-  fetchApi(`/categories/${id}/songs?limit=${ERA_PAGE_SIZE}&offset=${offset}`),
-]);
+const songsPath =
+  `/categories/${encodeURIComponent(id)}/songs?limit=${ERA_PAGE_SIZE}&offset=${offset}` +
+  (rawQuery ? `&q=${encodeURIComponent(rawQuery)}` : '');
+const [categoryReq, songsReq] = await Promise.all([fetchApi(`/categories/${id}`), fetchApi(songsPath)]);
 const [category, songData]: [Category, (Song & { url?: string; playable: boolean; duration: number | null })[]] =
   await Promise.all([categoryReq.json(), songsReq.json()]);
-const totalSongs = Number(songsReq.headers.get('x-total-count') ?? songData.length);
+const headerTotal = Number(songsReq.headers.get('x-total-count'));
+const totalSongs = Number.isFinite(headerTotal) ? Math.max(0, Math.trunc(headerTotal)) : songData.length;
 const pageCount = Math.max(1, Math.ceil(totalSongs / ERA_PAGE_SIZE));
+const querySuffix = rawQuery ? `?q=${encodeURIComponent(rawQuery)}` : '';
 if (currentPage > pageCount) {
-  return Astro.redirect(`/categories/${id}${pageCount > 1 ? `?page=${pageCount}` : ''}`);
+  const target = `/categories/${id}${pageCount > 1 ? `?page=${pageCount}${rawQuery ? `&q=${encodeURIComponent(rawQuery)}` : ''}` : querySuffix}`;
+  return Astro.redirect(target);
 }
+const paginationBase = `/categories/${id}${querySuffix}`;
 ---
 
 <Layout title={`${category.name} | Ye Tracker`}>
@@ -52,16 +57,16 @@ if (currentPage > pageCount) {
         pageCount={pageCount}
         totalItems={totalSongs}
         pageSize={ERA_PAGE_SIZE}
-        basePath={`/categories/${id}`}
+        basePath={paginationBase}
         paginationId="category-pagination-top"
       />
-      <SongList eraId={`category-${id}`} scopeName="category" songs={songData} apiBaseUrl={publicApiBaseUrl} />
+      <SongList eraId={`category-${id}`} scopeName="category" songs={songData} apiBaseUrl={publicApiBaseUrl} initialQuery={rawQuery} />
       <Pagination
         currentPage={currentPage}
         pageCount={pageCount}
         totalItems={totalSongs}
         pageSize={ERA_PAGE_SIZE}
-        basePath={`/categories/${id}`}
+        basePath={paginationBase}
       />
     </div>
   </div>

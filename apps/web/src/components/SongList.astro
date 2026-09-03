@@ -4,36 +4,110 @@ import { Icon } from 'astro-icon/components';
 import { apiUrl } from '../config';
 import { convertDuration } from '../utils/convertDuration';
 
-const songs = Astro.props.songs as (Song & {
-  url: string;
-  downloaded: number;
-  playable: boolean;
-  duration: number | null;
-})[];
+type SongRow = Song & {
+  url?: string;
+  filename?: string;
+  fileName?: string;
+  downloaded?: number | string;
+  playable?: boolean;
+  duration?: number | null;
+};
+
+const songs = (Astro.props.songs ?? []) as SongRow[];
 const eraId = Astro.props.eraId;
 const scopeName = (Astro.props.scopeName as string | undefined) ?? 'era';
 const apiBaseUrl = Astro.props.apiBaseUrl as string;
 const coverVersion = Astro.props.coverVersion as string | undefined;
+const initialQuery = String(
+  (Astro.props.initialQuery as string | undefined) ??
+    (Astro.props.searchQuery as string | undefined) ??
+    (Astro.props.q as string | undefined) ??
+    '',
+);
 const shortDate = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'short',
 });
+
+const safeIdPart = String(eraId ?? 'list').replace(/[^a-zA-Z0-9_-]/g, '-');
+const searchInputId = `song-search-${safeIdPart || 'list'}`;
+const hasServerQuery = initialQuery.trim().length > 0;
+
+function isPlayable(song: SongRow): boolean {
+  if (typeof song.playable === 'boolean') return song.playable;
+  if (typeof song.downloaded === 'number') return song.downloaded === 1;
+  if (typeof song.downloaded === 'string') return song.downloaded === '1';
+  const file = song.filename ?? song.fileName;
+  if (typeof file === 'string' && file.trim().length > 0) return true;
+  return false;
+}
+
+function formatSongDate(value: unknown): string {
+  if (typeof value !== 'number') return '';
+  if (!Number.isFinite(value) || value <= 0) return '';
+  try {
+    const date = new Date(value * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+    return shortDate.format(date);
+  } catch {
+    return '';
+  }
+}
+
+function formatLength(song: SongRow): string {
+  const parts: string[] = [];
+  if (song.availableLength) parts.push(song.availableLength);
+  const d = song.duration ?? song.trackLength;
+  if (typeof d === 'number' && Number.isFinite(d) && d > 0) {
+    parts.push(convertDuration(d));
+  }
+  return parts.join(' - ');
+}
+
+function rowId(song: SongRow, index: number): string {
+  const id = Number(song.id);
+  if (song.id != null && Number.isFinite(id)) return `song-${Math.trunc(id)}`;
+  return `song-index-${index}`;
+}
+
+function eraIdAttr(song: SongRow): string | undefined {
+  const raw = song.eraId ?? eraId;
+  const n = Number(raw);
+  if (Number.isFinite(n)) return String(Math.trunc(n));
+  return undefined;
+}
 ---
 
 <section class="song-list" data-song-list>
     <div class="song-search">
-        <label for={`song-search-${eraId}`}>Search songs on this page</label>
-        <div class="song-search__controls">
-            <input
-                id={`song-search-${eraId}`}
-                type="search"
-                placeholder={`Search songs in this ${scopeName}…`}
-                autocomplete="off"
-                data-song-search
-            />
-            <p class="song-count" aria-live="polite" data-song-count>
-                {songs.length} {songs.length === 1 ? "song" : "songs"}
+        <label for={searchInputId}>Search songs in this {scopeName}</label>
+        <form method="get" action="" data-song-search-form>
+            <div class="song-search__controls">
+                <input
+                    id={searchInputId}
+                    name="q"
+                    type="search"
+                    placeholder={`Search songs in this ${scopeName}…`}
+                    autocomplete="off"
+                    value={initialQuery}
+                    data-song-search
+                />
+                <button type="submit" class="song-search__submit">Search</button>
+                {
+                    hasServerQuery && (
+                        <a class="song-search__clear" href=".">
+                            Clear
+                        </a>
+                    )
+                }
+                <p class="song-count" aria-live="polite" data-song-count>
+                    {songs.length} {songs.length === 1 ? "song" : "songs"}
+                </p>
+            </div>
+            <p class="song-search__hint">
+                Searches the full catalog on the server. Typing also filters
+                this page instantly.
             </p>
-        </div>
+        </form>
     </div>
 
     <table>
@@ -47,70 +121,68 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
             <th>Leak Date</th>
         </tr>
         {
-            songs.map((e) => (
-                <tr
-                    id={`song-${e.id}`}
-                    class="song-row"
-                    data-song-name={e.name}
-                >
-                    <td class="song-actions-cell">
-                        {e.playable ? (
-                            <div class="song-actions">
-                                <button
-                                    class="play-song"
-                                    type="button"
-                                    data-id={e.id}
-                                    data-title={e.name}
-                                    data-eraId={e.eraId ?? eraId}
-                                    data-track-length={e.duration ?? e.trackLength ?? 0}
-                                    data-cover-version={coverVersion}
-                                    aria-label={`Play ${e.name}`}
-                                    title="Play"
-                                >
-                                    <Icon name="play" />
-                                </button>
+            songs.map((e, index) => {
+                const playable = isPlayable(e);
+                const idAttr = eraIdAttr(e);
+                const numericId = Number(e.id);
+                const hasId = e.id != null && Number.isFinite(numericId);
+                return (
+                    <tr
+                        id={rowId(e, index)}
+                        class="song-row"
+                        data-song-name={e.name ?? ''}
+                    >
+                        <td class="song-actions-cell">
+                            {playable ? (
+                                <div class="song-actions">
+                                    <button
+                                        class="play-song"
+                                        type="button"
+                                        data-id={hasId ? String(Math.trunc(numericId)) : undefined}
+                                        data-title={e.name ?? 'Untitled'}
+                                        data-eraId={idAttr}
+                                        data-track-length={e.duration ?? e.trackLength ?? 0}
+                                        data-cover-version={coverVersion}
+                                        aria-label={`Play ${e.name ?? 'Untitled'}`}
+                                        title="Play"
+                                        disabled={!hasId}
+                                    >
+                                        <Icon name="play" />
+                                    </button>
+                                    {hasId ? (
+                                        <a
+                                            class="download-song"
+                                            href={apiUrl(apiBaseUrl, `/songs/${Math.trunc(numericId)}/download`)}
+                                            aria-label={`Download ${e.name ?? 'Untitled'}`}
+                                            title="Download original file"
+                                            download
+                                        >
+                                            <Icon name="download" />
+                                        </a>
+                                    ) : null}
+                                </div>
+                            ) : e.url ? (
                                 <a
-                                    class="download-song"
-                                    href={apiUrl(apiBaseUrl, `/songs/${e.id}/download`)}
-                                    aria-label={`Download ${e.name}`}
-                                    title="Download original file"
-                                    download
+                                    class="source-link"
+                                    href={e.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    aria-label={`Open source for ${e.name ?? 'Untitled'}`}
+                                    title="Open source"
                                 >
-                                    <Icon name="download" />
+                                    <Icon name="link" />
                                 </a>
-                            </div>
-                        ) : e.url ? (
-                            <a
-                                class="source-link"
-                                href={e.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                aria-label={`Open source for ${e.name}`}
-                                title="Open source"
-                            >
-                                <Icon name="link" />
-                            </a>
-                        ) : null}
-                    </td>
-                    <th class="title">{e.name}</th>
-                    <td class="notes">{e.notes}</td>
-                    <td class="quality">{e.quality}</td>
-                    <td class="availableLength">
-                        {e.availableLength}
-                        {e.duration ? ` - ${convertDuration(e.duration)}` : ""}
-                    </td>
-                    <td class="fileDate">
-                        {e.fileDate === 0
-                            ? ""
-                            : shortDate.format(new Date(e.fileDate! * 1000))}
-                    </td>
-                    <td class="leakDate">
-                        {e.leakDate === 0
-                            ? ""
-                            : shortDate.format(new Date(e.leakDate! * 1000))}
-                    </td>
-                </tr>
-            ))
+                            ) : null}
+                        </td>
+                        <th class="title">{e.name}</th>
+                        <td class="notes">{e.notes}</td>
+                        <td class="quality">{e.quality}</td>
+                        <td class="availableLength">{formatLength(e)}</td>
+                        <td class="fileDate">{formatSongDate(e.fileDate)}</td>
+                        <td class="leakDate">{formatSongDate(e.leakDate)}</td>
+                    </tr>
+                );
+            })
         }
     </table>
     <p class="song-empty" data-song-empty hidden>
@@ -126,11 +198,13 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
             const input = songList.querySelector("[data-song-search]");
             const count = songList.querySelector("[data-song-count]");
             const empty = songList.querySelector("[data-song-empty]");
+            const form = songList.querySelector("[data-song-search-form]");
             const rows = [...songList.querySelectorAll(".song-row")];
 
             if (!(input instanceof HTMLInputElement) || !count || !empty) return;
 
             songList.dataset.searchBound = "true";
+            const totalOnPage = rows.length;
 
             const updateResults = () => {
                 const normalize = (value) =>
@@ -140,19 +214,31 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
 
                 rows.forEach((row) => {
                     const songName = normalize(row.dataset.songName ?? "");
-                    const matches = songName.includes(query);
+                    const matches = !query || songName.includes(query);
 
                     row.hidden = !matches;
                     if (matches) visible += 1;
                 });
 
                 count.textContent = query
-                    ? `${visible} of ${rows.length} songs`
-                    : `${rows.length} ${rows.length === 1 ? "song" : "songs"}`;
+                    ? `${visible} of ${totalOnPage} on this page — use Search for the full catalog`
+                    : `${totalOnPage} ${totalOnPage === 1 ? "song" : "songs"}`;
                 empty.hidden = visible !== 0;
             };
 
             input.addEventListener("input", updateResults);
+            if (form instanceof HTMLFormElement) {
+                // GET submit preserves ?q= server-side search and resets to page 1.
+                form.addEventListener("submit", () => {
+                    try {
+                        const url = new URL(form.action || window.location.href);
+                        url.searchParams.delete("page");
+                        form.action = url.pathname + url.search;
+                    } catch {
+                        // Fall back to default form submission.
+                    }
+                });
+            }
             updateResults();
         });
     })();
@@ -204,6 +290,34 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
         );
         box-shadow: 0 0 0 3px
             color-mix(in srgb, var(--dominantColor) 25%, transparent);
+    }
+    .song-search__submit {
+        flex: none;
+        padding: 0.7rem 1rem;
+        border: 2px solid
+            color-mix(in srgb, var(--dominantColor) 50%, transparent);
+        border-radius: 0.6rem;
+        background: color-mix(in srgb, var(--dominantColor) 25%, #222);
+        color: white;
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.85rem;
+        font-weight: 700;
+    }
+    .song-search__submit:hover,
+    .song-search__submit:focus-visible {
+        background: color-mix(in srgb, var(--dominantColor) 40%, #333);
+        outline: none;
+    }
+    .song-search__clear {
+        flex: none;
+        color: #ccc;
+        font-size: 0.85rem;
+    }
+    .song-search__hint {
+        margin: 0.4rem 0 0;
+        color: color-mix(in srgb, var(--dominantColor) 25%, #ccc);
+        font-size: 0.78rem;
     }
     .song-count {
         flex: none;
@@ -294,6 +408,10 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
             transparent
         );
         outline: none;
+    }
+    .play-song:disabled {
+        cursor: default;
+        opacity: 0.35;
     }
     .leakDate,
     .quality,

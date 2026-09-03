@@ -63,25 +63,36 @@ export const routes = {
           if (activeTranscodes >= maxConcurrentTranscodes) {
             throw new HTTPException(503, { message: 'Transcoding capacity reached; try again shortly' });
           }
-          // const fileBitrate = await getBitrate(path);
-          // if (fileBitrate / 1000 < qualityParsed) {
-          //   const data = await readFile(path);
-          //   return c.body(data);
-          // }
-          c.header('Content-Type', 'audio/opus');
-          return stream(c, async (stream) => {
-            activeTranscodes++;
-            try {
-              const response = await transcode(path, `${qualityParsed}k`, c.req.raw.signal);
-              // @ts-expect-error
-              await stream.pipe(response);
-            } finally {
-              activeTranscodes--;
-            }
-          });
+          // Claim the slot synchronously (no awaits between the check and
+          // the increment) to close the check-then-act race; release it in
+          // the streaming callback's finally.
+          activeTranscodes++;
+          try {
+            // const fileBitrate = await getBitrate(path);
+            // if (fileBitrate / 1000 < qualityParsed) {
+            //   const data = await readFile(path);
+            //   return c.body(data);
+            // }
+            c.header('Content-Type', 'audio/opus');
+            return stream(c, async (output) => {
+              try {
+                const response = await transcode(path, `${qualityParsed}k`, c.req.raw.signal);
+                await output.pipe(response);
+              } catch (error) {
+                if (!c.req.raw.signal.aborted) console.error('failed to transcode song', error);
+                throw error;
+              } finally {
+                activeTranscodes--;
+              }
+            });
+          } catch (error) {
+            // stream() threw synchronously before the callback ran; release the slot.
+            activeTranscodes--;
+            throw error;
+          }
         }
         let mimetype = '';
-        switch (filename.split('.').at(-1)) {
+        switch (filename.split('.').at(-1)?.toLowerCase()) {
           case 'mp3':
             mimetype = 'audio/mpeg';
             break;
@@ -98,7 +109,20 @@ export const routes = {
             mimetype = 'audio/wav';
             break;
           case 'aif':
+          case 'aiff':
             mimetype = 'audio/aiff';
+            break;
+          case 'm4a':
+            mimetype = 'audio/mp4';
+            break;
+          case 'aac':
+            mimetype = 'audio/aac';
+            break;
+          case 'mp4':
+            mimetype = 'video/mp4';
+            break;
+          case 'webm':
+            mimetype = 'video/webm';
             break;
           default:
             mimetype = 'application/octet-stream';
@@ -150,7 +174,7 @@ export const routes = {
         if (e instanceof HTTPException) {
           throw e;
         }
-        console.log('failed to stream song', e);
+        console.error('failed to stream song', e);
         throw new HTTPException(500, { message: 'Could not stream song' });
       }
     },

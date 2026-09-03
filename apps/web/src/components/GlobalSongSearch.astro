@@ -17,6 +17,7 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
     data-global-song-search
     data-api-base-url={apiBaseUrl}
     data-era-page-size={eraPageSize}
+    data-total-songs={songsCount}
     data-eras={JSON.stringify(eraRange)}
 >
     <div class="global-search__header">
@@ -111,12 +112,7 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
     (() => {
         const MAX_RESULTS = 50;
         const DESCRIPTION_LIMIT = 120;
-        const TOTAL_SONGS = Number(
-            document
-                .querySelector("[data-global-song-search]")
-                ?.querySelector("[data-global-search-count]")
-                ?.textContent?.match(/\d+/)?.[0] ?? 0,
-        );
+        const HEX_PATTERN = /^#?[\da-f]{6}$/i;
 
         document
             .querySelectorAll("[data-global-song-search]")
@@ -186,7 +182,17 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                 searchRoot.dataset.searchBound = "true";
                 const apiBaseUrl = searchRoot.dataset.apiBaseUrl?.replace(/\/+$/, "") ?? "";
                 const eraPageSize = Number(searchRoot.dataset.eraPageSize) || 100;
-                const eraData = JSON.parse(searchRoot.dataset.eras ?? "[]");
+                // Raw count from data attribute — never regex textContent (breaks on "1,234").
+                const totalSongs = Number(searchRoot.dataset.totalSongs ?? 0) || 0;
+                // Astro escapes data-eras into the attribute; parse defensively and
+                // never inject it as HTML — only textContent is used below.
+                let eraData = [];
+                try {
+                    const parsed = JSON.parse(searchRoot.dataset.eras ?? "[]");
+                    eraData = Array.isArray(parsed) ? parsed : [];
+                } catch {
+                    eraData = [];
+                }
                 const lastEraIndex = Math.max(eraData.length - 1, 0);
                 const normalize = (value) =>
                     value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
@@ -202,6 +208,10 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                 let debounceTimer;
                 let activeRequest;
 
+                const sanitizeHex = (value, fallback) => {
+                    const raw = String(value ?? fallback ?? "666666").replace(/^#/, "");
+                    return HEX_PATTERN.test(raw) ? `#${raw}` : `#${fallback ?? "666666"}`;
+                };
                 const updateTimeline = () => {
                     const startIndex = Number(eraStart.value);
                     const endIndex = Number(eraEnd.value);
@@ -218,11 +228,11 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                     );
                     eraRange.style.setProperty(
                         "--range-start-color",
-                        `#${String(eraData[startIndex]?.dominantColor ?? "d8d8d8").replace(/^#/, "")}`,
+                        sanitizeHex(eraData[startIndex]?.dominantColor, "d8d8d8"),
                     );
                     eraRange.style.setProperty(
                         "--range-end-color",
-                        `#${String(eraData[endIndex]?.dominantColor ?? "d8d8d8").replace(/^#/, "")}`,
+                        sanitizeHex(eraData[endIndex]?.dominantColor, "d8d8d8"),
                     );
                     eraStartName.textContent =
                         eraData[startIndex]?.name ?? "First era";
@@ -290,10 +300,10 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                         limit: String(MAX_RESULTS),
                     });
                     if (query) params.set("q", query);
-                    if (startIndex > 0) {
+                    if (startIndex > 0 && eraData[startIndex]?.id != null) {
                         params.set("eraFrom", String(eraData[startIndex].id));
                     }
-                    if (endIndex < lastEraIndex) {
+                    if (endIndex < lastEraIndex && eraData[endIndex]?.id != null) {
                         params.set("eraTo", String(eraData[endIndex].id));
                     }
                     if (playableOnly.checked) params.set("playable", "true");
@@ -315,15 +325,23 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                         item.dataset.globalSearchResult = "";
                         item.style.setProperty(
                             "--result-color",
-                            `#${String(song.dominantColor ?? "666666").replace(/^#/, "")}`,
+                            sanitizeHex(song.dominantColor, "666666"),
                         );
 
                         const link = document.createElement("a");
-                        const page = Math.ceil(Number(song.eraPosition ?? 1) / eraPageSize);
+                        const eraPosition = Number(song.eraPosition ?? 1);
+                        const page = Math.ceil(
+                            (Number.isFinite(eraPosition) && eraPosition > 0 ? eraPosition : 1) /
+                                (eraPageSize > 0 ? eraPageSize : 100),
+                        );
+                        const songId = Number(song.id);
+                        const eraId = Number(song.eraId);
                         link.href =
-                            page > 1
-                                ? `/eras/${song.eraId}?page=${page}#song-${song.id}`
-                                : `/eras/${song.eraId}#song-${song.id}`;
+                            page > 1 && Number.isFinite(eraId) && Number.isFinite(songId)
+                                ? `/eras/${Math.trunc(eraId)}?page=${page}#song-${Math.trunc(songId)}`
+                                : Number.isFinite(eraId) && Number.isFinite(songId)
+                                  ? `/eras/${Math.trunc(eraId)}#song-${Math.trunc(songId)}`
+                                  : "#";
 
                         const title = document.createElement("span");
                         title.className = "global-search__song";
@@ -356,7 +374,6 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                 };
 
                 const updateResults = () => {
-                    updateTimeline();
                     const state = searchState();
                     clearFilters.disabled = !state.hasFilters;
                     if (!state.query) {
@@ -365,7 +382,7 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                         list.replaceChildren();
                         resultsPanel.hidden = true;
                         empty.hidden = true;
-                        count.textContent = `${TOTAL_SONGS} songs`;
+                        count.textContent = `${totalSongs.toLocaleString()} songs`;
                         return;
                     }
 
@@ -380,9 +397,18 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                         const requestState = state.params.toString();
 
                         try {
+                            // Bound the request: per-search abort + 10s timeout.
+                            const timeoutSignal =
+                                typeof AbortSignal.timeout === "function"
+                                    ? AbortSignal.timeout(10000)
+                                    : null;
+                            const combinedSignal =
+                                timeoutSignal && typeof AbortSignal.any === "function"
+                                    ? AbortSignal.any([activeRequest.signal, timeoutSignal])
+                                    : activeRequest.signal;
                             const response = await fetch(
                                 `${apiBaseUrl}/songs?${requestState}`,
-                                { signal: activeRequest.signal },
+                                { signal: combinedSignal },
                             );
                             if (!response.ok) throw new Error("Search failed");
 
@@ -394,7 +420,7 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                             }
                             renderResults(data.songs, data.total);
                         } catch (error) {
-                            if (error.name === "AbortError") return;
+                            if (error?.name === "AbortError" || error?.name === "TimeoutError") return;
                             list.replaceChildren();
                             empty.textContent =
                                 "Search is temporarily unavailable.";
@@ -409,12 +435,14 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                     if (Number(eraStart.value) > Number(eraEnd.value)) {
                         eraEnd.value = eraStart.value;
                     }
+                    updateTimeline();
                     updateResults();
                 });
                 eraEnd.addEventListener("input", () => {
                     if (Number(eraEnd.value) < Number(eraStart.value)) {
                         eraStart.value = eraEnd.value;
                     }
+                    updateTimeline();
                     updateResults();
                 });
                 playableOnly.addEventListener("change", updateResults);
@@ -422,8 +450,10 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                     eraStart.value = "0";
                     eraEnd.value = String(lastEraIndex);
                     playableOnly.checked = false;
+                    updateTimeline();
                     updateResults();
                 });
+                updateTimeline();
                 updateResults();
             });
     })();

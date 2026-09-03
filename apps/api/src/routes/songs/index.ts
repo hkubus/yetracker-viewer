@@ -52,6 +52,9 @@ export const routes = {
         playable?: string;
       };
       const query = q?.trim().replaceAll(/\s+/g, ' ').toLocaleLowerCase();
+      // NOTE: lower() in SQLite is ASCII-only while toLocaleLowerCase() is
+      // locale-aware; both sides normalize case so ASCII search terms match
+      // consistently regardless of locale-specific casings.
       if (query && query.length > 100) {
         throw new HTTPException(400, { message: 'Search query is too long' });
       }
@@ -91,7 +94,7 @@ export const routes = {
             ' '
           )
         )`;
-        const matchesQuery = sql<boolean>`instr(${searchableText}, ${query}) > 0`;
+        const matchesQuery = query ? sql<boolean>`instr(${searchableText}, ${query}) > 0` : undefined;
         const eraPosition = sql<number>`(
           SELECT count(*)
           FROM songs AS era_song
@@ -101,7 +104,7 @@ export const routes = {
         )`;
         const requestedLimit = paginationValue(limit, 50, 50, 'limit');
         const conditions: SQL[] = [eq(songsTable.catalogId, PRIMARY_CATALOG_ID)];
-        if (query) conditions.push(matchesQuery);
+        if (query && matchesQuery) conditions.push(matchesQuery);
         if (eraId !== undefined) conditions.push(eq(songsTable.eraId, eraId));
         if (eraFromId !== undefined) conditions.push(gte(songsTable.eraId, eraFromId));
         if (eraToId !== undefined) conditions.push(lte(songsTable.eraId, eraToId));
@@ -122,7 +125,7 @@ export const routes = {
             filename: filesTable.filename,
           })
           .from(songsTable)
-          .innerJoin(erasTable, eq(songsTable.eraId, erasTable.id))
+          .leftJoin(erasTable, eq(songsTable.eraId, erasTable.id))
           .leftJoin(filesTable, eq(songsTable.url, filesTable.url))
           .where(and(...conditions));
         let matches = databaseMatches.map(({ filename, ...song }) => ({

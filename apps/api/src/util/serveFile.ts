@@ -11,6 +11,12 @@ import { stream } from 'hono/streaming';
 export function streamFile(c: Context, path: string, options?: { start?: number; end?: number }) {
   return stream(c, async (output) => {
     const input = createReadStream(path, { ...options });
+    // Surface fs errors to the streaming pipeline instead of emitting an
+    // unhandled 'error' event that crashes the process.
+    const onError = (error: Error) => {
+      input.destroy(error);
+    };
+    input.once('error', onError);
     const signal = c.req.raw.signal;
     const onAbort = () => input.destroy();
     if (signal?.aborted) {
@@ -22,6 +28,7 @@ export function streamFile(c: Context, path: string, options?: { start?: number;
       await output.pipe(Readable.toWeb(input) as ReadableStream);
     } finally {
       signal?.removeEventListener('abort', onAbort);
+      input.removeListener('error', onError);
       input.destroy();
     }
   });

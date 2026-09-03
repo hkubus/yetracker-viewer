@@ -22,7 +22,12 @@ const visiblePages = Array.from(
 )
   .filter((page) => page >= 1 && page <= pageCount)
   .sort((left, right) => left - right);
-const href = (page: number) => (page === 1 ? basePath : `${basePath}?page=${page}`);
+const href = (page: number) => {
+  const separator = basePath.includes('?') ? '&' : '?';
+  return page === 1 ? basePath : `${basePath}${separator}page=${page}`;
+};
+const isFirstPage = currentPage <= 1;
+const isLastPage = currentPage >= pageCount;
 ---
 
 <nav id={paginationId} class="pagination" aria-label="Song pages">
@@ -34,9 +39,11 @@ const href = (page: number) => (page === 1 ? basePath : `${basePath}?page=${page
     pageCount > 1 && (
       <div class="pagination__links">
         <a
-          class:list={['pagination__direction', { disabled: currentPage === 1 }]}
-          href={href(Math.max(1, currentPage - 1))}
-          aria-disabled={currentPage === 1 ? 'true' : undefined}
+          class:list={['pagination__direction', { disabled: isFirstPage }]}
+          href={isFirstPage ? undefined : href(Math.max(1, currentPage - 1))}
+          aria-disabled={isFirstPage ? 'true' : undefined}
+          tabindex={isFirstPage ? '-1' : undefined}
+          rel="prev"
         >
           Previous
         </a>
@@ -51,9 +58,11 @@ const href = (page: number) => (page === 1 ? basePath : `${basePath}?page=${page
           ))}
         </div>
         <a
-          class:list={['pagination__direction', { disabled: currentPage === pageCount }]}
-          href={href(Math.min(pageCount, currentPage + 1))}
-          aria-disabled={currentPage === pageCount ? 'true' : undefined}
+          class:list={['pagination__direction', { disabled: isLastPage }]}
+          href={isLastPage ? undefined : href(Math.min(pageCount, currentPage + 1))}
+          aria-disabled={isLastPage ? 'true' : undefined}
+          tabindex={isLastPage ? '-1' : undefined}
+          rel="next"
         >
           Next
         </a>
@@ -103,9 +112,15 @@ const href = (page: number) => (page === 1 ? basePath : `${basePath}?page=${page
   }
 
   a:hover,
-  a:focus-visible,
   a[aria-current='page'] {
     border-color: var(--dominantColor);
+    background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
+  }
+
+  a:focus-visible {
+    border-color: #fff;
+    outline: 3px solid #fff;
+    outline-offset: 2px;
     background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
   }
 
@@ -142,6 +157,12 @@ const href = (page: number) => (page === 1 ? basePath : `${basePath}?page=${page
 
     .pagination__pages::after {
       content: 'of ' attr(data-page-count);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    a {
+      transition: none;
     }
   }
 </style>

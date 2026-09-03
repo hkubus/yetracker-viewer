@@ -1,9 +1,13 @@
 import { existsSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { Converter } from 'ffmpeg-stream';
-export async function transcode(inputPath: string, quality: string = '128k', signal?: AbortSignal) {
-  if (!existsSync(inputPath)) return;
-  console.log(inputPath);
+import { HTTPException } from 'hono/http-exception';
+export async function transcode(
+  inputPath: string,
+  quality: string = '128k',
+  signal?: AbortSignal,
+): Promise<ReadableStream> {
+  if (!existsSync(inputPath)) throw new HTTPException(404, { message: 'Song file not found' });
   const converter = new Converter();
   converter.createInputFromFile(inputPath);
   const converterOutput = converter.createOutputStream({
@@ -29,5 +33,8 @@ export async function transcode(inputPath: string, quality: string = '128k', sig
     converterOutput.destroy(error instanceof Error ? error : new Error('transcode failed'));
   });
 
-  return Readable.toWeb(converterOutput);
+  // Readable.toWeb returns a node:stream/web ReadableStream whose type
+  // parameters differ from the DOM lib's; the runtime shape is compatible
+  // with what hono's streaming helper consumes.
+  return Readable.toWeb(converterOutput) as unknown as ReadableStream;
 }

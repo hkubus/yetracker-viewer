@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
@@ -27,10 +28,24 @@ export const routes = {
       }
 
       try {
-        if (song.duration) return c.json({ duration: song.duration });
+        if (song.duration != null) return c.json({ duration: song.duration });
 
-        const duration = await getDuration(storedSongPath(song.filename));
-        if (!duration) {
+        const filePath = storedSongPath(song.filename);
+        try {
+          const file = await stat(filePath);
+          if (!file.isFile()) {
+            throw new HTTPException(404, { message: 'Song file not found' });
+          }
+        } catch (error) {
+          if (error instanceof HTTPException) throw error;
+          if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            throw new HTTPException(404, { message: 'Song file not found' });
+          }
+          throw error;
+        }
+
+        const duration = await getDuration(filePath);
+        if (duration == null) {
           throw new HTTPException(422, { message: 'Could not determine file duration' });
         }
         if (song.url) {
@@ -39,6 +54,9 @@ export const routes = {
         return c.json({ duration });
       } catch (error) {
         if (error instanceof HTTPException) throw error;
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          throw new HTTPException(404, { message: 'Song file not found' });
+        }
         console.error('failed to read song duration', error);
         throw new HTTPException(500, { message: 'Could not determine file duration' });
       }

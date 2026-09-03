@@ -1,12 +1,8 @@
 ---
-type Category = {
-  id: string;
-  name: string;
-  description: string;
-  songsCount: number;
-};
+import type { Category } from '@yetracker/types';
 
 const category = Astro.props.category as Category;
+const songsCount = typeof category.songsCount === 'number' ? category.songsCount : 0;
 ---
 
 <a class="category-card" href={`/categories/${category.id}`}>
@@ -16,7 +12,7 @@ const category = Astro.props.category as Category;
     <p class="category-card__description">{category.description}</p>
   </div>
   <p class="category-card__count">
-    {category.songsCount.toLocaleString()} {category.songsCount === 1 ? 'song' : 'songs'}
+    {songsCount.toLocaleString()} {songsCount === 1 ? 'song' : 'songs'}
     <span aria-hidden="true">→</span>
   </p>
 </a>
@@ -41,11 +37,17 @@ const category = Astro.props.category as Category;
       transform 160ms ease;
   }
 
-  .category-card:hover,
-  .category-card:focus-visible {
+  .category-card:hover {
     border-color: #8e8e8e;
     background: linear-gradient(145deg, #303030, #1c1c1c);
-    outline: none;
+    transform: translateY(-0.2rem);
+  }
+
+  .category-card:focus-visible {
+    border-color: #fff;
+    background: linear-gradient(145deg, #303030, #1c1c1c);
+    outline: 3px solid #fff;
+    outline-offset: 3px;
     transform: translateY(-0.2rem);
   }
 
@@ -83,5 +85,14 @@ const category = Astro.props.category as Category;
   .category-card__count span {
     color: #fff;
     font-size: 1.2rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .category-card,
+    .category-card:hover,
+    .category-card:focus-visible {
+      transform: none;
+      transition: none;
+    }
   }
 </style>

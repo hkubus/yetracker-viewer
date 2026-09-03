@@ -9,12 +9,30 @@ const BACKFILL_CONCURRENCY = 2;
 
 export async function cacheFileDuration(db: ReturnType<typeof drizzle>, file: { url: string; filename: string }) {
   const path = storedSongPath(file.filename);
-  const details = await stat(path);
-  if (!details.isFile() || details.size === 0) return;
+  let details: Awaited<ReturnType<typeof stat>>;
+  try {
+    details = await stat(path);
+  } catch (error) {
+    console.error(`backfill: missing file for ${file.url} (${file.filename})`, error);
+    // Mark as not downloaded so boot backfill stops retrying a file that
+    // will never resolve.
+    db.update(filesTable).set({ downloaded: 0 }).where(eq(filesTable.url, file.url)).run();
+    return;
+  }
+  if (!details.isFile() || details.size === 0) {
+    console.error(`backfill: zero-size file for ${file.url} (${file.filename}), marking duration 0`);
+    // Record a zero duration so this row is excluded from future backfills
+    // (`duration IS NULL`) instead of being retried on every boot.
+    db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).run();
+    return;
+  }
 
   const duration = await getDuration(path);
   if (duration) {
     db.update(filesTable).set({ duration }).where(eq(filesTable.url, file.url)).run();
+  } else {
+    console.error(`backfill: could not probe duration for ${file.url} (${file.filename}), marking duration 0`);
+    db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).run();
   }
 }
 
@@ -34,8 +52,10 @@ export async function backfillDurations(db: ReturnType<typeof drizzle>) {
       if (!file.filename) continue;
       try {
         await cacheFileDuration(db, { url: file.url, filename: file.filename });
-      } catch {
-        // Missing or invalid media stays uncached and does not delay API requests.
+      } catch (error) {
+        // Missing or invalid media is marked inside cacheFileDuration; log
+        // here so unexpected failures are visible instead of swallowed.
+        console.error(`backfill failed for ${file.url} (${file.filename})`, error);
       }
     }
   }

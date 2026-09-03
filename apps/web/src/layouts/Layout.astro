@@ -4,6 +4,9 @@ import Player from '../components/Player.astro';
 import { publicApiBaseUrl } from '../config';
 
 const title = (Astro.props.title as string | undefined) ?? 'Ye Tracker';
+const description =
+  (Astro.props.description as string | undefined) ??
+  'Browse Ye Tracker eras, album copies and categories — unreleased Kanye West music organized by era.';
 ---
 
 <!doctype html>
@@ -11,8 +14,15 @@ const title = (Astro.props.title as string | undefined) ?? 'Ye Tracker';
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width" />
+		<meta name="description" content={description} />
+		<meta name="theme-color" content="#181818" />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:type" content="website" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<link rel="icon" href="/favicon.ico" />
+		<link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+		<link rel="dns-prefetch" href="https://fonts.gstatic.com" />
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link
@@ -24,7 +34,8 @@ const title = (Astro.props.title as string | undefined) ?? 'Ye Tracker';
 		<title>{title}</title>
 	</head>
 	<body>
-		<div class="main"><slot /></div>
+		<a class="skip-link" href="#main-content">Skip to main content</a>
+		<main id="main-content" class="main"><slot /></main>
 		<Player apiBaseUrl={publicApiBaseUrl} />
 	</body>
 </html>
@@ -46,5 +57,32 @@ const title = (Astro.props.title as string | undefined) ?? 'Ye Tracker';
 	}
 	.main {
 		width: 100%;
+	}
+	.skip-link {
+		position: absolute;
+		z-index: 100;
+		top: -100%;
+		left: 0.75rem;
+		padding: 0.6rem 1rem;
+		border-radius: 0.5rem;
+		color: #181818;
+		background: #fff;
+		font-weight: 700;
+		text-decoration: none;
+	}
+	.skip-link:focus-visible {
+		top: 0.75rem;
+		outline: 3px solid #fff;
+		outline-offset: 2px;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms;
+			animation-iteration-count: 1;
+			transition-duration: 0.01ms;
+			scroll-behavior: auto;
+		}
 	}
 </style>

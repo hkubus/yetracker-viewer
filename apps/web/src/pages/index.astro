@@ -1,5 +1,5 @@
 ---
-import type { Era } from '@yetracker/types';
+import type { AlbumCopyGroup, Category, Era } from '@yetracker/types';
 import AlbumCopies from '../components/AlbumCopies.astro';
 import CategoryComponent from '../components/Category.astro';
 import EraComponent from '../components/Era.astro';
@@ -7,27 +7,39 @@ import GlobalSongSearch from '../components/GlobalSongSearch.astro';
 import { ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../config';
 import Layout from '../layouts/Layout.astro';
 
-type Category = {
-  id: string;
-  name: string;
-  description: string;
-  songsCount: number;
-};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
 
-type AlbumCopyGroup = {
-  name: string;
-  copies: unknown[];
-};
+async function loadList<T>(path: string, isItem: (item: unknown) => boolean): Promise<T[]> {
+  let response: Response;
+  try {
+    response = await fetchApi(path);
+  } catch (error) {
+    console.error(`[index] ${path} request failed, falling back to empty list:`, error);
+    return [];
+  }
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch (error) {
+    console.error(`[index] ${path} returned invalid JSON, falling back to empty list:`, error);
+    return [];
+  }
+  if (!Array.isArray(data)) {
+    console.error(`[index] ${path} returned unexpected shape, falling back to empty list.`);
+    return [];
+  }
+  return data.filter(isItem) as T[];
+}
 
-const [erasRequest, categoriesRequest, albumCopiesRequest] = await Promise.all([
-  fetchApi('/eras'),
-  fetchApi('/categories'),
-  fetchApi('/album-copies'),
-]);
-const [eras, categories, albumCopies]: [Era[], Category[], AlbumCopyGroup[]] = await Promise.all([
-  erasRequest.json(),
-  categoriesRequest.json(),
-  albumCopiesRequest.json(),
+const [eras, categories, albumCopies] = await Promise.all([
+  loadList<Era>('/eras', (item): item is Era => isRecord(item) && typeof item.id === 'number'),
+  loadList<Category>('/categories', (item): item is Category => isRecord(item) && typeof item.id === 'string'),
+  loadList<AlbumCopyGroup>(
+    '/album-copies',
+    (item): item is AlbumCopyGroup => isRecord(item) && Array.isArray(item.copies),
+  ),
 ]);
 const songsCount = eras.reduce((total, era) => total + (era.songsCount ?? 0), 0);
 ---

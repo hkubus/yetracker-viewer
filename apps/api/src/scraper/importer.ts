@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AvailableLength, Quality, Song } from '@yetracker/types';
+import { inArray } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { parse } from 'node-html-parser';
 import { CATALOGS, type CatalogDefinition, catalogSourceUrl, PRIMARY_CATALOG_ID } from '../catalogs.ts';
@@ -34,6 +35,34 @@ type ImportState = {
 
 const DOWNLOADABLE_HOSTS = new Set(['pillows.su', 'youtu.be', 'www.youtube.com', 'www.instagram.com', 'twitter.com']);
 
+const VALID_AVAILABLE_LENGTHS: ReadonlySet<string> = new Set([
+  'Full',
+  'Snippet',
+  'Confirmed',
+  'Beat Only',
+  'Partial',
+  'Tagged',
+  'OG File',
+  'Stem Bounce',
+  'Rumored',
+  'Conflicting Sources',
+]);
+
+const VALID_QUALITIES: ReadonlySet<string> = new Set([
+  'Low Quality',
+  'High Quality',
+  'CD Quality',
+  'Lossless',
+  'Not Available',
+  'Recording',
+]);
+
+// Query-string keys stripped from era artwork URLs. Everything else is kept
+// verbatim so legitimate size/format params survive.
+const TRACKING_PARAMS = new Set(['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id']);
+
+const CATALOG_FETCH_TIMEOUT_MS = 30_000;
+
 function normalizeText(value: string) {
   return value.trim().replace(/\s+/g, ' ');
 }
@@ -54,19 +83,28 @@ function readCell(cells: ReturnType<ReturnType<typeof parse>['querySelectorAll']
   return index >= 0 ? normalizeText(cells[index]?.textContent ?? '') : '';
 }
 
-function parseDuration(value: string) {
-  const parts = value.split(':').map((part) => Number(part));
-  if (parts.length < 2 || parts.some((part) => !Number.isFinite(part))) return 0;
+function parseDuration(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const rawParts = trimmed.split(':');
+  if (rawParts.length < 2 || rawParts.length > 3) return null;
+  const parts = rawParts.map((part) => Number(part));
+  if (parts.some((part) => !Number.isInteger(part) || part < 0)) return null;
 
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  if (parts.length === 3) return parts[0] * 60 * 60 + parts[1] * 60 + parts[2];
-  return 0;
+  if (parts.length === 2) {
+    const [minutes, seconds] = parts;
+    if (seconds >= 60) return null;
+    return minutes * 60 + seconds;
+  }
+  const [hours, minutes, seconds] = parts;
+  if (minutes >= 60 || seconds >= 60) return null;
+  return hours * 60 * 60 + minutes * 60 + seconds;
 }
 
 function parseDate(value: string) {
   if (!value) return 0;
   const timestamp = Date.parse(value);
-  return Number.isNaN(timestamp) ? 0 : timestamp / 1000;
+  return Number.isNaN(timestamp) ? 0 : Math.floor(timestamp / 1000);
 }
 
 function parseUrls(value: string) {
@@ -100,6 +138,42 @@ function canImportFiles(catalog: CatalogDefinition) {
 function normalizeEraName(value: string) {
   const normalized = normalizeText(value);
   return normalized === 'Travis Scott Collaboration' ? 'Collaboration with Travis Scott' : normalized;
+}
+
+function sanitizeImageUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return '';
+  }
+  if (parsed.protocol !== 'https:') return '';
+  // Drop only known tracking params; keep legitimate query strings intact.
+  let stripped = false;
+  for (const key of TRACKING_PARAMS) {
+    if (parsed.searchParams.has(key)) {
+      parsed.searchParams.delete(key);
+      stripped = true;
+    }
+  }
+  void stripped;
+  return parsed.toString();
+}
+
+function parseAvailableLength(value: string): AvailableLength | null {
+  if (!value) return null;
+  if (VALID_AVAILABLE_LENGTHS.has(value)) return value as AvailableLength;
+  console.warn(`Unknown AvailableLength "${value}", defaulting to null`);
+  return null;
+}
+
+function parseQuality(value: string): Quality | null {
+  if (!value) return null;
+  if (VALID_QUALITIES.has(value)) return value as Quality;
+  console.warn(`Unknown Quality "${value}", defaulting to null`);
+  return null;
 }
 
 function createImportState(): ImportState {
@@ -175,7 +249,7 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
   let importedSongs = 0;
 
   for (const rowHtml of iterTableRowHtml(text)) {
-    const cells = parse(rowHtml).querySelectorAll('td');
+    const cells = parse(rowHtml).querySelectorAll('td, th');
 
     if (headers === null) {
       if (!isHeaderRow(cells)) continue;
@@ -205,14 +279,8 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
       const name = normalizeEraName((cells[1]?.textContent ?? '').split(/\r?\n/)[0] ?? '');
       if (!name) continue;
 
-      let imageUrl = cells[3]?.querySelector('img')?.getAttribute('src') ?? '';
-      if (imageUrl.includes('=')) imageUrl = imageUrl.split('=').slice(0, -1).join('=');
-      try {
-        const parsedImageUrl = new URL(imageUrl);
-        imageUrl = parsedImageUrl.protocol === 'https:' ? parsedImageUrl.toString() : '';
-      } catch {
-        imageUrl = '';
-      }
+      const rawImageUrl = cells[3]?.querySelector('img')?.getAttribute('src') ?? '';
+      const imageUrl = sanitizeImageUrl(rawImageUrl);
 
       ensureEra(state, name, true, {
         notes: normalizeText(cells[2]?.textContent ?? ''),
@@ -231,7 +299,7 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
     const notes = readCell(cells, notesColumn);
     const catalogId = catalog.id;
     if (catalogId === PRIMARY_CATALOG_ID) {
-      const duplicateKey = `${songName}\u0000${notes}`;
+      const duplicateKey = `${songName.trim().toLocaleLowerCase()}\u0000${notes.trim().toLocaleLowerCase()}\u0000${eraName.trim().toLocaleLowerCase()}`;
       if (state.seenMainSongs.has(duplicateKey)) continue;
       state.seenMainSongs.add(duplicateKey);
     }
@@ -246,11 +314,11 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
       eraId,
       name: songName,
       notes: extraNotes ? [notes, extraNotes].filter(Boolean).join('\n') : notes,
-      trackLength: parseDuration(readCell(cells, trackLengthColumn)),
+      trackLength: parseDuration(readCell(cells, trackLengthColumn)) ?? undefined,
       fileDate: parseDate(readCell(cells, fileDateColumn)),
       leakDate: parseDate(readCell(cells, leakDateColumn)),
-      availableLength: readCell(cells, availableLengthColumn) as AvailableLength,
-      quality: readCell(cells, qualityColumn) as Quality,
+      availableLength: parseAvailableLength(readCell(cells, availableLengthColumn)) ?? undefined,
+      quality: parseQuality(readCell(cells, qualityColumn)) ?? undefined,
       url: getSourceUrl(readCell(cells, linkColumn)),
     };
 
@@ -278,17 +346,36 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
   return importedSongs;
 }
 
+async function fetchCatalogText(catalog: CatalogDefinition): Promise<string> {
+  const url = `https://yetracker.net/htmlview/sheet?headers=true&gid=${catalog.gid}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch ${catalog.name} catalog: ${response.status} ${response.statusText}`);
+      }
+      return await response.text();
+    } catch (error) {
+      if (attempt === 0) {
+        console.warn(`Retrying catalog ${catalog.name} after fetch failure`, error);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`Failed to fetch ${catalog.name} catalog after retry`);
+}
+
 export async function importData(db: ReturnType<typeof drizzle>) {
   const state = createImportState();
 
   for (const catalog of CATALOGS) {
-    const response = await fetch(`https://yetracker.net/htmlview/sheet?headers=true&gid=${catalog.gid}`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ${catalog.name} catalog: ${response.status} ${response.statusText}`);
+    try {
+      const importedSongs = importCatalog(await fetchCatalogText(catalog), catalog, state);
+      console.log(`imported ${catalog.name}: ${importedSongs} songs (${catalogSourceUrl(catalog.gid)})`);
+    } catch (error) {
+      console.error(`skipping catalog ${catalog.name} after fetch/import failure`, error);
     }
-
-    const importedSongs = importCatalog(await response.text(), catalog, state);
-    console.log(`imported ${catalog.name}: ${importedSongs} songs (${catalogSourceUrl(catalog.gid)})`);
   }
 
   if (state.mainEraCount === 0 || state.mainSongCount === 0) {
@@ -308,9 +395,21 @@ export async function importData(db: ReturnType<typeof drizzle>) {
     dominantColor: colorsByEraName.get(normalizeEraKey(era.name)) ?? null,
   }));
   const uniqueUrls = Array.from(new Map(state.urls.map((file) => [file.url, file])).values());
+  const liveUrls = new Set(uniqueUrls.map((file) => file.url));
   db.transaction((tx) => {
     tx.delete(songsTable).run();
     tx.delete(erasTable).run();
+    // Drop files rows whose URL no longer appears in any song, in batches
+    // so the statement stays under SQLite's variable limit.
+    const existingFiles = tx.select({ url: filesTable.url }).from(filesTable).all();
+    const staleUrls = existingFiles
+      .map((row) => row.url)
+      .filter((url): url is string => typeof url === 'string' && !liveUrls.has(url));
+    for (let i = 0; i < staleUrls.length; i += 500) {
+      tx.delete(filesTable)
+        .where(inArray(filesTable.url, staleUrls.slice(i, i + 500)))
+        .run();
+    }
     for (let i = 0; i < eras.length; i += 1000) {
       tx.insert(erasTable)
         .values(eras.slice(i, i + 1000))
