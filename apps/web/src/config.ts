@@ -36,7 +36,9 @@ function resolveInternalApiBaseUrl() {
 export const internalApiBaseUrl = resolveInternalApiBaseUrl();
 
 export function apiUrl(baseUrl: string, path: string) {
-  return `${trimTrailingSlash(baseUrl)}/${path.replace(/^\/+/, '')}`;
+  const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const cleanPath = path.startsWith('/') ? path.slice(1) : path;
+  return `${base}/${cleanPath}`;
 }
 
 export type ApiError = Error & { status?: number };
@@ -52,6 +54,11 @@ function toApiError(status: number, path: string): ApiError {
  * a UA header, and a `status` field on thrown errors so pages can
  * return 404 instead of 500.
  */
+const STATIC_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'yetracker-viewer/1.0',
+} as const;
+
 export async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   const url = apiUrl(internalApiBaseUrl, path);
   let response: Response;
@@ -59,8 +66,7 @@ export async function fetchApi(path: string, init?: RequestInit): Promise<Respon
     response = await fetch(url, {
       ...init,
       headers: {
-        Accept: 'application/json',
-        'User-Agent': 'yetracker-viewer/1.0',
+        ...STATIC_HEADERS,
         ...init?.headers,
       },
       signal: init?.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS),

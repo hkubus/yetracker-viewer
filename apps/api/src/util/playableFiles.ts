@@ -3,12 +3,14 @@ import { basename, join } from 'node:path';
 import { songsPath } from '../config.ts';
 
 let playableFiles = new Set<string>();
+const fileMeta = new Map<string, { size: number; mtimeMs: number }>();
 const SCAN_CONCURRENCY = 32;
 
 export async function refreshPlayableFiles() {
   const entries = await readdir(songsPath, { withFileTypes: true });
   const filenames = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
   const nextPlayableFiles = new Set<string>();
+  const nextMeta = new Map<string, { size: number; mtimeMs: number }>();
   let nextIndex = 0;
 
   async function worker() {
@@ -16,7 +18,10 @@ export async function refreshPlayableFiles() {
       const filename = filenames[nextIndex++];
       try {
         const details = await stat(join(songsPath, filename));
-        if (details.size > 0) nextPlayableFiles.add(filename);
+        if (details.size > 0) {
+          nextPlayableFiles.add(filename);
+          nextMeta.set(filename, { size: details.size, mtimeMs: details.mtimeMs });
+        }
       } catch {
         // Files can disappear during a scan; they simply remain unavailable.
       }
@@ -27,6 +32,13 @@ export async function refreshPlayableFiles() {
   // Atomic swap: publish the freshly built set so concurrent readers never
   // observe a partially populated (cleared) set.
   playableFiles = nextPlayableFiles;
+  fileMeta.clear();
+  for (const [k, v] of nextMeta) fileMeta.set(k, v);
+}
+
+/** Cached size/mtime to avoid a stat() on every stream/download. */
+export function getFileMeta(filename: string) {
+  return fileMeta.get(filename);
 }
 
 /** Immutable snapshot of currently playable filenames. */
@@ -41,7 +53,10 @@ export function isSongPlayable(filename: string | null) {
 export function setSongPlayable(filename: string, playable: boolean) {
   if (basename(filename) !== filename) return;
   if (playable) playableFiles.add(filename);
-  else playableFiles.delete(filename);
+  else {
+    playableFiles.delete(filename);
+    fileMeta.delete(filename);
+  }
 }
 
 export async function refreshSongPlayable(filename: string) {
@@ -50,6 +65,7 @@ export async function refreshSongPlayable(filename: string) {
     const details = await stat(join(songsPath, filename));
     const playable = details.isFile() && details.size > 0;
     setSongPlayable(filename, playable);
+    if (playable) fileMeta.set(filename, { size: details.size, mtimeMs: details.mtimeMs });
     return playable;
   } catch {
     setSongPlayable(filename, false);

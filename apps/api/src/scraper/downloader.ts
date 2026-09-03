@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createWriteStream, existsSync } from 'node:fs';
-import { mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { access, mkdir, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -52,6 +52,16 @@ export async function downloadCovers(db: ReturnType<typeof drizzle>) {
         console.error('no image url for era id ', era.id);
         return;
       }
+      const coverPath = join(storagePath, 'covers', `${era.id}.avif`);
+      // Skip re-download/re-encode when the cover and color are already fresh.
+      if (era.dominantColor) {
+        try {
+          const existing = await stat(coverPath);
+          if (existing.isFile() && existing.size > 0) return;
+        } catch {
+          // Missing cover — fall through to download.
+        }
+      }
       const req = await fetch(era.imageUrl, {
         headers: { 'User-Agent': FETCH_USER_AGENT },
         signal: AbortSignal.timeout(COVER_FETCH_TIMEOUT_MS),
@@ -61,16 +71,16 @@ export async function downloadCovers(db: ReturnType<typeof drizzle>) {
       if (contentLength > COVER_MAX_BYTES) {
         throw new Error(`Cover ${era.id} exceeds the 20 MiB size limit`);
       }
-      const data = await req.bytes();
-      if (data.byteLength > COVER_MAX_BYTES) {
-        throw new Error(`Cover ${era.id} exceeds the 20 MiB size limit`);
-      }
+      if (!req.body) throw new Error(`Cover ${era.id} has no response body`);
       const tempPath = join(storagePath, 'covers', `${era.id}.source.tmp`);
       const encodedPath = join(storagePath, 'covers', `${era.id}.tmp.avif`);
-      const coverPath = join(storagePath, 'covers', `${era.id}.avif`);
 
       try {
-        await writeFile(tempPath, data);
+        // Stream to disk instead of buffering up to 20MiB in heap.
+        await pipeline(
+          Readable.fromWeb(req.body as unknown as import('node:stream/web').ReadableStream),
+          createWriteStream(tempPath),
+        );
         await run(
           'ffmpeg',
           [
@@ -137,7 +147,11 @@ function parseContentDispositionExtension(header: string | null): string {
 }
 
 export async function downloadSongs(db: ReturnType<typeof drizzle>) {
-  if (!existsSync(songsPath)) await mkdir(songsPath, { recursive: true });
+  try {
+    await access(songsPath);
+  } catch {
+    await mkdir(songsPath, { recursive: true });
+  }
 
   const dirContents = await readdir(songsPath);
   const hashToExtension = new Map<string, string>();
@@ -233,23 +247,31 @@ async function downloadYtdlp(url: URL, filename: string) {
     args.push('--download-sections', `*${timestamp}-inf`);
   }
   args.push(url.toString());
-  try {
-    await run('yt-dlp', args, { timeout: YTDLP_TIMEOUT_MS, maxBuffer: YTDLP_MAX_BUFFER_BYTES });
-  } catch (error) {
-    console.error(`yt-dlp failed for ${url.toString()}`, error);
-    throw error;
+  let delayMs = 1000;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await run('yt-dlp', args, { timeout: YTDLP_TIMEOUT_MS, maxBuffer: YTDLP_MAX_BUFFER_BYTES });
+      break;
+    } catch (error) {
+      if (attempt === 2) {
+        console.error(`yt-dlp failed for ${url.toString()}`, error);
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs + Math.random() * 500));
+      delayMs *= 2;
+    }
   }
   // yt-dlp appends the real container extension; handle .opus and .ogg.
   const opusPath = `${outputPath}.opus`;
   const oggPath = `${outputPath}.ogg`;
   try {
-    if (existsSync(opusPath)) {
-      if (opusPath !== oggPath) await rename(opusPath, oggPath);
-    } else if (!existsSync(oggPath)) {
+    await access(opusPath);
+    if (opusPath !== oggPath) await rename(opusPath, oggPath);
+  } catch {
+    try {
+      await access(oggPath);
+    } catch {
       throw new Error(`yt-dlp produced neither ${opusPath} nor ${oggPath}`);
     }
-  } catch (error) {
-    console.error(`audio remux failed for ${url.toString()}`, error);
-    throw error;
   }
 }

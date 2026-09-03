@@ -109,6 +109,7 @@ function parseDate(value: string) {
 
 function parseUrls(value: string) {
   return value.split(/\s+/).flatMap((part) => {
+    if (!part.startsWith('https://')) return [];
     try {
       const url = new URL(part);
       return url.protocol === 'https:' ? [url] : [];
@@ -123,9 +124,10 @@ function getSourceUrl(value: string) {
   return (urls.find((url) => url.hostname === 'pillows.su') ?? urls[0])?.toString();
 }
 
-function canDownload(url: string) {
+function canDownload(url: string | URL) {
   try {
-    return DOWNLOADABLE_HOSTS.has(new URL(url).hostname);
+    const hostname = typeof url === 'string' ? new URL(url).hostname : url.hostname;
+    return DOWNLOADABLE_HOSTS.has(hostname);
   } catch {
     return false;
   }
@@ -192,7 +194,8 @@ function createImportState(): ImportState {
 
 function ensureEra(state: ImportState, name: string, isMain: boolean, metadata?: Partial<EraRecord>) {
   const normalizedName = normalizeEraName(name);
-  const existing = state.eraByName.get(normalizeEraKey(normalizedName));
+  const key = normalizedName.toLowerCase();
+  const existing = state.eraByName.get(key);
   if (existing) {
     if (isMain) existing.isMain = 1;
     return existing.id;
@@ -207,7 +210,7 @@ function ensureEra(state: ImportState, name: string, isMain: boolean, metadata?:
     dominantColor: metadata?.dominantColor ?? null,
     isMain: isMain ? 1 : 0,
   };
-  state.eraByName.set(normalizeEraKey(normalizedName), era);
+  state.eraByName.set(key, era);
   state.eras.push(era);
   if (isMain) state.mainEraCount++;
   return era.id;
@@ -294,12 +297,12 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
 
     const eraName = normalizeEraName(readCell(cells, eraColumn));
     const songName = readCell(cells, nameColumn);
-    if (!eraName || !songName || eraName.toLocaleLowerCase() === 'era') continue;
+    if (!eraName || !songName || eraName.toLowerCase() === 'era') continue;
 
     const notes = readCell(cells, notesColumn);
     const catalogId = catalog.id;
     if (catalogId === PRIMARY_CATALOG_ID) {
-      const duplicateKey = `${songName.trim().toLocaleLowerCase()}\u0000${notes.trim().toLocaleLowerCase()}\u0000${eraName.trim().toLocaleLowerCase()}`;
+      const duplicateKey = `${songName.toLowerCase()}\u0000${notes.toLowerCase()}\u0000${eraName.toLowerCase()}`;
       if (state.seenMainSongs.has(duplicateKey)) continue;
       state.seenMainSongs.add(duplicateKey);
     }
@@ -348,7 +351,8 @@ function importCatalog(text: string, catalog: CatalogDefinition, state: ImportSt
 
 async function fetchCatalogText(catalog: CatalogDefinition): Promise<string> {
   const url = `https://yetracker.net/htmlview/sheet?headers=true&gid=${catalog.gid}`;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let delayMs = 500;
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) });
       if (!response.ok) {
@@ -356,25 +360,46 @@ async function fetchCatalogText(catalog: CatalogDefinition): Promise<string> {
       }
       return await response.text();
     } catch (error) {
-      if (attempt === 0) {
-        console.warn(`Retrying catalog ${catalog.name} after fetch failure`, error);
-        continue;
-      }
-      throw error;
+      if (attempt === 2) throw error;
+      console.warn(`Retrying catalog ${catalog.name} after fetch failure (attempt ${attempt + 1})`, error);
+      await new Promise((resolve) => setTimeout(resolve, delayMs + Math.random() * 250));
+      delayMs *= 2;
     }
   }
   throw new Error(`Failed to fetch ${catalog.name} catalog after retry`);
 }
 
+async function limitedMap<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(Math.max(limit, 1), items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function importData(db: ReturnType<typeof drizzle>) {
   const state = createImportState();
 
-  for (const catalog of CATALOGS) {
+  const catalogTexts = await limitedMap(CATALOGS, 4, async (catalog) => {
     try {
-      const importedSongs = importCatalog(await fetchCatalogText(catalog), catalog, state);
-      console.log(`imported ${catalog.name}: ${importedSongs} songs (${catalogSourceUrl(catalog.gid)})`);
+      return { catalog, text: await fetchCatalogText(catalog) };
     } catch (error) {
       console.error(`skipping catalog ${catalog.name} after fetch/import failure`, error);
+      return { catalog, text: null as string | null };
+    }
+  });
+  for (const { catalog, text } of catalogTexts) {
+    if (!text) continue;
+    try {
+      const importedSongs = importCatalog(text, catalog, state);
+      console.log(`imported ${catalog.name}: ${importedSongs} songs (${catalogSourceUrl(catalog.gid)})`);
+    } catch (error) {
+      console.error(`skipping catalog ${catalog.name} after import failure`, error);
     }
   }
 
@@ -396,15 +421,16 @@ export async function importData(db: ReturnType<typeof drizzle>) {
   }));
   const uniqueUrls = Array.from(new Map(state.urls.map((file) => [file.url, file])).values());
   const liveUrls = new Set(uniqueUrls.map((file) => file.url));
+  // Read outside the write transaction so the write lock is held briefly.
+  const existingFiles = await db.select({ url: filesTable.url }).from(filesTable);
+  const staleUrls = existingFiles
+    .map((row) => row.url)
+    .filter((url): url is string => typeof url === 'string' && !liveUrls.has(url));
   db.transaction((tx) => {
     tx.delete(songsTable).run();
     tx.delete(erasTable).run();
     // Drop files rows whose URL no longer appears in any song, in batches
     // so the statement stays under SQLite's variable limit.
-    const existingFiles = tx.select({ url: filesTable.url }).from(filesTable).all();
-    const staleUrls = existingFiles
-      .map((row) => row.url)
-      .filter((url): url is string => typeof url === 'string' && !liveUrls.has(url));
     for (let i = 0; i < staleUrls.length; i += 500) {
       tx.delete(filesTable)
         .where(inArray(filesTable.url, staleUrls.slice(i, i + 500)))

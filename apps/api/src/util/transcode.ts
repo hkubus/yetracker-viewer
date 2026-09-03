@@ -1,13 +1,10 @@
-import { existsSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { Converter } from 'ffmpeg-stream';
-import { HTTPException } from 'hono/http-exception';
 export async function transcode(
   inputPath: string,
   quality: string = '128k',
   signal?: AbortSignal,
 ): Promise<ReadableStream> {
-  if (!existsSync(inputPath)) throw new HTTPException(404, { message: 'Song file not found' });
   const converter = new Converter();
   converter.createInputFromFile(inputPath);
   const converterOutput = converter.createOutputStream({

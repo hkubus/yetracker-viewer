@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import { compress } from 'hono/compress';
 import { cors } from 'hono/cors';
 import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
@@ -26,6 +28,8 @@ const app = new Hono();
 // served here remain embeddable by the web frontend on a different origin.
 // Revisit if the API ever serves untrusted HTML that needs stricter isolation.
 app.use('*', secureHeaders({ crossOriginResourcePolicy: 'cross-origin' }));
+app.use('*', compress({ threshold: 1024 }));
+app.use('*', bodyLimit({ maxSize: 64 * 1024 }));
 app.use(
   '*',
   cors({
@@ -69,6 +73,11 @@ try {
 )`);
   db.run(sql`CREATE INDEX IF NOT EXISTS songs_era_index ON songs (era)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS songs_url_index ON songs (url)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS songs_catalog_era_id_index ON songs (catalog_id, era, id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS songs_catalog_id_index ON songs (catalog_id, id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS songs_quality_index ON songs (quality)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS songs_available_length_index ON songs (available_length)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS eras_is_main_index ON eras (is_main)`);
   const fileColumns = db.all<{ name: string }>(sql`PRAGMA table_info(files)`);
   if (!fileColumns.some((column) => column.name === 'duration')) {
     db.run(sql`ALTER TABLE files ADD COLUMN duration REAL`);
@@ -130,6 +139,9 @@ app.onError((error, c) => {
 const server = serve({ fetch: app.fetch, hostname: apiHost, port: apiPort }, (info) => {
   console.log(`API listening on http://${apiHost}:${info.port}`);
 });
+// Keep connections alive through proxies/LBs (Node defaults are 5s).
+(server as unknown as { keepAliveTimeout: number; headersTimeout: number }).keepAliveTimeout = 61_000;
+(server as unknown as { keepAliveTimeout: number; headersTimeout: number }).headersTimeout = 62_000;
 
 let shuttingDown = false;
 

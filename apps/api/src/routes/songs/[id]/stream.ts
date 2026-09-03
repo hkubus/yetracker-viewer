@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
@@ -6,10 +7,25 @@ import { stream } from 'hono/streaming';
 import { maxConcurrentTranscodes } from '../../../config.ts';
 import { db } from '../../../db/client.ts';
 import { filesTable, songsTable } from '../../../db/schema.ts';
+import { getFileMeta } from '../../../util/playableFiles.ts';
 import { positiveInteger } from '../../../util/request.ts';
 import { streamFile } from '../../../util/serveFile.ts';
 import { storedSongPath } from '../../../util/storedFile.ts';
 import { transcode } from '../../../util/transcode.ts';
+
+const MIME_BY_EXT: Record<string, string> = {
+  mp3: 'audio/mpeg',
+  opus: 'audio/opus',
+  ogg: 'audio/ogg',
+  flac: 'audio/flac',
+  wav: 'audio/wav',
+  aif: 'audio/aiff',
+  aiff: 'audio/aiff',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+};
 
 let activeTranscodes = 0;
 
@@ -40,16 +56,28 @@ export const routes = {
 
         const { filename } = song;
         const path = storedSongPath(filename);
-        let fileSize = 0;
-        try {
-          const file = await stat(path);
-          if (!file.isFile() || file.size === 0) {
+        const cachedMeta = getFileMeta(filename);
+        let fileSize = cachedMeta?.size ?? 0;
+        let mtimeMs = cachedMeta?.mtimeMs ?? 0;
+        if (!cachedMeta) {
+          try {
+            const file = await stat(path);
+            if (!file.isFile() || file.size === 0) {
+              throw new HTTPException(404, { message: 'Song file not found' });
+            }
+            fileSize = file.size;
+            mtimeMs = file.mtimeMs;
+          } catch (error) {
+            if (error instanceof HTTPException) throw error;
             throw new HTTPException(404, { message: 'Song file not found' });
           }
-          fileSize = file.size;
-        } catch (error) {
-          if (error instanceof HTTPException) throw error;
+        } else if (fileSize === 0) {
           throw new HTTPException(404, { message: 'Song file not found' });
+        }
+
+        const etag = `"${fileSize.toString(16)}-${Math.trunc(mtimeMs).toString(16)}"`;
+        if (c.req.header('If-None-Match') === etag && !quality) {
+          return c.body(null, 304);
         }
 
         if (quality) {
@@ -61,6 +89,7 @@ export const routes = {
             throw new HTTPException(400, { message: 'Invalid quality for file' });
           }
           if (activeTranscodes >= maxConcurrentTranscodes) {
+            c.header('Retry-After', '5');
             throw new HTTPException(503, { message: 'Transcoding capacity reached; try again shortly' });
           }
           // Claim the slot synchronously (no awaits between the check and
@@ -68,12 +97,9 @@ export const routes = {
           // the streaming callback's finally.
           activeTranscodes++;
           try {
-            // const fileBitrate = await getBitrate(path);
-            // if (fileBitrate / 1000 < qualityParsed) {
-            //   const data = await readFile(path);
-            //   return c.body(data);
-            // }
             c.header('Content-Type', 'audio/opus');
+            c.header('Accept-Ranges', 'none');
+            c.header('Cache-Control', 'no-store');
             return stream(c, async (output) => {
               try {
                 const response = await transcode(path, `${qualityParsed}k`, c.req.raw.signal);
@@ -92,48 +118,22 @@ export const routes = {
           }
         }
         let mimetype = '';
-        switch (filename.split('.').at(-1)?.toLowerCase()) {
-          case 'mp3':
-            mimetype = 'audio/mpeg';
-            break;
-          case 'opus':
-            mimetype = 'audio/opus';
-            break;
-          case 'ogg':
-            mimetype = 'audio/ogg';
-            break;
-          case 'flac':
-            mimetype = 'audio/flac';
-            break;
-          case 'wav':
-            mimetype = 'audio/wav';
-            break;
-          case 'aif':
-          case 'aiff':
-            mimetype = 'audio/aiff';
-            break;
-          case 'm4a':
-            mimetype = 'audio/mp4';
-            break;
-          case 'aac':
-            mimetype = 'audio/aac';
-            break;
-          case 'mp4':
-            mimetype = 'video/mp4';
-            break;
-          case 'webm':
-            mimetype = 'video/webm';
-            break;
-          default:
-            mimetype = 'application/octet-stream';
-        }
+        const ext = extname(filename).slice(1).toLowerCase();
+        mimetype = MIME_BY_EXT[ext] ?? 'application/octet-stream';
 
         c.header('Content-Type', mimetype);
+        c.header('ETag', etag);
+        c.header('Cache-Control', 'public, max-age=31536000, immutable');
         const rangeHeader = c.req.header('range');
 
         c.header('Accept-Ranges', 'bytes');
 
         if (rangeHeader) {
+          const ifRange = c.req.header('if-range');
+          if (ifRange && ifRange !== etag) {
+            c.header('Content-Length', String(fileSize));
+            return streamFile(c, path);
+          }
           const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
           if (!match) {
             c.header('Content-Range', `bytes */${fileSize}`);

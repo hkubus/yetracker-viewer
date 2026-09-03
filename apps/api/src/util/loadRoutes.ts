@@ -25,25 +25,26 @@ function toRoutePath(parentPath: string, fileName: string, initialPath: string) 
 
 export async function loadRoutes(path: string, instance: Hono, initialPath: string = path) {
   const files = await readdir(path, { withFileTypes: true });
-  for (const file of files) {
-    if (file.isDirectory()) {
-      await loadRoutes(join(path, file.name), instance, initialPath);
-      continue;
-    }
-    if (file.name.endsWith('.map')) continue;
-    if (!file.name.endsWith('.js') && !file.name.endsWith('.ts')) continue;
-
-    const route: { routes: Routes } = await import(`${file.parentPath}/${file.name}`);
+  const dirTasks = files
+    .filter((file) => file.isDirectory())
+    .map((file) => loadRoutes(join(path, file.name), instance, initialPath));
+  const routeFiles = files.filter(
+    (file) =>
+      !file.isDirectory() && !file.name.endsWith('.map') && (file.name.endsWith('.js') || file.name.endsWith('.ts')),
+  );
+  const routeModules = await Promise.all(
+    routeFiles.map((file) => import(`${file.parentPath}/${file.name}`).then((mod) => ({ file, mod }))),
+  );
+  for (const { file, mod } of routeModules) {
+    const route: { routes: Routes } = mod;
 
     const transformedPath = toRoutePath(file.parentPath, file.name, initialPath);
-    console.log(transformedPath);
     Object.entries(route.routes).forEach(([method, { handler }]) => {
       if (!handler) {
-        console.log(transformedPath, 'no handler :(');
         return;
       }
-      if (method === 'post') console.log(`${transformedPath} b`);
       instance.on(method, [transformedPath], handler);
     });
   }
+  await Promise.all(dirTasks);
 }

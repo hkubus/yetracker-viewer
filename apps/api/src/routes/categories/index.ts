@@ -13,6 +13,7 @@ export const routes = {
         .groupBy(songsTable.catalogId);
       const countsByCatalog = new Map(counts.map((entry) => [entry.catalogId, entry.songsCount]));
 
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
       return c.json(
         getCategoryCatalogs().map((catalog) => ({
           id: catalog.id,

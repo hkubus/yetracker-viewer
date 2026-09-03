@@ -18,6 +18,7 @@ export const routes = {
         .leftJoin(songsTable, and(eq(erasTable.id, songsTable.eraId), eq(songsTable.catalogId, PRIMARY_CATALOG_ID)))
         .where(eq(erasTable.isMain, 1))
         .groupBy(erasTable.id);
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
       return c.json(
         eras.map(({ coverSource, ...era }) => ({
           ...era,

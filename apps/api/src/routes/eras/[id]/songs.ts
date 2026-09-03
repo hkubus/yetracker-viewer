@@ -1,4 +1,4 @@
-import { and, asc, count, eq, getColumns, or, type SQL, sql } from 'drizzle-orm';
+import { and, asc, eq, or, type SQL, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { PRIMARY_CATALOG_ID } from '../../../catalogs.ts';
@@ -24,12 +24,11 @@ export const routes = {
       if (normalizedQuery && normalizedQuery.length > 100) {
         throw new HTTPException(400, { message: 'Search query is too long' });
       }
-      const requestedLimit = paginationValue(limit, 10_000, 10_000, 'limit');
-      const requestedOffset = paginationValue(offset, 0, 1_000_000, 'offset');
-      const songData = getColumns(songsTable);
+      const requestedLimit = paginationValue(limit, 100, 500, 'limit');
+      const requestedOffset = paginationValue(offset, 0, 10_000, 'offset');
       const conditions: SQL[] = [eq(songsTable.eraId, id), eq(songsTable.catalogId, PRIMARY_CATALOG_ID)];
       if (normalizedQuery) {
-        const pattern = `%${escapeLikePattern(normalizedQuery.toLocaleLowerCase())}%`;
+        const pattern = `%${escapeLikePattern(normalizedQuery.toLowerCase())}%`;
         const likeEscape = sql`'\\'`;
         conditions.push(
           or(
@@ -41,13 +40,23 @@ export const routes = {
         );
       }
       const where = and(...conditions);
-      const [{ total }] = await db.select({ total: count() }).from(songsTable).where(where);
       const songs = await db
         .select({
-          ...songData,
+          id: songsTable.id,
+          eraId: songsTable.eraId,
+          catalogId: songsTable.catalogId,
+          name: songsTable.name,
+          notes: songsTable.notes,
+          fileDate: songsTable.fileDate,
+          leakDate: songsTable.leakDate,
+          availableLength: songsTable.availableLength,
+          trackLength: songsTable.trackLength,
+          quality: songsTable.quality,
+          url: songsTable.url,
           downloaded: filesTable.downloaded,
           filename: filesTable.filename,
           fileDuration: filesTable.duration,
+          total: sql<number>`count(*) over()`,
         })
         .from(songsTable)
         .leftJoin(filesTable, eq(songsTable.url, filesTable.url))
@@ -55,8 +64,10 @@ export const routes = {
         .orderBy(asc(songsTable.id))
         .limit(requestedLimit)
         .offset(requestedOffset);
+      const total = songs.length > 0 ? songs[0].total : 0;
       c.header('X-Total-Count', String(total));
-      const songsWithPlayback = songs.map(({ filename, fileDuration, ...song }) => {
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+      const songsWithPlayback = songs.map(({ filename, fileDuration, total: _total, ...song }) => {
         const playable = isSongPlayable(filename);
         return {
           ...song,

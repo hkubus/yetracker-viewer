@@ -10,7 +10,8 @@
     "start": "node --env-file ../../.env src/index.ts",
     "dev": "node --env-file ../../.env --watch src/index.ts",
     "build": "tsc",
-    "resetDb": "rm ../../storage/db.sqlite3 && drizzle-kit push"
+    "typecheck": "tsc --noEmit",
+    "resetDb": "rm -f ../../storage/db.sqlite3* && drizzle-kit push"
   },
   "keywords": [],
   "author": "hkubus",

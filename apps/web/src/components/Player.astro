@@ -15,7 +15,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
     <audio id="audio" preload="metadata"></audio>
     <div class="data">
         <div class="info">
-            <img alt="" data-player-cover />
+            <img alt="" width="48" height="48" data-player-cover />
             <div class="metadata">
                 <p class="eyebrow">Now playing</p>
                 <p class="title"></p>
@@ -373,7 +373,6 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         transform: translateX(-50%);
         border: 1px solid color-mix(in srgb, var(--dominantColor) 60%, transparent);
         border-radius: 1rem;
-        backdrop-filter: blur(16px);
         box-shadow: 0 1rem 3rem rgb(0 0 0 / 35%);
         color: var(--player-text);
         background: color-mix(in oklab, var(--dominantColor) 40%, var(--bg-color) 60%);

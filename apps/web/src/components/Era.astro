@@ -18,6 +18,8 @@ const songsCount = typeof era.songsCount === 'number' ? era.songsCount : 0;
     <img
         src={coverUrl}
         alt={`${era.name} cover`}
+        width="512"
+        height="512"
         loading={priority ? 'eager' : 'lazy'}
         fetchpriority={priority ? 'high' : 'auto'}
         decoding="async"

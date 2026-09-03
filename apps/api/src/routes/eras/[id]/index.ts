@@ -24,6 +24,7 @@ export const routes = {
         throw new HTTPException(404, { message: 'Era does not exist' });
       }
       const { coverSource, ...eraData } = era[0];
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
       return c.json({
         ...eraData,
         coverVersion: getCoverVersion(coverSource),

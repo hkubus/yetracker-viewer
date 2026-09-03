@@ -1,15 +1,15 @@
-import { asc, eq } from 'drizzle-orm';
+import { asc, count, eq } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { erasTable, songsTable } from '../db/schema.ts';
 
-type EraRow = typeof erasTable.$inferSelect;
+type EraRow = Pick<typeof erasTable.$inferSelect, 'id' | 'name' | 'isMain'>;
 
 function normalizeName(value: string | null) {
   return (value ?? '').trim().replace(/\s+/g, ' ');
 }
 
 function nameKey(value: string | null) {
-  return normalizeName(value).toLocaleLowerCase();
+  return normalizeName(value).toLowerCase();
 }
 
 function removeTrailingParenthetical(value: string) {
@@ -18,6 +18,8 @@ function removeTrailingParenthetical(value: string) {
 }
 
 function chooseEra(eras: EraRow[], primarySongCounts: Map<number, number>) {
+  const nameLengths = new Map<number, number>();
+  for (const era of eras) nameLengths.set(era.id, normalizeName(era.name).length);
   return [...eras].sort((left, right) => {
     const mainDifference = Number(right.isMain) - Number(left.isMain);
     if (mainDifference !== 0) return mainDifference;
@@ -25,7 +27,7 @@ function chooseEra(eras: EraRow[], primarySongCounts: Map<number, number>) {
     const songDifference = (primarySongCounts.get(right.id) ?? 0) - (primarySongCounts.get(left.id) ?? 0);
     if (songDifference !== 0) return songDifference;
 
-    const nameDifference = normalizeName(left.name).length - normalizeName(right.name).length;
+    const nameDifference = (nameLengths.get(left.id) ?? 0) - (nameLengths.get(right.id) ?? 0);
     if (nameDifference !== 0) return nameDifference;
     return left.id - right.id;
   })[0];
@@ -50,14 +52,20 @@ function resolveEraId(eraId: number, mergeTargets: Map<number, number>) {
  * name already exists.
  */
 export async function repairEraDuplicates(db: ReturnType<typeof drizzle>) {
-  const eras = await db.select().from(erasTable).orderBy(asc(erasTable.id));
+  const eras = await db
+    .select({ id: erasTable.id, name: erasTable.name, isMain: erasTable.isMain })
+    .from(erasTable)
+    .orderBy(asc(erasTable.id));
   if (eras.length < 2) return;
 
-  const songs = await db.select({ eraId: songsTable.eraId, catalogId: songsTable.catalogId }).from(songsTable);
+  const counts = await db
+    .select({ eraId: songsTable.eraId, songsCount: count(songsTable.id) })
+    .from(songsTable)
+    .where(eq(songsTable.catalogId, 'unreleased'))
+    .groupBy(songsTable.eraId);
   const primarySongCounts = new Map<number, number>();
-  for (const song of songs) {
-    if (song.catalogId !== 'unreleased' || song.eraId === null) continue;
-    primarySongCounts.set(song.eraId, (primarySongCounts.get(song.eraId) ?? 0) + 1);
+  for (const row of counts) {
+    if (row.eraId !== null) primarySongCounts.set(row.eraId, row.songsCount);
   }
 
   const erasByName = new Map<string, EraRow[]>();

@@ -19,6 +19,7 @@ export const routes = {
         .from(songsTable)
         .where(eq(songsTable.catalogId, id));
 
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
       return c.json({
         id: catalog.id,
         name: catalog.name,

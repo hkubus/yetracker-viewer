@@ -16,12 +16,20 @@ const CATEGORY_PRIORITY = new Map([
   ['🤖', 4],
 ]);
 
+const WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+const stripCache = new Map<string, { title: string; categoryPriority: number }>();
+const MAX_STRIP_CACHE = 2000;
+
 function normalize(value: string | null) {
-  return (value ?? '').trim().replaceAll(/\s+/g, ' ').toLocaleLowerCase();
+  return (value ?? '').trim().replaceAll(/\s+/g, ' ').toLowerCase();
 }
 
 function stripCategoryMarkers(value: string | null) {
-  let title = (value ?? '').trimStart();
+  const cacheKey = value ?? '';
+  const cached = stripCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  let title = cacheKey.trimStart();
   let categoryPriority = CATEGORY_PRIORITY.size;
   let foundMarker = true;
 
@@ -36,13 +44,19 @@ function stripCategoryMarkers(value: string | null) {
     }
   }
 
-  return { title, categoryPriority };
+  const result = { title, categoryPriority };
+  stripCache.set(cacheKey, result);
+  if (stripCache.size > MAX_STRIP_CACHE) {
+    const oldest = stripCache.keys().next();
+    if (!oldest.done) stripCache.delete(oldest.value);
+  }
+  return result;
 }
 
 function splitParentheticalText(value: string | null) {
   let depth = 0;
-  let outside = '';
-  let inside = '';
+  const outsideParts: string[] = [];
+  const insideParts: string[] = [];
 
   for (const character of value ?? '') {
     if (character === '(') {
@@ -53,11 +67,11 @@ function splitParentheticalText(value: string | null) {
       depth = Math.max(0, depth - 1);
       continue;
     }
-    if (depth > 0) inside += character;
-    else outside += character;
+    if (depth > 0) insideParts.push(character);
+    else outsideParts.push(character);
   }
 
-  return { outside: normalize(outside), inside: normalize(inside) };
+  return { outside: normalize(outsideParts.join('')), inside: normalize(insideParts.join('')) };
 }
 
 function fieldScore(value: string, query: string, base: number) {
@@ -66,8 +80,8 @@ function fieldScore(value: string, query: string, base: number) {
 
   const before = position === 0 ? '' : value[position - 1];
   const after = value[position + query.length] ?? '';
-  const startsAtWord = position === 0 || !/[\p{L}\p{N}]/u.test(before);
-  const endsAtWord = !after || !/[\p{L}\p{N}]/u.test(after);
+  const startsAtWord = position === 0 || !WORD_CHAR_RE.test(before);
+  const endsAtWord = !after || !WORD_CHAR_RE.test(after);
   const lengthDifference = Math.max(0, value.length - query.length);
   const closeness = Math.min(position, 99) / 100 + Math.min(lengthDifference, 999) / 100_000;
 
@@ -107,7 +121,7 @@ export function rankSongSearch<T extends SearchableSong>(songs: T[], query: stri
       song,
       score: relevanceScore(song, query, title),
       categoryPriority,
-      normalizedTitle: undefined as string | undefined,
+      normalizedTitle: normalize(song.name),
     };
   });
 
@@ -124,9 +138,7 @@ export function rankSongSearch<T extends SearchableSong>(songs: T[], query: stri
     const closenessDifference = left.score - right.score;
     if (closenessDifference !== 0) return closenessDifference;
 
-    left.normalizedTitle ??= normalize(left.song.name);
-    right.normalizedTitle ??= normalize(right.song.name);
-    const titleDifference = left.normalizedTitle.localeCompare(right.normalizedTitle);
+    const titleDifference = collator.compare(left.normalizedTitle, right.normalizedTitle);
     if (titleDifference !== 0) return titleDifference;
     return left.song.id - right.song.id;
   };

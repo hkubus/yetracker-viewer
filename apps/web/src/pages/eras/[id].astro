@@ -16,12 +16,19 @@ const offset = (currentPage - 1) * ERA_PAGE_SIZE;
 const songsPath =
   `/eras/${encodeURIComponent(id ?? '')}/songs?limit=${ERA_PAGE_SIZE}&offset=${offset}` +
   (rawQuery ? `&q=${encodeURIComponent(rawQuery)}` : '');
-const [req, songsReq] = await Promise.all([fetchApi(`/eras/${id}`), fetchApi(songsPath)]);
-const [data, songData]: [Era, (Song & { url: string; downloaded: number })[]] = await Promise.all([
-  req.json(),
-  songsReq.json(),
-]);
-const headerTotal = Number(songsReq.headers.get('x-total-count'));
+let data!: Era;
+let songData!: (Song & { url: string; downloaded: number })[];
+let headerTotalRaw: string | null = null;
+try {
+  const [req, songsReq] = await Promise.all([fetchApi(`/eras/${id}`), fetchApi(songsPath)]);
+  [data, songData] = await Promise.all([req.json(), songsReq.json()]);
+  headerTotalRaw = songsReq.headers.get('x-total-count');
+} catch (error) {
+  const status = (error as { status?: number }).status;
+  if (status === 404) return Astro.redirect('/404');
+  throw error;
+}
+const headerTotal = Number(headerTotalRaw);
 const totalSongs = Number.isFinite(headerTotal) ? Math.max(0, Math.trunc(headerTotal)) : songData.length;
 const pageCount = Math.max(1, Math.ceil(totalSongs / ERA_PAGE_SIZE));
 const querySuffix = rawQuery ? `?q=${encodeURIComponent(rawQuery)}` : '';
@@ -39,7 +46,7 @@ const paginationBase = `/eras/${id}${querySuffix}`;
   <div class="main" style={`--dominantColor: ${dominantColor}`}>
     <BackButton />
     <div class="data">
-      <img src={coverUrl} alt="" />
+      <img src={coverUrl} alt="" width="512" height="512" fetchpriority="high" decoding="async" />
       <div class="text">
         <h1>{data.name}</h1>
         <p>{data.description}</p>

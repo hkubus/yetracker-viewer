@@ -20,8 +20,8 @@ async function mtimeOf(path: string): Promise<number | null> {
   }
 }
 
-export async function getDuration(path: string) {
-  const mtimeMs = await mtimeOf(path);
+export async function getDuration(path: string, knownMtimeMs?: number) {
+  const mtimeMs = knownMtimeMs ?? (await mtimeOf(path));
   const cached = durationCache.get(path);
   if (cached && mtimeMs !== null && cached.mtimeMs === mtimeMs) {
     // Refresh recency.

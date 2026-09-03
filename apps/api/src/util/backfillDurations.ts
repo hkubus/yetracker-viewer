@@ -5,7 +5,7 @@ import { filesTable } from '../db/schema.ts';
 import { getDuration } from './getDuration.ts';
 import { storedSongPath } from './storedFile.ts';
 
-const BACKFILL_CONCURRENCY = 2;
+const BACKFILL_CONCURRENCY = Number(process.env.BACKFILL_CONCURRENCY ?? 8) || 8;
 
 export async function cacheFileDuration(db: ReturnType<typeof drizzle>, file: { url: string; filename: string }) {
   const path = storedSongPath(file.filename);
@@ -16,23 +16,23 @@ export async function cacheFileDuration(db: ReturnType<typeof drizzle>, file: { 
     console.error(`backfill: missing file for ${file.url} (${file.filename})`, error);
     // Mark as not downloaded so boot backfill stops retrying a file that
     // will never resolve.
-    db.update(filesTable).set({ downloaded: 0 }).where(eq(filesTable.url, file.url)).run();
+    await db.update(filesTable).set({ downloaded: 0 }).where(eq(filesTable.url, file.url)).execute();
     return;
   }
   if (!details.isFile() || details.size === 0) {
     console.error(`backfill: zero-size file for ${file.url} (${file.filename}), marking duration 0`);
     // Record a zero duration so this row is excluded from future backfills
     // (`duration IS NULL`) instead of being retried on every boot.
-    db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).run();
+    await db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).execute();
     return;
   }
 
-  const duration = await getDuration(path);
+  const duration = await getDuration(path, details.mtimeMs);
   if (duration) {
-    db.update(filesTable).set({ duration }).where(eq(filesTable.url, file.url)).run();
+    await db.update(filesTable).set({ duration }).where(eq(filesTable.url, file.url)).execute();
   } else {
     console.error(`backfill: could not probe duration for ${file.url} (${file.filename}), marking duration 0`);
-    db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).run();
+    await db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).execute();
   }
 }
 

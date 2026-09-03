@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, lte, type SQL, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, type SQL, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { PRIMARY_CATALOG_ID } from '../../catalogs.ts';
@@ -51,10 +51,9 @@ export const routes = {
         availability?: string;
         playable?: string;
       };
-      const query = q?.trim().replaceAll(/\s+/g, ' ').toLocaleLowerCase();
-      // NOTE: lower() in SQLite is ASCII-only while toLocaleLowerCase() is
-      // locale-aware; both sides normalize case so ASCII search terms match
-      // consistently regardless of locale-specific casings.
+      const query = q?.trim().replaceAll(/\s+/g, ' ').toLowerCase();
+      // NOTE: SQLite lower() is ASCII-only; both sides use plain
+      // toLowerCase() (not locale-aware) so matching stays consistent.
       if (query && query.length > 100) {
         throw new HTTPException(400, { message: 'Search query is too long' });
       }
@@ -95,13 +94,7 @@ export const routes = {
           )
         )`;
         const matchesQuery = query ? sql<boolean>`instr(${searchableText}, ${query}) > 0` : undefined;
-        const eraPosition = sql<number>`(
-          SELECT count(*)
-          FROM songs AS era_song
-          WHERE era_song.catalog_id = ${PRIMARY_CATALOG_ID}
-            AND era_song.era = ${songsTable.eraId}
-            AND era_song.id <= ${songsTable.id}
-        )`;
+        const eraPosition = sql<number>`row_number() over (partition by ${songsTable.eraId} order by ${songsTable.id})`;
         const requestedLimit = paginationValue(limit, 50, 50, 'limit');
         const conditions: SQL[] = [eq(songsTable.catalogId, PRIMARY_CATALOG_ID)];
         if (query && matchesQuery) conditions.push(matchesQuery);
@@ -123,11 +116,15 @@ export const routes = {
             eraName: erasTable.name,
             dominantColor: erasTable.dominantColor,
             filename: filesTable.filename,
+            eraPosition,
           })
           .from(songsTable)
           .leftJoin(erasTable, eq(songsTable.eraId, erasTable.id))
           .leftJoin(filesTable, eq(songsTable.url, filesTable.url))
-          .where(and(...conditions));
+          .where(and(...conditions))
+          // Cap the candidate set before JS ranking: full-catalog scans
+          // deserialized thousands of rows per keystroke otherwise.
+          .limit(1000);
         let matches = databaseMatches.map(({ filename, ...song }) => ({
           ...song,
           playable: isSongPlayable(filename),
@@ -137,40 +134,39 @@ export const routes = {
         }
         const rankedMatches = query ? rankSongSearch(matches, query, requestedLimit) : matches.slice(0, requestedLimit);
         if (rankedMatches.length === 0) {
+          c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
           return c.json({ songs: [], total: matches.length });
         }
-        const positions = await db
-          .select({
-            id: songsTable.id,
-            eraPosition,
-          })
-          .from(songsTable)
-          .where(
-            and(
-              eq(songsTable.catalogId, PRIMARY_CATALOG_ID),
-              inArray(
-                songsTable.id,
-                rankedMatches.map((song) => song.id),
-              ),
-            ),
-          );
-        const positionBySongId = new Map(positions.map((song) => [song.id, song.eraPosition]));
         const positionedMatches = rankedMatches.map((song) => ({
           ...song,
-          eraPosition: positionBySongId.get(song.id) ?? 1,
+          eraPosition: song.eraPosition ?? 1,
         }));
 
+        c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
         return c.json({ songs: positionedMatches, total: matches.length });
       }
 
-      const requestedLimit = paginationValue(limit, 10_000, 10_000, 'limit');
-      const requestedOffset = paginationValue(offset, 0, 1_000_000, 'offset');
+      const requestedLimit = paginationValue(limit, 100, 500, 'limit');
+      const requestedOffset = paginationValue(offset, 0, 10_000, 'offset');
       const songs = await db
-        .select()
+        .select({
+          id: songsTable.id,
+          eraId: songsTable.eraId,
+          catalogId: songsTable.catalogId,
+          name: songsTable.name,
+          notes: songsTable.notes,
+          fileDate: songsTable.fileDate,
+          leakDate: songsTable.leakDate,
+          availableLength: songsTable.availableLength,
+          trackLength: songsTable.trackLength,
+          quality: songsTable.quality,
+          url: songsTable.url,
+        })
         .from(songsTable)
         .where(eq(songsTable.catalogId, PRIMARY_CATALOG_ID))
         .limit(requestedLimit)
         .offset(requestedOffset);
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
       return c.json(songs);
     },
   },

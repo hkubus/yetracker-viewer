@@ -16,13 +16,19 @@ const csp = [
   "connect-src 'self' http: https:",
 ].join('; ');
 
-export const onRequest = defineMiddleware(async (_context, next) => {
+export const onRequest = defineMiddleware(async (context, next) => {
   const response = await next();
   response.headers.set('Content-Security-Policy', csp);
   response.headers.set('Permissions-Policy', 'camera=(), geolocation=(), microphone=()');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  response.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+  if (new URL(context.request.url).protocol === 'https:') {
+    response.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+  }
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
+  const pathname = new URL(context.request.url).pathname;
+  if (pathname.startsWith('/eras/') || pathname.startsWith('/categories/') || pathname === '/') {
+    response.headers.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+  }
   return response;
 });

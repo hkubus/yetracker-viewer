@@ -1,4 +1,4 @@
-import { asc, eq, getColumns } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { db } from '../../db/client.ts';
 import { erasTable, filesTable, songsTable } from '../../db/schema.ts';
@@ -8,16 +8,25 @@ import { isSongPlayable } from '../../util/playableFiles.ts';
 const CATALOG_ID = 'album-copies';
 
 function normalizeName(value: string) {
-  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 export const routes = {
   get: {
     handler: async (c: Context) => {
-      const songData = getColumns(songsTable);
       const songs = await db
         .select({
-          ...songData,
+          id: songsTable.id,
+          eraId: songsTable.eraId,
+          catalogId: songsTable.catalogId,
+          name: songsTable.name,
+          notes: songsTable.notes,
+          fileDate: songsTable.fileDate,
+          leakDate: songsTable.leakDate,
+          availableLength: songsTable.availableLength,
+          trackLength: songsTable.trackLength,
+          quality: songsTable.quality,
+          url: songsTable.url,
           eraName: erasTable.name,
           eraImageUrl: erasTable.imageUrl,
           filename: filesTable.filename,
@@ -52,6 +61,7 @@ export const routes = {
         groups.set(key, group);
       }
 
+      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
       return c.json(Array.from(groups.values()));
     },
   },
