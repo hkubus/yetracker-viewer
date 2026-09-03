@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
-import { loadImage } from '@napi-rs/canvas';
 import { eq, isNull } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { songsPath, storagePath } from '../config.ts';
@@ -63,8 +62,7 @@ export async function downloadCovers(db: ReturnType<typeof drizzle>) {
 
       let dominantColorHex = '666666';
       try {
-        const imageCanvas = await loadImage(data);
-        const dominantColor = await getDominantColor(imageCanvas);
+        const dominantColor = await getDominantColor(coverPath);
         const extractedColor = dominantColor.map((e) => e.toString(16).padStart(2, '0')).join('');
         if (/^[\da-f]{6}$/i.test(extractedColor)) dominantColorHex = extractedColor;
       } catch (error) {
