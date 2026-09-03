@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { createWriteStream, existsSync } from 'node:fs';
 import { mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { loadImage } from '@napi-rs/canvas';
 import { eq, isNull } from 'drizzle-orm';
@@ -109,12 +111,28 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
         case 'pillows.su': {
           // continue;
           const hash = url.pathname.split('/').at(-1);
-          const data = await fetch(`https://api.pillows.su/api/download/${hash}`);
-          const buffer = await data.arrayBuffer();
+          const data = await fetch(`https://api.pillows.su/api/download/${hash}`, {
+            signal: AbortSignal.timeout(30 * 60_000),
+          });
+          if (!data.ok || !data.body) {
+            throw new Error(`Failed to download ${file.url}: HTTP ${data.status}`);
+          }
           const reportedExtension = data.headers.get('content-disposition')?.split('.').at(-1)?.slice(0, -1);
           const fileExtension = reportedExtension?.toLowerCase().match(/^[a-z0-9]{1,8}$/)?.[0] ?? 'bin';
           filename = `${filename}.${fileExtension}`;
-          await writeFile(join(songsPath, filename), Buffer.from(buffer));
+          // Stream the body straight to disk: buffering whole files with
+          // arrayBuffer() (+ another copy via Buffer.from) keeps up to 2x
+          // the file size on the heap per download.
+          const tempFilename = `${filename}.tmp`;
+          try {
+            await pipeline(
+              Readable.fromWeb(data.body as unknown as import('node:stream/web').ReadableStream),
+              createWriteStream(join(songsPath, tempFilename)),
+            );
+            await rename(join(songsPath, tempFilename), join(songsPath, filename));
+          } finally {
+            await unlink(join(songsPath, tempFilename)).catch(() => undefined);
+          }
           // console.log(`Downloaded ${path}`);
 
           break;

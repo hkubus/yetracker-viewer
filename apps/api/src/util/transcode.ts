@@ -13,8 +13,15 @@ export async function transcode(inputPath: string, quality: string = '128k', sig
     map_metadata: '0',
   });
 
-  if (signal?.aborted) converter.kill();
-  else signal?.addEventListener('abort', () => converter.kill(), { once: true });
+  const onAbort = () => {
+    converter.kill();
+    converterOutput.destroy();
+  };
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
+  // Drop the abort listener once the output settles so completed/failed
+  // transcodes don't pin the request signal (and its closures) in memory.
+  converterOutput.once('close', () => signal?.removeEventListener('abort', onAbort));
 
   const running = converter.run();
   running.catch((error) => {

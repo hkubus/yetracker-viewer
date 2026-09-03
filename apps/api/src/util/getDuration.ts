@@ -2,11 +2,19 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
+// Bounded LRU: every probed path used to stay in this Map forever,
+// leaking a promise (and its closures) per unique file.
+const MAX_CACHED_DURATIONS = 500;
 const durationCache = new Map<string, Promise<number | null>>();
 
 export async function getDuration(path: string) {
   const cached = durationCache.get(path);
-  if (cached) return cached;
+  if (cached) {
+    // Refresh recency.
+    durationCache.delete(path);
+    durationCache.set(path, cached);
+    return cached;
+  }
 
   const result = run(
     'ffprobe',
@@ -22,5 +30,11 @@ export async function getDuration(path: string) {
       throw error;
     });
   durationCache.set(path, result);
+  while (durationCache.size > MAX_CACHED_DURATIONS) {
+    // Evict the least recently used entry (Maps iterate in insertion order).
+    const oldest = durationCache.keys().next();
+    if (oldest.done) break;
+    durationCache.delete(oldest.value);
+  }
   return result;
 }

@@ -1,14 +1,12 @@
-import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname } from 'node:path';
-import { Readable } from 'node:stream';
 import { eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { stream } from 'hono/streaming';
 import { db } from '../../../db/client.ts';
 import { filesTable, songsTable } from '../../../db/schema.ts';
 import { positiveInteger } from '../../../util/request.ts';
+import { streamFile } from '../../../util/serveFile.ts';
 import { storedSongPath } from '../../../util/storedFile.ts';
 
 function downloadName(name: string | null, id: number, extension: string) {
@@ -68,10 +66,7 @@ export const routes = {
         `attachment; filename="song-${songId}${extname(song.filename)}"; filename*=UTF-8''${encodeHeaderFilename(filename)}`,
       );
 
-      return stream(c, async (output) => {
-        const input = createReadStream(path);
-        await output.pipe(Readable.toWeb(input) as ReadableStream);
-      });
+      return streamFile(c, path);
     },
   },
 };

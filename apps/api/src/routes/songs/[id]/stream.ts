@@ -1,6 +1,4 @@
-import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { Readable } from 'node:stream';
 import { eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
@@ -9,6 +7,7 @@ import { maxConcurrentTranscodes } from '../../../config.ts';
 import { db } from '../../../db/client.ts';
 import { filesTable, songsTable } from '../../../db/schema.ts';
 import { positiveInteger } from '../../../util/request.ts';
+import { streamFile } from '../../../util/serveFile.ts';
 import { storedSongPath } from '../../../util/storedFile.ts';
 import { transcode } from '../../../util/transcode.ts';
 
@@ -142,17 +141,11 @@ export const routes = {
           c.header('Content-Range', `bytes ${start}-${end}/${fileSize}`);
           c.header('Content-Length', String(end - start + 1));
           c.status(206);
-          return stream(c, async (output) => {
-            const input = createReadStream(path, { start, end });
-            await output.pipe(Readable.toWeb(input) as ReadableStream);
-          });
+          return streamFile(c, path, { start, end });
         }
 
         c.header('Content-Length', String(fileSize));
-        return stream(c, async (output) => {
-          const input = createReadStream(path);
-          await output.pipe(Readable.toWeb(input) as ReadableStream);
-        });
+        return streamFile(c, path);
       } catch (e) {
         if (e instanceof HTTPException) {
           throw e;
