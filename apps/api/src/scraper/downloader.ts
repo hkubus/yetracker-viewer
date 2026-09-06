@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { eq, isNull, or } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
-import { songsPath, storagePath } from '../config.ts';
+import { songsPath, storagePath, youtubeDownload } from '../config.ts';
 import { erasTable, filesTable } from '../db/schema.ts';
 import { getDominantColor } from '../util/getDominantColor.ts';
 import { deleteInvalidFile, probeAudioFile } from '../util/invalidFiles.ts';
@@ -222,7 +222,19 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
           break;
         }
         case 'youtu.be':
-        case 'www.youtube.com':
+        case 'www.youtube.com': {
+          if (!youtubeDownload) {
+            // Disabled via YOUTUBE_DOWNLOAD=false: leave the row pending
+            // (downloaded = 0) so enabling it later resumes these downloads.
+            // Already-downloaded files are untouched and keep serving.
+            console.log(`skipping YouTube download (YOUTUBE_DOWNLOAD=false): ${file.url}`);
+            filename = '';
+            break;
+          }
+          await downloadYtdlp(url, filename);
+          filename = `${filename}.ogg`;
+          break;
+        }
         case 'www.instagram.com':
         case 'twitter.com': {
           await downloadYtdlp(url, filename);

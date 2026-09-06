@@ -82,6 +82,9 @@ if (apiHost.length === 0) {
 export const apiPort = readPort(process.env.API_PORT ?? process.env.PORT, 3000);
 export const corsOrigins = readOrigins(process.env.CORS_ORIGINS);
 export const syncOnStart = !['0', 'false', 'no'].includes((process.env.SYNC_ON_START ?? 'true').trim().toLowerCase());
+export const youtubeDownload = !['0', 'false', 'no'].includes(
+  (process.env.YOUTUBE_DOWNLOAD ?? 'true').trim().toLowerCase(),
+);
 export const maxConcurrentTranscodes = readPositiveInteger(
   process.env.MAX_CONCURRENT_TRANSCODES,
   2,
