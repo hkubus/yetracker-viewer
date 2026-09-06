@@ -7,6 +7,7 @@ import { stream } from 'hono/streaming';
 import { maxConcurrentTranscodes } from '../../../config.ts';
 import { db } from '../../../db/client.ts';
 import { filesTable, songsTable } from '../../../db/schema.ts';
+import { deleteInvalidFile, probeAudioFile } from '../../../util/invalidFiles.ts';
 import { getFileMeta } from '../../../util/playableFiles.ts';
 import { positiveInteger } from '../../../util/request.ts';
 import { streamFile } from '../../../util/serveFile.ts';
@@ -40,6 +41,8 @@ export const routes = {
           .select({
             id: songsTable.id,
             filename: filesTable.filename,
+            url: filesTable.url,
+            duration: filesTable.duration,
           })
           .from(songsTable)
           .leftJoin(filesTable, eq(songsTable.url, filesTable.url))
@@ -56,6 +59,12 @@ export const routes = {
 
         const { filename } = song;
         const path = storedSongPath(filename);
+        if (song.duration === 0) {
+          // Legacy marker for files that failed probing — remove the broken
+          // file so it is re-downloaded instead of served forever.
+          await deleteInvalidFile(db, { filename, url: song.url }, 'no-duration');
+          throw new HTTPException(404, { message: 'Song file not found' });
+        }
         const cachedMeta = getFileMeta(filename);
         let fileSize = cachedMeta?.size ?? 0;
         let mtimeMs = cachedMeta?.mtimeMs ?? 0;
@@ -63,15 +72,22 @@ export const routes = {
           try {
             const file = await stat(path);
             if (!file.isFile() || file.size === 0) {
+              await deleteInvalidFile(db, { filename, url: song.url }, 'empty');
               throw new HTTPException(404, { message: 'Song file not found' });
             }
             fileSize = file.size;
             mtimeMs = file.mtimeMs;
           } catch (error) {
             if (error instanceof HTTPException) throw error;
+            if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+              // File is gone but the row claims it is downloaded — reset so
+              // the downloader retries it instead of 404ing forever.
+              await deleteInvalidFile(db, { filename, url: song.url }, 'missing');
+            }
             throw new HTTPException(404, { message: 'Song file not found' });
           }
         } else if (fileSize === 0) {
+          await deleteInvalidFile(db, { filename, url: song.url }, 'empty');
           throw new HTTPException(404, { message: 'Song file not found' });
         }
 
@@ -105,7 +121,21 @@ export const routes = {
                 const response = await transcode(path, `${qualityParsed}k`, c.req.raw.signal);
                 await output.pipe(response);
               } catch (error) {
-                if (!c.req.raw.signal.aborted) console.error('failed to transcode song', error);
+                if (!c.req.raw.signal.aborted) {
+                  console.error('failed to transcode song', error);
+                  // A failed transcode often means a corrupt source file —
+                  // probe it and remove it for re-download only if the probe
+                  // confirms it is invalid. Probing fail-opens when ffprobe
+                  // itself is unavailable, so transient errors never delete.
+                  try {
+                    const probe = await probeAudioFile(filename);
+                    if (!probe.valid) {
+                      await deleteInvalidFile(db, { filename, url: song.url }, probe.reason ?? 'unreadable');
+                    }
+                  } catch {
+                    // Best-effort cleanup only; the original error below is what matters.
+                  }
+                }
                 throw error;
               } finally {
                 activeTranscodes--;

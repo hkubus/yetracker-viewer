@@ -3,6 +3,8 @@ import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { filesTable } from '../db/schema.ts';
 import { getDuration } from './getDuration.ts';
+import { deleteInvalidFile } from './invalidFiles.ts';
+import { setSongPlayable } from './playableFiles.ts';
 import { storedSongPath } from './storedFile.ts';
 
 const BACKFILL_CONCURRENCY = Number(process.env.BACKFILL_CONCURRENCY ?? 8) || 8;
@@ -13,26 +15,38 @@ export async function cacheFileDuration(db: ReturnType<typeof drizzle>, file: { 
   try {
     details = await stat(path);
   } catch (error) {
-    console.error(`backfill: missing file for ${file.url} (${file.filename})`, error);
-    // Mark as not downloaded so boot backfill stops retrying a file that
-    // will never resolve.
-    await db.update(filesTable).set({ downloaded: 0 }).where(eq(filesTable.url, file.url)).execute();
+    console.error(`backfill: missing file for ${file.url} (${file.filename}), resetting for re-download`, error);
+    // The file is gone but the row claims it is downloaded — reset so the
+    // downloader retries it instead of serving a 404 forever.
+    setSongPlayable(file.filename, false);
+    await db.update(filesTable).set({ downloaded: 0, duration: null }).where(eq(filesTable.url, file.url)).execute();
     return;
   }
   if (!details.isFile() || details.size === 0) {
-    console.error(`backfill: zero-size file for ${file.url} (${file.filename}), marking duration 0`);
-    // Record a zero duration so this row is excluded from future backfills
-    // (`duration IS NULL`) instead of being retried on every boot.
-    await db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).execute();
+    console.error(`backfill: empty file for ${file.url} (${file.filename}), deleting for re-download`);
+    await deleteInvalidFile(db, { filename: file.filename, url: file.url }, 'empty');
     return;
   }
 
-  const duration = await getDuration(path, details.mtimeMs);
+  let duration: number | null;
+  try {
+    duration = await getDuration(path, details.mtimeMs);
+  } catch (error) {
+    // Fail open when ffprobe itself is missing (spawn ENOENT): leave the row
+    // alone so a broken environment never mass-deletes the library.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      console.error(`backfill: ffprobe unavailable, skipping ${file.url} (${file.filename})`, error);
+      return;
+    }
+    console.error(`backfill: unreadable file for ${file.url} (${file.filename}), deleting for re-download`, error);
+    await deleteInvalidFile(db, { filename: file.filename, url: file.url }, 'unreadable');
+    return;
+  }
   if (duration) {
     await db.update(filesTable).set({ duration }).where(eq(filesTable.url, file.url)).execute();
   } else {
-    console.error(`backfill: could not probe duration for ${file.url} (${file.filename}), marking duration 0`);
-    await db.update(filesTable).set({ duration: 0 }).where(eq(filesTable.url, file.url)).execute();
+    console.error(`backfill: unprobable file for ${file.url} (${file.filename}), deleting for re-download`);
+    await deleteInvalidFile(db, { filename: file.filename, url: file.url }, 'no-duration');
   }
 }
 

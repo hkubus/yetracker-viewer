@@ -11,6 +11,7 @@ import type { drizzle } from 'drizzle-orm/node-sqlite';
 import { songsPath, storagePath } from '../config.ts';
 import { erasTable, filesTable } from '../db/schema.ts';
 import { getDominantColor } from '../util/getDominantColor.ts';
+import { deleteInvalidFile, probeAudioFile } from '../util/invalidFiles.ts';
 import { refreshSongPlayable, setSongPlayable } from '../util/playableFiles.ts';
 
 const run = promisify(execFile);
@@ -88,7 +89,7 @@ export async function downloadCovers(db: ReturnType<typeof drizzle>) {
             '-i',
             tempPath,
             '-vf',
-            'scale=512:512',
+            'scale=512:512:force_original_aspect_ratio=increase,crop=512:512,setsar=1',
             '-c:v',
             'libsvtav1',
             '-crf',
@@ -173,11 +174,21 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
     if (completed % 50 === 0) console.log('downloaded', completed, 'of', files.length, 'files');
     let filename = createHash('sha256').update(file.url).digest('hex');
     if (hashToExtension.has(filename)) {
-      filename = `${filename}.${hashToExtension.get(filename)}`;
-      await db.update(filesTable).set({ downloaded: 1, filename }).where(eq(filesTable.url, file.url)).execute();
-      await refreshSongPlayable(filename);
-      completed++;
-      return;
+      const reused = `${filename}.${hashToExtension.get(filename)}`;
+      const probe = await probeAudioFile(reused);
+      if (probe.valid) {
+        await db
+          .update(filesTable)
+          .set({ downloaded: 1, filename: reused })
+          .where(eq(filesTable.url, file.url))
+          .execute();
+        await refreshSongPlayable(reused);
+        completed++;
+        return;
+      }
+      // A file with this hash is already on disk but it is corrupt or not
+      // audio — remove it and fall through to download a fresh copy below.
+      await deleteInvalidFile(db, { filename: reused, url: file.url }, probe.reason ?? 'unreadable');
     }
     try {
       const url = new URL(file.url);
@@ -228,6 +239,12 @@ export async function downloadSongs(db: ReturnType<typeof drizzle>) {
       filename = '';
     }
     if (filename !== '') {
+      const probe = await probeAudioFile(filename);
+      if (!probe.valid) {
+        await deleteInvalidFile(db, { filename, url: file.url }, probe.reason ?? 'unreadable');
+        completed++;
+        return;
+      }
       await db.update(filesTable).set({ downloaded: 1, filename }).where(eq(filesTable.url, file.url)).execute();
       await refreshSongPlayable(filename);
     }

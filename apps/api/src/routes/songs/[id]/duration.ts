@@ -5,6 +5,7 @@ import { HTTPException } from 'hono/http-exception';
 import { db } from '../../../db/client.ts';
 import { filesTable, songsTable } from '../../../db/schema.ts';
 import { getDuration } from '../../../util/getDuration.ts';
+import { deleteInvalidFile } from '../../../util/invalidFiles.ts';
 import { positiveInteger } from '../../../util/request.ts';
 import { storedSongPath } from '../../../util/storedFile.ts';
 
@@ -31,6 +32,12 @@ export const routes = {
 
       try {
         if (song.duration != null) {
+          if (song.duration === 0) {
+            // Legacy marker for files that failed probing — remove the broken
+            // file so it is re-downloaded instead of reported as 0s forever.
+            await deleteInvalidFile(db, { filename: song.filename, url: song.url }, 'no-duration');
+            throw new HTTPException(422, { message: 'Could not determine file duration' });
+          }
           c.header('Cache-Control', 'public, max-age=86400, immutable');
           return c.json({ duration: song.duration });
         }
@@ -61,6 +68,7 @@ export const routes = {
         }
         const duration = await pending;
         if (duration == null) {
+          await deleteInvalidFile(db, { filename: song.filename, url: song.url }, 'no-duration');
           throw new HTTPException(422, { message: 'Could not determine file duration' });
         }
         if (song.url) {
@@ -72,6 +80,12 @@ export const routes = {
         if (error instanceof HTTPException) throw error;
         if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
           throw new HTTPException(404, { message: 'Song file not found' });
+        }
+        // ffprobe exited non-zero on the file itself (not a missing binary):
+        // the file is corrupt, so remove it for re-download.
+        if (typeof (error as { code?: unknown })?.code === 'number' && song.url) {
+          await deleteInvalidFile(db, { filename: song.filename, url: song.url }, 'unreadable');
+          throw new HTTPException(422, { message: 'Could not determine file duration' });
         }
         console.error('failed to read song duration', error);
         throw new HTTPException(500, { message: 'Could not determine file duration' });
