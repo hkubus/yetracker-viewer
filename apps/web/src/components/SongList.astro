@@ -384,12 +384,14 @@ function eraIdAttr(song: SongRow): string | undefined {
         transition:
             color 120ms ease,
             background-color 120ms ease;
-        svg {
-            width: 1.25em;
-            height: 1.25em;
-        }
         background-color: transparent;
         border: 0;
+    }
+    .play-song svg,
+    .download-song svg,
+    .source-link svg {
+        width: 1.25em;
+        height: 1.25em;
     }
     .download-song,
     .source-link {

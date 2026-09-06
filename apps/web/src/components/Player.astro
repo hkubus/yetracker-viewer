@@ -397,17 +397,17 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         min-width: 0;
         align-items: center;
         gap: 0.75rem;
-        img {
-            width: 3rem;
-            height: 3rem;
-            flex: 0 0 auto;
-            object-fit: cover;
-            border-radius: 0.65rem;
-            background: rgb(0 0 0 / 20%);
-        }
-        img:not([src]) {
-            visibility: hidden;
-        }
+    }
+    .info img {
+        width: 3rem;
+        height: 3rem;
+        flex: 0 0 auto;
+        object-fit: cover;
+        border-radius: 0.65rem;
+        background: rgb(0 0 0 / 20%);
+    }
+    .info img:not([src]) {
+        visibility: hidden;
     }
     .metadata {
         min-width: 0;
