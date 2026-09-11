@@ -1,0 +1,83 @@
+//! Route table and shared response helpers.
+
+use axum::body::Body;
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::Response;
+use serde_json::Value;
+
+use crate::state::SharedState;
+
+pub mod album_copies;
+pub mod categories;
+pub mod eras;
+pub mod songs;
+
+pub const JSON_CACHE: &str = "public, max-age=60, s-maxage=300, stale-while-revalidate=600";
+pub const COVER_CACHE: &str = "public, max-age=86400, immutable";
+pub const MEDIA_CACHE: &str = "public, max-age=31536000, immutable";
+pub const DURATION_CACHE: &str = "public, max-age=86400, immutable";
+
+pub fn json_response(value: Value) -> Response {
+    let body = serde_json::to_vec(&value).expect("JSON value is always serialisable");
+    let mut response = Response::new(Body::from(body));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
+
+pub fn json_cached(value: Value) -> Response {
+    let mut response = json_response(value);
+    set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);
+    response
+}
+
+pub fn empty(status: StatusCode) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = status;
+    response
+}
+
+pub fn set_header(response: &mut Response, name: header::HeaderName, value: &str) {
+    if let Ok(value) = HeaderValue::from_str(value) {
+        response.headers_mut().insert(name, value);
+    }
+}
+
+pub fn router(state: SharedState) -> axum::Router {
+    use axum::routing::get;
+
+    axum::Router::new()
+        .route("/health", get(health))
+        .route("/hello", get(hello))
+        .route("/eras", get(eras::list_eras))
+        .route("/eras/{id}", get(eras::get_era))
+        .route("/eras/{id}/songs", get(eras::list_era_songs))
+        .route("/eras/{id}/cover", get(eras::get_era_cover))
+        .route("/songs", get(songs::list_songs))
+        .route("/songs/{id}", get(songs::get_song))
+        .route("/songs/{id}/stream", get(songs::stream_song))
+        .route("/songs/{id}/download", get(songs::download_song))
+        .route("/songs/{id}/duration", get(songs::get_song_duration))
+        .route("/categories", get(categories::list_categories))
+        .route("/categories/{id}", get(categories::get_category))
+        .route("/categories/{id}/songs", get(categories::list_category_songs))
+        .route("/album-copies", get(album_copies::list_album_copies))
+        .fallback(not_found)
+        .method_not_allowed_fallback(not_found)
+        .with_state(state)
+}
+
+async fn health() -> Response {
+    json_response(serde_json::json!({ "status": "ok" }))
+}
+
+async fn hello() -> Response {
+    json_response(serde_json::json!({ "hello": "world" }))
+}
+
+async fn not_found() -> Response {
+    let mut response = json_response(serde_json::json!({ "error": "Not found" }));
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
+}
