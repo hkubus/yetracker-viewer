@@ -3,30 +3,33 @@
 Branch: `rust-port` (created off `main`). Plan: `RUST_PORT_PLAN.md` (repo root).
 Acceptance gate: `apps/api/tests/api.test.mjs` (black-box, adaptive).
 
-Work stopped mid-Phase 1. The crate **compiles and its unit tests pass**, but the
-HTTP layer is not wired up yet, so the acceptance suite has **not** been run
-against Rust.
+**Status: Phases 1–3 are implemented.** The crate compiles, `cargo test` passes,
+the full acceptance suite passes 45/45 against the Rust binary (including media),
+and header/body parity was diffed byte-for-byte against the running Node original.
+The catalog importer, cover/song downloader and duration backfill are ported and
+validated against live services.
 
 ## Verified right now
 
 ```bash
-# unit tests (18/18)
-cd apps/api-rs && cargo test --lib
+cd apps/api-rs && cargo test              # 23 lib + 2 ignored live smoke tests
+cd apps/api-rs && cargo build
 
-# Node baseline / acceptance gate (45/45, ~1.1s)
-cp -r storage /tmp/yt-test
-cd apps/api && SYNC_ON_START=false STORAGE_DIR=/tmp/yt-test API_PORT=3100 node src/index.ts &
-API_BASE_URL=http://127.0.0.1:3100 node --test tests/
+# acceptance (Rust) — 45/45
+cp -r storage /tmp/yt-test-rs        # seed a playable fixture, see below
+# Pin SONGS_DIR too: the binary now loads .env, whose SONGS_DIR is absolute.
+SYNC_ON_START=false STORAGE_DIR=/tmp/yt-test-rs SONGS_DIR=/tmp/yt-test-rs/songs \
+  API_PORT=3200 ./target/release/yetracker-api &
+API_BASE_URL=http://127.0.0.1:3200 node --test ../api/tests/
 ```
 
-`storage/songs/` is **empty**, so every media *success* test self-skips
-(`t.skip('no playable songs on this server')`) and passes vacuously. Phase 2
-(stream/download/duration/transcode) is therefore **not exercised at all** by
-the current run. Before trusting Phase 2, seed the copy with a playable fixture:
+Seed a playable fixture (`storage/songs/` is empty otherwise, so media success
+tests skip). Use `cp -p` so Node and Rust copies share an mtime/ETag:
 
 ```bash
-ffmpeg -f lavfi -i "sine=frequency=440:duration=2" -b:a 32k /tmp/yt-test/songs/yt-port-fixture.mp3
-sqlite3 /tmp/yt-test/db.sqlite3 <<'SQL'
+ffmpeg -loglevel error -y -f lavfi -i "sine=frequency=440:duration=2" -b:a 32k /tmp/fixture.mp3
+cp -p /tmp/fixture.mp3 /tmp/yt-test-rs/songs/yt-port-fixture.mp3
+sqlite3 /tmp/yt-test-rs/db.sqlite3 <<'SQL'
 INSERT INTO files (url, downloaded, filename, duration)
   VALUES ('https://example.invalid/yt-port-fixture', 1, 'yt-port-fixture.mp3', NULL);
 INSERT INTO songs (id, era, catalog_id, name, notes, file_date, leak_date,
@@ -36,101 +39,84 @@ INSERT INTO songs (id, era, catalog_id, name, notes, file_date, leak_date,
 SQL
 ```
 
-`duration` is deliberately NULL so `/songs/:id/duration` exercises the real
-ffprobe path. Use **separate copies** for the Node and Rust runs
-(`/tmp/yt-test-node`, `/tmp/yt-test-rs`) — media 404 paths mutate `files` rows.
+## Phase 3 live checks (network, ignored by default)
 
-## Done (written, compiles, unit-tested)
+```bash
+# Importer parity: same saved sheet through Rust and importer.ts -> 9480 songs,
+# 46 eras, and a byte-identical 6147-URL set.
+IMPORT_SHEET=/tmp/sheet.html cargo test --lib live_sheet_snapshot -- --ignored --nocapture
+
+# Downloader: fetches/marks/probes a real pillows.su file.
+cargo test --test downloader_live -- --ignored --nocapture
+
+# Covers: fetches an image, encodes AVIF with ffmpeg, samples the colour.
+cargo test --test covers_live -- --ignored --nocapture
+```
+
+A full `SYNC_ON_START=true` boot was also run against a throwaway dir: all 11
+catalogs imported (e.g. Unreleased 9480 songs, files table denormalised).
+
+## Layout
 
 | File | Mirrors | Notes |
 |---|---|---|
 | `src/config.rs` | `config.ts` | same env names/defaults/messages, workspace-root walk, `mkdir -p` |
 | `src/catalogs.rs` | `catalogs.ts` | table copied verbatim |
 | `src/db.rs` | `db/client.ts` + DDL in `index.ts` | r2d2 pool, PRAGMAs per connection, verbatim DDL + `table_info` migrations |
-| `src/error.rs` | Hono error semantics | `Http` → `text/plain;charset=UTF-8` body = message; `Unexpected` → `500 {"error":"Internal server error"}` + log |
+| `src/error.rs` | Hono error semantics | `Http` → `text/plain;charset=UTF-8`; `Unexpected` → `500 {"error":"Internal server error"}` + log |
 | `src/request.rs` | `util/request.ts` | `positiveInteger`, `paginationValue`, `escapeLikePattern` |
-| `src/text.rs` | JS string semantics | `\s` set incl. U+FEFF, `trim`, collapse, `toLowerCase`, UTF-16 length |
+| `src/text.rs` | JS string semantics | `\s` set incl. U+FEFF, `trim`, collapse, lower-case, UTF-16 length |
 | `src/playable.rs` | `util/playableFiles.ts` | atomic set swap, 32-way scan, `storedSongPath`, `isSafeFilename` |
 | `src/cover_version.rs` | `util/coverVersion.ts` | sha1[..12], LRU 1000 |
 | `src/rank.rs` | `util/rankSongSearch.ts` | full port incl. max-heap and NaN comparator semantics |
-| `src/serve.rs` | `util/serveFile.ts` + range blocks | range parsing, abort-safe streaming body |
+| `src/serve.rs` | `util/serveFile.ts` + range blocks | range parsing (safe-integer bounds), abort-safe streaming |
 | `src/media.rs` | `util/getDuration.ts`, `util/invalidFiles.ts` | shared duration futures, probe, `deleteInvalidFile` |
 | `src/repair.rs` | `util/repairEras.ts` | runs at startup |
-| `src/state.rs` | — | `AppState`: pool, caches, transcode semaphore |
-| `src/routes/mod.rs` | — | full route table + JSON/cache helpers |
+| `src/dominant_color.rs` | `util/getDominantColor.ts` | ffmpeg strip sample, mtime LRU + in-flight dedup |
+| `src/backfill.rs` | `util/backfillDurations.ts` | concurrency from `BACKFILL_CONCURRENCY` |
+| `src/importer.rs` | `scraper/importer.ts` | reqwest + scraper, transactional replace |
+| `src/downloader.rs` | `scraper/downloader.ts` | reqwest covers (ffmpeg AVIF) + pillows/yt-dlp songs |
+| `src/state.rs` | — | `AppState`: pool, caches, transcode semaphore, `DominantColors` |
+| `src/routes/**` | `routes/**` | full route table (eras/songs/categories/album-copies) |
+| `src/main.rs` | `index.ts` | boot, CORS + secure-headers + compression, background sync, shutdown |
 
-## Not written yet
+## Config / .env
 
-1. `src/routes/eras.rs`, `songs.rs`, `categories.rs`, `album_copies.rs` —
-   declared in `routes/mod.rs`, so the crate will not build until they exist.
-2. `src/main.rs` — still the `cargo new` hello world. Needs: config load → pool →
-   `run_migrations` → `repair_era_duplicates` → `playable.refresh()` → router →
-   bind → `println!("API listening on http://{host}:{port}")` (that exact line is
-   the hub readiness pattern), SIGINT/SIGTERM graceful shutdown.
-3. `src/lib.rs` — add `pub mod routes;`.
-4. Middleware stack in `main.rs` (see below).
-5. Transcode path in `stream?quality=` (semaphore + `ffmpeg … pipe:1` stream).
-6. Seed the media fixture (above) and run the suite against Rust.
+`Config::load` mirrors the Node scripts' `--env-file ../../.env`: it loads the
+repo-root `.env` (found by walking up from the executable to `package.json`) with
+`dotenvy`, **without** overriding variables already present in the environment —
+the same precedence as Node's `--env-file`. A `.env` containing
+`STORAGE_DIR=./storage` and an absolute `SONGS_DIR` therefore resolves to the
+exact same `storage/db.sqlite3` and media directory the Node server uses. Running
+`SYNC_ON_START=true` (the default) performs the import + background chain too, so
+the binary is a drop-in for `node src/index.ts`.
 
-## Middleware: do NOT use `tower-http`'s `CorsLayer`
+## Middleware parity notes
 
-Probed against the running Node original:
+* Hand-rolled CORS: always `Access-Control-Expose-Headers: X-Total-Count` and
+  `Vary: Origin`; echoes an allowed `Origin` (or `*` if configured); `OPTIONS`
+  short-circuits to `204` with allow-methods and echoes
+  `Access-Control-Request-Headers`. Do **not** use `tower-http`'s `CorsLayer`
+  (it lower-cases the exposed header value, which the test matches exactly).
+* Secure headers reproduce hono `secureHeaders` defaults; CORP is `cross-origin`.
+* Compression: `tower-http::CompressionLayer` with a predicate limiting it to
+  `application/json` / `text/*`. Hono has no effective size threshold because its
+  responses carry no `Content-Length` at middleware time, so neither do we.
+* 416 responses use an unknown-length empty body so hyper emits
+  `Transfer-Encoding: chunked` (no `Content-Length`), matching Hono.
+* `js_float` serialises whole-float durations without serde_json's `.0` suffix,
+  matching `JSON.stringify`.
 
-| Case | Observed |
-|---|---|
-| no `Origin` | `access-control-expose-headers: X-Total-Count`, `vary: Origin` |
-| allowed `Origin` | + `access-control-allow-origin: <echo>` |
-| disallowed `Origin` | **no** `access-control-allow-origin` |
-| `OPTIONS` (any path, even unknown) | `204` + `access-control-allow-methods: GET,HEAD,OPTIONS` + expose + ACAO + `vary: Origin` |
-| `POST /health` | `404` JSON `{"error":"Not found"}` (not 405) |
-| unknown path | `404` JSON `{"error":"Not found"}` |
-| 400 from a route | `text/plain;charset=UTF-8`, body = message, no newline |
-| `/eras/1/cover` with `Range` | `200` full body (covers ignore ranges) |
+## Known deviations (no test coverage)
 
-`CorsLayer` only emits CORS headers when `Origin` is present, and lowercases the
-exposed header value to `x-total-count` — the test asserts `/X-Total-Count/`
-case-sensitively. Hand-roll a `middleware::from_fn` instead (OPTIONS short-circuit
-→ 204, else run inner and then attach headers).
-
-Secure headers to reproduce (hono `secureHeaders` defaults, observed):
-`cross-origin-opener-policy: same-origin`,
-`cross-origin-resource-policy: cross-origin`,
-`origin-agent-cluster: ?1`, `referrer-policy: no-referrer`,
-`strict-transport-security: max-age=15552000; includeSubDomains`,
-`x-content-type-options: nosniff`, `x-dns-prefetch-control: off`,
-`x-download-options: noopen`, `x-frame-options: SAMEORIGIN`,
-`x-permitted-cross-domain-policies: none`, `x-xss-protection: 0`.
-
-Compression: hono compresses only when the content-type is in
-`COMPRESSIBLE_CONTENT_TYPE_REGEX` (JSON/text yes, `image/avif` no) and either
-`Content-Length` is absent or `>= 1024`; it drops `Content-Length` and prefixes
-`W/` to `ETag`. `tower_http::compression::CompressionLayer` with a custom
-`Predicate` covering our two served types (`application/json`, `text/*`) is
-enough; note hyper sets `Content-Length` on full JSON bodies, so small JSON
-stays uncompressed (accepted deviation, no test covers it).
-
-## Gotchas already handled
-
-* `escape '\'` in SQL must be written `"escape '\\'"` in Rust — the JS template
-  literal `sql`'\\'`` collapses to a single backslash.
-* `rank.rs` reproduces JS comparator `NaN` semantics: `sort` coerces NaN → `+0`
-  (stable), but the max-heap's raw `>= 0` / `> 0` checks treat NaN as *false*.
-  `compare_ranked` returns `f64` for exactly this reason.
-* `Shared<BoxFuture<…>>` needs `duration_future(…).await.await` in `get_duration`.
-* `isSafeFilename` accepts `.`/`..`; only `storedSongPath` rejects them.
-* axum 0.8 uses `{id}` path syntax (the plan mentions axum 0.7 / `:id`); the crate
-  is on axum 0.8.9 with `http-body` + `httpdate` added for the streaming/cover
-  paths.
-* `Query<HashMap<String, String>>` is the planned query extractor; note
-  `?quality=` must be treated as falsy (JS `if (quality)`).
-
-## Extra verification worth doing
-
-Run both servers against fresh copies and diff the eras table after startup
-(`SYNC_ON_START=false`), which isolates `repairEraDuplicates`:
-
-```bash
-sqlite3 /tmp/yt-test-node/db.sqlite3 "select * from eras order by id" > /tmp/eras-node.txt
-sqlite3 /tmp/yt-test-rs/db.sqlite3   "select * from eras order by id" > /tmp/eras-rs.txt
-diff /tmp/eras-node.txt /tmp/eras-rs.txt
-```
+* `importer.rs` date parsing approximates `Date.parse` with a set of common
+  formats (date-only forms treated as UTC).
+* Like the original (and because the current sheet gained a stats column), the
+  primary catalog's 5-cell era-image branch no longer matches the 6-cell era
+  rows, so fresh imports leave `eras.image_url` empty. This is parity, not a
+  regression — do not "fix" only the Rust side without changing `importer.ts`.
+* `rank.rs` uses an approximated collator (case-insensitive + numeric, no accent
+  folding) for the final title tie-break.
+* `download_name` truncates by Unicode scalar values rather than UTF-16 units.
+* Background sync runs the same phases in order; log lines are close but not
+  identical to Node's (no per-50 download progress line).

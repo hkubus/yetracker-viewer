@@ -38,6 +38,17 @@ pub fn empty(status: StatusCode) -> Response {
     response
 }
 
+/// Serialises a float the way `JSON.stringify` does: whole numbers lose their
+/// `.0` suffix (Rust's serde_json would otherwise emit `2.0` where Node emits
+/// `2`), and non-finite values become `null`.
+pub fn js_float(value: f64) -> Value {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+        Value::Number(serde_json::Number::from(value as i64))
+    } else {
+        serde_json::Number::from_f64(value).map(Value::Number).unwrap_or(Value::Null)
+    }
+}
+
 pub fn set_header(response: &mut Response, name: header::HeaderName, value: &str) {
     if let Ok(value) = HeaderValue::from_str(value) {
         response.headers_mut().insert(name, value);

@@ -30,11 +30,35 @@ pub fn parse_range(header: &str, size: u64) -> Option<FileRange> {
     }
 
     let size = size as i128;
-    let mut start: i128 = if start_text.is_empty() { 0 } else { start_text.parse().ok()? };
-    let mut end: i128 = if end_text.is_empty() { size - 1 } else { end_text.parse().ok()? };
+    // JS `Number.isSafeInteger`: values above 2^53-1 are rejected rather than
+    // clamped, matching both routes' unsafe-integer handling.
+    const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
 
-    if start_text.is_empty() && !end_text.is_empty() {
-        let suffix_length: i128 = end_text.parse().ok()?;
+    let suffix = start_text.is_empty() && !end_text.is_empty();
+    let mut start: i128 = if start_text.is_empty() {
+        0
+    } else {
+        let parsed: i128 = start_text.parse().ok()?;
+        if parsed > MAX_SAFE_INTEGER {
+            return None;
+        }
+        parsed
+    };
+    let mut end: i128 = if end_text.is_empty() {
+        size - 1
+    } else if suffix {
+        // Overwritten below; a huge suffix simply clamps to the whole file.
+        0
+    } else {
+        let parsed: i128 = end_text.parse().ok()?;
+        if parsed > MAX_SAFE_INTEGER {
+            return None;
+        }
+        parsed
+    };
+
+    if suffix {
+        let suffix_length: i128 = end_text.parse().unwrap_or(i128::MAX);
         start = (size - suffix_length).max(0);
         end = size - 1;
     }
@@ -89,5 +113,12 @@ mod tests {
         assert_eq!(parse_range("items=0-9", 1000), None);
         assert_eq!(parse_range("bytes=-0", 1000), None);
         assert_eq!(parse_range("bytes=99999999999999999999-", 1000), None);
+        // Unsafe integers in a closed end are rejected (JS `Number.isSafeInteger`),
+        // but a huge suffix length just clamps to the whole file.
+        assert_eq!(parse_range("bytes=0-99999999999999999999", 1000), None);
+        assert_eq!(
+            parse_range("bytes=-99999999999999999999", 1000),
+            Some(FileRange { start: 0, end: 999 })
+        );
     }
 }

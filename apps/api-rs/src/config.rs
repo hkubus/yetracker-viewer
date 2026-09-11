@@ -23,6 +23,10 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Config, String> {
         let workspace_root = resolve_workspace_root();
+        // Mirror the Node scripts' `--env-file ../../.env`: load the repo-root
+        // `.env` without overriding variables already present in the
+        // environment. A missing file is not an error.
+        let _ = dotenvy::from_path(workspace_root.join(".env"));
         let storage_dir_raw = env::var("STORAGE_DIR").unwrap_or_else(|_| "storage".to_string());
         let storage_path = resolve_path(&workspace_root, &storage_dir_raw);
 

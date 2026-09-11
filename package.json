@@ -8,6 +8,7 @@
     "dev:web": "pnpm --filter web dev",
     "build": "pnpm -r --recursive build",
     "start:api": "pnpm --filter @yetracker/api start",
+    "start:api:rs": "cargo run --release --manifest-path apps/api-rs/Cargo.toml",
     "start:web": "pnpm --filter web start",
     "typecheck": "pnpm -r --recursive typecheck",
     "lint": "biome check .",
