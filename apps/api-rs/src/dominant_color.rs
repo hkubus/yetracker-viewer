@@ -6,8 +6,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::future::{BoxFuture, Shared};
 use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
 use lru::LruCache;
 use tokio::process::Command;
 
@@ -66,7 +66,10 @@ impl DominantColors {
             let result = sample_color(&path_owned).await;
             if result.is_err() {
                 // Failed probes are evicted so a later call retries them.
-                cache.lock().expect("dominant color cache poisoned").pop(&key_for_task);
+                cache
+                    .lock()
+                    .expect("dominant color cache poisoned")
+                    .pop(&key_for_task);
             }
             result
         }
@@ -76,7 +79,13 @@ impl DominantColors {
         self.cache
             .lock()
             .expect("dominant color cache poisoned")
-            .put(key, ColorEntry { mtime_ms, future: future.clone() });
+            .put(
+                key,
+                ColorEntry {
+                    mtime_ms,
+                    future: future.clone(),
+                },
+            );
         future
     }
 }

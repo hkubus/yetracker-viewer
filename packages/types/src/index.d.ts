@@ -49,35 +49,6 @@ export type Era = {
   description: string;
   songsCount?: number;
 };
-/** A "yetracker sheet" category shown on the index and /categories pages. */
-export type Category = {
-  id: string;
-  name: string;
-  description: string;
-  songsCount: number;
-  sourceUrl: string;
-};
-/** A single album/demo copy inside an {@link AlbumCopyGroup}. */
-export type AlbumCopy = {
-  id: number;
-  eraId: number | null;
-  eraName: string | null;
-  name: string | null;
-  notes: string | null;
-  trackLength: number | null;
-  fileDate: number | null;
-  availableLength: string | null;
-  quality: string | null;
-  url: string | null;
-  playable: boolean;
-  duration: number | null;
-  coverVersion: string | null;
-};
-/** Copies grouped under one album/demo title. */
-export type AlbumCopyGroup = {
-  name: string;
-  copies: AlbumCopy[];
-};
 /** Paginated song list payload shape (items + X-Total-Count header). */
 export type Paginated<T> = {
   items: T[];

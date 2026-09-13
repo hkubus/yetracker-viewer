@@ -1,7 +1,7 @@
 # Rust port — handoff notes
 
 Branch: `rust-port` (created off `main`). Plan: `RUST_PORT_PLAN.md` (repo root).
-Acceptance gate: `apps/api/tests/api.test.mjs` (black-box, adaptive).
+Acceptance gate: `apps/api-rs/tests/api.test.mjs` (black-box, adaptive).
 
 **Status: Phases 1–3 are implemented.** The crate compiles, `cargo test` passes,
 the full acceptance suite passes 45/45 against the Rust binary (including media),
@@ -20,7 +20,7 @@ cp -r storage /tmp/yt-test-rs        # seed a playable fixture, see below
 # Pin SONGS_DIR too: the binary now loads .env, whose SONGS_DIR is absolute.
 SYNC_ON_START=false STORAGE_DIR=/tmp/yt-test-rs SONGS_DIR=/tmp/yt-test-rs/songs \
   API_PORT=3200 ./target/release/yetracker-api &
-API_BASE_URL=http://127.0.0.1:3200 node --test ../api/tests/
+API_BASE_URL=http://127.0.0.1:3200 node --test tests/
 ```
 
 Seed a playable fixture (`storage/songs/` is empty otherwise, so media success
@@ -77,7 +77,7 @@ catalogs imported (e.g. Unreleased 9480 songs, files table denormalised).
 | `src/importer.rs` | `scraper/importer.ts` | reqwest + scraper, transactional replace |
 | `src/downloader.rs` | `scraper/downloader.ts` | reqwest covers (ffmpeg AVIF) + pillows/yt-dlp songs |
 | `src/state.rs` | — | `AppState`: pool, caches, transcode semaphore, `DominantColors` |
-| `src/routes/**` | `routes/**` | full route table (eras/songs/categories/album-copies) |
+| `src/routes/**` | `routes/**` | full route table (eras/songs) |
 | `src/main.rs` | `index.ts` | boot, CORS + secure-headers + compression, background sync, shutdown |
 
 ## Config / .env
@@ -111,10 +111,12 @@ the binary is a drop-in for `node src/index.ts`.
 
 * `importer.rs` date parsing approximates `Date.parse` with a set of common
   formats (date-only forms treated as UTC).
-* Like the original (and because the current sheet gained a stats column), the
-  primary catalog's 5-cell era-image branch no longer matches the 6-cell era
-  rows, so fresh imports leave `eras.image_url` empty. This is parity, not a
-  regression — do not "fix" only the Rust side without changing `importer.ts`.
+* The primary catalog's era-metadata rows gained a leading stats column (6
+  cells instead of 5). `importer.rs` locates the era name/notes/artwork/
+  description as the last four cells and only treats a row as era metadata when
+  it contains an `<img>`, so footer/stat rows are not mistaken for eras. Google
+  Sheets artwork URLs are upgraded from their thumbnail render spec
+  (`=w102-h104`) to `=s512` so covers are not upscaled from a thumbnail.
 * `rank.rs` uses an approximated collator (case-insensitive + numeric, no accent
   folding) for the final title tie-break.
 * `download_name` truncates by Unicode scalar values rather than UTF-16 units.

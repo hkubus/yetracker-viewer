@@ -1,22 +1,17 @@
 # YeTracker Viewer API
 
-Hono API (`apps/api/src`). File-based routing via `util/loadRoutes.ts`:
+Rust/axum service (`apps/api-rs`). Routes live in `apps/api-rs/src/routes/**`
+(`eras.rs`, `songs.rs`, wired via `mod.rs`;
+`GET /health` and `GET /hello` are defined in `apps/api-rs/src/routes/mod.rs`):
 
-- `apps/api/src/routes/hello.ts` → `GET /hello`
-- `apps/api/src/routes/eras/index.ts` → `GET /eras`
-- `apps/api/src/routes/eras/[id]/index.ts` → `GET /eras/:id`
-- `apps/api/src/routes/eras/[id]/songs.ts` → `GET /eras/:id/songs`
-- `apps/api/src/routes/eras/[id]/cover.ts` → `GET /eras/:id/cover`
-- `apps/api/src/routes/songs/index.ts` → `GET /songs`
-- `apps/api/src/routes/songs/[id]/index.ts` → `GET /songs/:id`
-- `apps/api/src/routes/songs/[id]/stream.ts` → `GET /songs/:id/stream`
-- `apps/api/src/routes/songs/[id]/download.ts` → `GET /songs/:id/download`
-- `apps/api/src/routes/songs/[id]/duration.ts` → `GET /songs/:id/duration`
-- `apps/api/src/routes/categories/index.ts` → `GET /categories`
-- `apps/api/src/routes/categories/[id]/index.ts` → `GET /categories/:id`
-- `apps/api/src/routes/categories/[id]/songs.ts` → `GET /categories/:id/songs`
-- `apps/api/src/routes/album-copies/index.ts` → `GET /album-copies`
-- Defined directly in `apps/api/src/index.ts`: `GET /health`
+- `GET /hello`
+- `GET /eras`, `GET /eras/:id`
+- `GET /eras/:id/songs`, `GET /eras/:id/cover`
+- `GET /songs`, `GET /songs/:id`
+- `GET /songs/:id/stream`, `GET /songs/:id/download`, `GET /songs/:id/duration`
+
+The contract source of truth is the black-box suite
+`apps/api-rs/tests/api.test.mjs`; this document is descriptive and may lag it.
 
 All documented routes are `GET`-only. `HEAD`/`OPTIONS` are handled by CORS/compression middleware.
 
@@ -24,15 +19,14 @@ All documented routes are `GET`-only. `HEAD`/`OPTIONS` are handled by CORS/compr
 
 - Local dev default: `http://127.0.0.1:3000` (`API_HOST`/`API_PORT` in `.env`).
 - Behind the web app it may be exposed as `PUBLIC_API_URL` (e.g. `/api` with prefix stripped before forwarding).
-- CORS: `origin` from `CORS_ORIGINS` (or `*`), `allowMethods: GET, HEAD, OPTIONS`, `exposeHeaders: X-Total-Count`.
-- Middleware: `secureHeaders({ crossOriginResourcePolicy: 'cross-origin' })`, `compress({ threshold: 1024 })`, `bodyLimit({ maxSize: 64KB })`.
-- Success JSON uses `c.json()`.
-- Unknown path: `404 { "error": "Not found" }`.
-- Thrown `HTTPException(status, message)` produces that status with `message` (e.g. `Invalid era id`, `Song not found`). Unexpected errors: `500 { "error": "Internal server error" }`.
+- CORS: `origin` from `CORS_ORIGINS` (or `*`), allowed methods `GET, HEAD, OPTIONS`, exposes `X-Total-Count`.
+- Middleware: security headers (including `Cross-Origin-Resource-Policy: cross-origin`), response compression, 64KB body limit.
+- Success JSON is served as `application/json`.
+- Route errors: that status code with a `text/plain` body = the message (e.g. `400 Invalid era id`, `404 Song not found`). Only unknown paths return `404 { "error": "Not found" }` as JSON. Unexpected failures: `500 { "error": "Internal server error" }`.
 
 ## Common conventions
 
-### IDs and pagination helpers (`util/request.ts`)
+### IDs and pagination helpers (`apps/api-rs/src/request.rs`)
 
 - `positiveInteger(value, label)`: path/era filter. Must match `/^\d+$/`, safe integer, `>= 1`. Else `400 Invalid <label>`.
 - `paginationValue(value, fallback, maximum, label)`:
@@ -40,25 +34,22 @@ All documented routes are `GET`-only. `HEAD`/`OPTIONS` are handled by CORS/compr
   - Must match `/^\d+$/`, safe integer, `>= 1` for `limit`, `>= 0` for `offset`. Else `400 Invalid limit|offset`.
   - Clamped with `Math.min(parsed, maximum)` (over-maximum is clamped, not rejected).
 
-### Catalogs (`catalogs.ts`)
+### Catalogs (`apps/api-rs/src/catalogs.rs`)
 
 - `PRIMARY_CATALOG_ID = "unreleased"`.
 - `/eras*` and `/songs` (both plain and search modes) only read `catalog_id = "unreleased"`.
-- Known `catalog.id` values: `unreleased`, `released`, `recent`, `best-of`, `worst-of`, `special`, `grails-wanted`, `stems`, `album-copies`, `ssc`, `fakes`.
-- `GET /categories` lists all except `unreleased` and `album-copies` (`mainPageSection: true`).
-- `GET /categories/:id` rejects `unreleased` with 404, but `album-copies` is addressable directly even though it is omitted from the list.
 
-### Shared enums (`packages/types/src/index.d.ts`, `routes/songs/index.ts`)
+### Shared enums (`packages/types/src/index.d.ts`)
 
 - `Quality`: `Low Quality | High Quality | CD Quality | Lossless | Not Available | Recording`
 - `AvailableLength` / `availability`: `Full | Snippet | Confirmed | Beat Only | Partial | Tagged | OG File | Stem Bounce | Rumored | Conflicting Sources`
 
 ### Derived fields
 
-- `playable: boolean` (`util/playableFiles.ts`): true iff `files.filename` is non-null, is a bare basename, and exists on disk under songs dir with `size > 0`.
+- `playable: boolean`: true iff `files.filename` is non-null, is a bare basename, and exists on disk under songs dir with `size > 0`.
 - `duration: number | null`: `files.duration` (seconds, float) when `playable`, else `null`.
-- `coverVersion: string`: `sha1(imageUrl ?? '').hexdigest[0:12]` (`util/coverVersion.ts`). Used by web for cache-busting cover URLs. Never null; empty source still hashes to a value.
-- `fileDate`, `leakDate`: Unix seconds (`Math.floor(Date.parse(cell)/1000)`, `0` when missing/unparsable).
+- `coverVersion: string`: `sha1(imageUrl ?? '')[0:12]` (hex). Used by web for cache-busting cover URLs. Never null; empty source still hashes to a value.
+- `fileDate`, `leakDate`: Unix seconds (`0` when missing/unparsable).
 - `downloaded`: `files.downloaded` (`1` stored, else `0`); `null` when no `files` row (left join miss).
 - Dates, counts, search `q` handling is ASCII `lower()`-based; `q` is trimmed, inner whitespace collapsed to single spaces, max 100 chars else `400 Search query is too long`.
 
@@ -66,7 +57,7 @@ All documented routes are `GET`-only. `HEAD`/`OPTIONS` are handled by CORS/compr
 
 ## `GET /health`
 
-Readiness check (`index.ts`).
+Readiness check.
 
 - Input: none.
 - Output `200`:
@@ -134,6 +125,7 @@ Paginated, optionally searched songs for one era (primary catalog only).
   | `limit` | `100` | `500` | min 1, `400 Invalid limit` |
   | `offset` | `0` | `10000` | min 0, `400 Invalid offset` |
   | `q` | — | 100 chars | optional; trimmed/collapsed; case-insensitive `LIKE %q%` (escaped `\ % _`) against `songs.name`, `songs.notes`, `songs.quality`, `songs.available_length` |
+  | `category` | — | — | optional emoji-category filter (`best-of`, `special`, `grails`, `wanted`, `worst-of`, `ai`); keeps songs whose `songs.name` contains the category's emoji (`instr`, base codepoint so variation selectors also match); unknown id → `400 Invalid category filter`; empty = no filter |
 - Response headers: `X-Total-Count: <total matching, before limit/offset>` (via `count(*) over()`), `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`.
 - Output `200`: array ordered by `songs.id ASC`:
   ```json
@@ -241,23 +233,22 @@ Two modes sharing one path.
 Single song DB row (no file enrichment).
 
 - Path param: `id` — positive integer (`400 Invalid song id`).
-- Output `200`: single object with all `songs` columns, header `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`:
+- Output `200`: single object with camelCase keys, header `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`:
   ```json
   {
     "id": 10,
-    "era": 1,
-    "catalog_id": "unreleased",
+    "eraId": 1,
+    "catalogId": "unreleased",
     "name": "...",
     "notes": "...",
-    "file_date": 1700000000,
-    "leak_date": 1700000000,
-    "available_length": "Snippet",
-    "track_length": 65,
+    "fileDate": 1700000000,
+    "leakDate": 1700000000,
+    "availableLength": "Snippet",
+    "trackLength": 65,
     "quality": "High Quality",
     "url": "https://pillows.su/..."
   }
   ```
-  Note: keys are raw DB column names (`era`, `catalog_id`, `file_date`, …) via `db.select().from(songsTable)`, unlike the camelCase list views.
 - Errors: `404 Song not found`.
 
 ## `GET /songs/:id/stream`
@@ -301,73 +292,3 @@ Probed audio duration in seconds.
   - If `files.duration` already set (and `!== 0`), returned directly.
   - Else `ffprobe` result is persisted to `files.duration` and returned. Concurrent probes for same path are de-duplicated in memory.
 - Errors: `404 Song not found`, `404 Song file not found` / `Could not find file for song`, `422 Could not determine file duration` (probe null / legacy `0` marker / corrupt file; triggers cleanup for re-download), `500 Could not determine file duration`.
-
-## `GET /categories`
-
-List secondary catalogs (“sheets”).
-
-- Input: none.
-- Output `200`: `Category[]`, header `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`:
-  ```json
-  [
-    {
-      "id": "released",
-      "name": "Released",
-      "description": "Released songs, features, and production credits.",
-      "songsCount": 123,
-      "sourceUrl": "https://yetracker.net/#gid=762588265"
-    }
-  ]
-  ```
-- Fields: `id: string` (slug), `name: string`, `description: string`, `songsCount: number` (count of `songs` with that `catalog_id`), `sourceUrl: string` (`https://yetracker.net/#gid=<gid>`).
-- Excludes `unreleased` and `album-copies`.
-
-## `GET /categories/:id`
-
-Single category.
-
-- Path param: `id` — catalog slug string (case-sensitive, e.g. `released`, `recent`, `best-of`, `worst-of`, `special`, `grails-wanted`, `stems`, `ssc`, `fakes`; also `album-copies` technically resolves). `unreleased` or unknown → `404 Category does not exist`.
-- Output `200`: single `Category` object (same shape as list items), same `Cache-Control` header.
-
-## `GET /categories/:id/songs`
-
-Paginated, optionally searched songs for one category (any `catalog_id` except primary).
-
-- Path param: `id` — slug, same 404 rules as above.
-- Query params: same as `GET /eras/:id/songs` — `limit` default `100` max `500`, `offset` default `0` max `10000`, `q` optional max 100 searched against `name/notes/quality/availableLength` (no era-name search here).
-- Response headers: `X-Total-Count`, `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`.
-- Output `200`: array ordered by `songs.id ASC`, same item shape as era songs (`id, eraId, catalogId, name, notes, fileDate, leakDate, availableLength, trackLength, quality, url, downloaded, playable, duration`).
-
-## `GET /album-copies`
-
-Album/demo copies grouped by normalized title.
-
-- Input: none (no pagination; full `catalog_id = "album-copies"` ordered by `songs.id ASC`).
-- Output `200`: `AlbumCopyGroup[]`, header `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`:
-  ```json
-  [
-    {
-      "name": "Donda (Demo Tape)",
-      "copies": [
-        {
-          "id": 99,
-          "eraId": 5,
-          "catalogId": "album-copies",
-          "name": "Donda (Demo Tape)",
-          "notes": "...",
-          "fileDate": 1700000000,
-          "leakDate": 1700000000,
-          "availableLength": "Full",
-          "trackLength": 3600,
-          "quality": "Lossless",
-          "url": "https://pillows.su/...",
-          "eraName": "Donda Era",
-          "coverVersion": "a1b2c3d4e5f6",
-          "playable": true,
-          "duration": 3600.5
-        }
-      ]
-    }
-  ]
-  ```
-- Grouping key: `name.trim().replace(/\s+/g,' ').toLowerCase()`; display `name` is first-seen trimmed form (fallback `Untitled album copy`). `eraName: string|null` (left-joined era), `coverVersion: string|null` (from `eras.image_url`), `playable`/`duration` derived as elsewhere.

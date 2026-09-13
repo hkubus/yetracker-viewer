@@ -1,6 +1,6 @@
-//! `/songs` routes plus the paginated song list shared by eras and categories.
+//! `/songs` routes plus the paginated era song list.
 //!
-//! Mirrors `apps/api/src/routes/songs/**` and the era/category song handlers.
+//! Mirrors `apps/api/src/routes/songs/**`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,22 +8,24 @@ use std::process::Stdio;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::stream;
-use rusqlite::types::Value;
 use rusqlite::params_from_iter;
-use serde_json::{json, Value as JsonValue};
+use rusqlite::types::Value;
+use serde_json::{Value as JsonValue, json};
 use tokio::io::AsyncReadExt;
 use tokio::sync::OwnedSemaphorePermit;
 
-use super::{js_float, json_cached, set_header, DURATION_CACHE, JSON_CACHE, MEDIA_CACHE};
+use super::{DURATION_CACHE, JSON_CACHE, MEDIA_CACHE, js_float, json_cached, set_header};
 use crate::db;
 use crate::error::ApiError;
-use crate::media::{delete_invalid_file, get_duration, probe_audio_file, InvalidReason, ProbeError};
+use crate::media::{
+    InvalidReason, ProbeError, delete_invalid_file, get_duration, probe_audio_file,
+};
 use crate::playable::{mtime_ms_of, stored_song_path};
-use crate::rank::{rank_song_search, Searchable};
+use crate::rank::{Searchable, rank_song_search};
 use crate::request::{escape_like_pattern, normalize_query, pagination_value, positive_integer};
 use crate::serve::{file_body, parse_range};
 use crate::state::{AppState, SharedState};
@@ -50,7 +52,27 @@ const AVAILABILITY_FILTERS: [&str; 10] = [
     "Conflicting Sources",
 ];
 
-fn enum_filter(value: Option<&str>, allowed: &[&str], label: &str) -> Result<Option<String>, ApiError> {
+/// Emoji category markers that prefix `unreleased` song names. `id` is the
+/// public filter value; `emoji` is matched with `instr` (use the base codepoint
+/// so variation-selector forms also match).
+const SONG_CATEGORIES: [(&str, &str); 6] = [
+    ("best-of", "⭐"),
+    ("special", "✨"),
+    ("grails", "🏆"),
+    ("wanted", "🏅"),
+    ("worst-of", "🗑"),
+    ("ai", "🤖"),
+];
+
+fn category_emoji(id: &str) -> Option<&'static str> {
+    SONG_CATEGORIES.iter().find(|(key, _)| *key == id).map(|(_, emoji)| *emoji)
+}
+
+fn enum_filter(
+    value: Option<&str>,
+    allowed: &[&str],
+    label: &str,
+) -> Result<Option<String>, ApiError> {
     let Some(value) = value.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -144,8 +166,8 @@ impl SearchSong {
             "availableLength": self.available_length,
             "eraName": self.era_name,
             "dominantColor": self.dominant_color,
-            "playable": self.playable,
             "eraPosition": self.era_position.unwrap_or(1),
+            "playable": self.playable,
         })
     }
 }
@@ -175,14 +197,26 @@ pub async fn list_songs(
     };
     if let (Some(from), Some(to)) = (era_from_id, era_to_id) {
         if from > to {
-            return Err(ApiError::bad_request("Starting era must not be after ending era"));
+            return Err(ApiError::bad_request(
+                "Starting era must not be after ending era",
+            ));
         }
     }
 
-    let quality_filter = enum_filter(params.get("quality").map(String::as_str), &QUALITY_FILTERS, "quality")?;
-    let availability_filter =
-        enum_filter(params.get("availability").map(String::as_str), &AVAILABILITY_FILTERS, "availability")?;
-    let playable_raw = params.get("playable").map(String::as_str).filter(|value| !value.is_empty());
+    let quality_filter = enum_filter(
+        params.get("quality").map(String::as_str),
+        &QUALITY_FILTERS,
+        "quality",
+    )?;
+    let availability_filter = enum_filter(
+        params.get("availability").map(String::as_str),
+        &AVAILABILITY_FILTERS,
+        "availability",
+    )?;
+    let playable_raw = params
+        .get("playable")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
     if let Some(value) = playable_raw {
         if value != "true" && value != "false" {
             return Err(ApiError::bad_request("Invalid playable filter"));
@@ -197,13 +231,34 @@ pub async fn list_songs(
         || availability_filter.is_some()
         || playable_filter.is_some();
 
-    let is_search = query.as_deref().map(|value| !value.is_empty()).unwrap_or(false) || has_filters;
+    let is_search = query
+        .as_deref()
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        || has_filters;
     if is_search {
-        return search_songs(&state, query.as_deref().unwrap_or(""), era_id, era_from_id, era_to_id, quality_filter, availability_filter, playable_filter, &params).await;
+        return search_songs(
+            &state,
+            query.as_deref().unwrap_or(""),
+            era_id,
+            era_from_id,
+            era_to_id,
+            quality_filter,
+            availability_filter,
+            playable_filter,
+            &params,
+        )
+        .await;
     }
 
-    let requested_limit = pagination_value(params.get("limit").map(String::as_str), 100, 500, "limit")?;
-    let requested_offset = pagination_value(params.get("offset").map(String::as_str), 0, 10_000, "offset")?;
+    let requested_limit =
+        pagination_value(params.get("limit").map(String::as_str), 100, 500, "limit")?;
+    let requested_offset = pagination_value(
+        params.get("offset").map(String::as_str),
+        0,
+        10_000,
+        "offset",
+    )?;
 
     let songs = db::call(&state.pool, move |conn| {
         let mut statement = conn.prepare(
@@ -247,7 +302,8 @@ async fn search_songs(
     playable_filter: Option<bool>,
     params: &HashMap<String, String>,
 ) -> Result<Response, ApiError> {
-    let requested_limit = pagination_value(params.get("limit").map(String::as_str), 50, 50, "limit")?;
+    let requested_limit =
+        pagination_value(params.get("limit").map(String::as_str), 50, 50, "limit")?;
 
     let mut sql = String::from(
         "SELECT songs.id, songs.era, songs.name, songs.notes, songs.quality, songs.available_length, \
@@ -305,7 +361,9 @@ async fn search_songs(
                 filename,
             })
         })?;
-        mapped.collect::<Result<Vec<_>, _>>().map_err(ApiError::from)
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApiError::from)
     })
     .await?;
 
@@ -315,7 +373,11 @@ async fn search_songs(
             song.playable = state.playable.is_playable(song.filename.as_deref());
             song
         })
-        .filter(|song| playable_filter.map(|wanted| song.playable == wanted).unwrap_or(true))
+        .filter(|song| {
+            playable_filter
+                .map(|wanted| song.playable == wanted)
+                .unwrap_or(true)
+        })
         .collect();
 
     let total = matches.len();
@@ -373,12 +435,7 @@ pub async fn get_song(
     Ok(response)
 }
 
-/// The scope of a paginated song listing (`/eras/:id/songs` or `/categories/:id/songs`).
-pub enum SongScope {
-    Era(i64),
-    Catalog(String),
-}
-
+/// A song row for a paginated era listing.
 struct ScopedSong {
     id: i64,
     era: Option<i64>,
@@ -399,15 +456,32 @@ struct ScopedSong {
 
 pub async fn paginated_songs(
     state: &AppState,
-    scope: SongScope,
+    era_id: i64,
     params: &HashMap<String, String>,
 ) -> Result<Response, ApiError> {
-    let normalized_query = params.get("q").map(|value| text::collapse_whitespace(value)).unwrap_or_default();
+    let normalized_query = params
+        .get("q")
+        .map(|value| text::collapse_whitespace(value))
+        .unwrap_or_default();
     if !normalized_query.is_empty() && text::utf16_len(&normalized_query) > 100 {
         return Err(ApiError::bad_request("Search query is too long"));
     }
-    let requested_limit = pagination_value(params.get("limit").map(String::as_str), 100, 500, "limit")?;
-    let requested_offset = pagination_value(params.get("offset").map(String::as_str), 0, 10_000, "offset")?;
+    let requested_limit =
+        pagination_value(params.get("limit").map(String::as_str), 100, 500, "limit")?;
+    let requested_offset = pagination_value(
+        params.get("offset").map(String::as_str),
+        0,
+        10_000,
+        "offset",
+    )?;
+    let category_filter = params.get("category").map(|value| value.trim()).filter(|value| !value.is_empty());
+    let category_emoji_value = match category_filter {
+        Some(id) => match category_emoji(id) {
+            Some(emoji) => Some(emoji),
+            None => return Err(ApiError::bad_request("Invalid category filter")),
+        },
+        None => None,
+    };
 
     let mut sql = String::from(
         "SELECT songs.id, songs.era, songs.catalog_id, songs.name, songs.notes, songs.file_date, songs.leak_date, \
@@ -416,18 +490,13 @@ pub async fn paginated_songs(
          FROM songs LEFT JOIN files ON songs.url = files.url WHERE ",
     );
     let mut values: Vec<Value> = Vec::new();
-    match &scope {
-        SongScope::Era(id) => {
-            sql.push_str("songs.era = ? AND songs.catalog_id = 'unreleased'");
-            values.push(Value::Integer(*id));
-        }
-        SongScope::Catalog(catalog) => {
-            sql.push_str("songs.catalog_id = ?");
-            values.push(Value::Text(catalog.clone()));
-        }
-    }
+    sql.push_str("songs.era = ? AND songs.catalog_id = 'unreleased'");
+    values.push(Value::Integer(era_id));
     if !normalized_query.is_empty() {
-        let pattern = format!("%{}%", escape_like_pattern(&normalized_query.to_lowercase()));
+        let pattern = format!(
+            "%{}%",
+            escape_like_pattern(&normalized_query.to_lowercase())
+        );
         sql.push_str(
             " AND (lower(coalesce(songs.name,'')) LIKE ? ESCAPE '\\' \
              OR lower(coalesce(songs.notes,'')) LIKE ? ESCAPE '\\' \
@@ -437,6 +506,10 @@ pub async fn paginated_songs(
         for _ in 0..4 {
             values.push(Value::Text(pattern.clone()));
         }
+    }
+    if let Some(emoji) = category_emoji_value {
+        sql.push_str(" AND instr(coalesce(songs.name, ''), ?) > 0");
+        values.push(Value::Text(emoji.to_string()));
     }
     sql.push_str(" ORDER BY songs.id ASC LIMIT ? OFFSET ?");
     values.push(Value::Integer(requested_limit));
@@ -463,7 +536,9 @@ pub async fn paginated_songs(
                 total: row.get(14)?,
             })
         })?;
-        mapped.collect::<Result<Vec<_>, _>>().map_err(ApiError::from)
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApiError::from)
     })
     .await?;
 
@@ -498,7 +573,11 @@ pub async fn paginated_songs(
 
     let mut response = json_cached(JsonValue::Array(body));
     set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);
-    set_header(&mut response, header::HeaderName::from_static("x-total-count"), &total.to_string());
+    set_header(
+        &mut response,
+        header::HeaderName::from_static("x-total-count"),
+        &total.to_string(),
+    );
     Ok(response)
 }
 
@@ -594,7 +673,10 @@ pub async fn stream_song(
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let quality = params.get("quality").map(String::as_str).filter(|value| !value.is_empty());
+    let quality = params
+        .get("quality")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
     let song_id = positive_integer(Some(&id), "song id")?;
 
     let song = lookup_song_file(&state, song_id).await?;
@@ -607,13 +689,23 @@ pub async fn stream_song(
 
     let path = stored_song_path(&state.config.songs_path, &filename)?;
     if song.duration == Some(0.0) {
-        delete_invalid_file(&state, &filename, song.url.as_deref(), InvalidReason::NoDuration).await;
+        delete_invalid_file(
+            &state,
+            &filename,
+            song.url.as_deref(),
+            InvalidReason::NoDuration,
+        )
+        .await;
         return Err(ApiError::not_found("Song file not found"));
     }
 
-    let (file_size, mtime_ms) = resolve_file_meta(&state, &path, &filename, song.url.as_deref()).await?;
+    let (file_size, mtime_ms) =
+        resolve_file_meta(&state, &path, &filename, song.url.as_deref()).await?;
     let etag = file_etag(file_size, mtime_ms);
-    if headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) == Some(etag.as_str())
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
         && quality.is_none()
     {
         return Ok(super::empty(StatusCode::NOT_MODIFIED));
@@ -629,8 +721,13 @@ pub async fn stream_song(
     set_header(&mut response, header::CACHE_CONTROL, MEDIA_CACHE);
     set_header(&mut response, header::ACCEPT_RANGES, "bytes");
 
-    if let Some(range_header) = headers.get(header::RANGE).and_then(|value| value.to_str().ok()) {
-        let if_range = headers.get(header::IF_RANGE).and_then(|value| value.to_str().ok());
+    if let Some(range_header) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let if_range = headers
+            .get(header::IF_RANGE)
+            .and_then(|value| value.to_str().ok());
         if let Some(if_range) = if_range {
             if if_range != etag {
                 return full_file_response(&path, file_size, response).await;
@@ -647,13 +744,15 @@ async fn full_file_response(
     file_size: u64,
     mut response: Response,
 ) -> Result<Response, ApiError> {
-    set_header(&mut response, header::CONTENT_LENGTH, &file_size.to_string());
-    let body = file_body(path, None)
-        .await
-        .map_err(|error| {
-            eprintln!("failed to stream song {error}");
-            ApiError::internal("Could not stream song")
-        })?;
+    set_header(
+        &mut response,
+        header::CONTENT_LENGTH,
+        &file_size.to_string(),
+    );
+    let body = file_body(path, None).await.map_err(|error| {
+        eprintln!("failed to stream song {error}");
+        ApiError::internal("Could not stream song")
+    })?;
     *response.body_mut() = body;
     Ok(response)
 }
@@ -665,11 +764,16 @@ async fn range_file_response(
     mut response: Response,
 ) -> Result<Response, ApiError> {
     let Some(range) = parse_range(range_header, file_size) else {
-        set_header(&mut response, header::CONTENT_RANGE, &format!("bytes */{file_size}"));
+        set_header(
+            &mut response,
+            header::CONTENT_RANGE,
+            &format!("bytes */{file_size}"),
+        );
         *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
         // An unknown-length (chunked) empty body matches Hono, whose 416 has no
         // `Content-Length`; a known empty body would gain `content-length: 0`.
-        *response.body_mut() = Body::from_stream(futures_util::stream::empty::<Result<Bytes, std::io::Error>>());
+        *response.body_mut() =
+            Body::from_stream(futures_util::stream::empty::<Result<Bytes, std::io::Error>>());
         return Ok(response);
     };
 
@@ -702,7 +806,9 @@ fn stream_transcoded(
     if !is_ascii_digits(quality) {
         return Err(ApiError::bad_request("Invalid quality for file"));
     }
-    let parsed: i64 = quality.parse().map_err(|_| ApiError::bad_request("Invalid quality for file"))?;
+    let parsed: i64 = quality
+        .parse()
+        .map_err(|_| ApiError::bad_request("Invalid quality for file"))?;
     if !(8..=320).contains(&parsed) {
         return Err(ApiError::bad_request("Invalid quality for file"));
     }
@@ -762,7 +868,9 @@ fn transcode_body(
             Ok(child) => child,
             Err(error) => {
                 eprintln!("failed to transcode song {error}");
-                let _ = sender.send(Err(std::io::Error::other(error.to_string()))).await;
+                let _ = sender
+                    .send(Err(std::io::Error::other(error.to_string())))
+                    .await;
                 return;
             }
         };
@@ -775,7 +883,11 @@ fn transcode_body(
             match stdout.read(&mut buffer).await {
                 Ok(0) => break,
                 Ok(read) => {
-                    if sender.send(Ok(Bytes::copy_from_slice(&buffer[..read]))).await.is_err() {
+                    if sender
+                        .send(Ok(Bytes::copy_from_slice(&buffer[..read])))
+                        .await
+                        .is_err()
+                    {
                         client_gone = true;
                         let _ = child.kill().await;
                         break;
@@ -794,7 +906,9 @@ fn transcode_body(
                 // Surface a failed transcode as a broken body (Hono destroys the
                 // converter output with the error) instead of a clean truncated 200.
                 if !errored {
-                    let _ = sender.send(Err(std::io::Error::other("transcode failed"))).await;
+                    let _ = sender
+                        .send(Err(std::io::Error::other("transcode failed")))
+                        .await;
                 }
                 let probe = probe_audio_file(&state, &filename).await;
                 if !probe.valid {
@@ -823,7 +937,10 @@ fn download_name(name: Option<&str>, id: i64, extension: &str) -> String {
     let mut replaced = String::with_capacity(source.len());
     for character in source.chars() {
         if character.is_control()
-            || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
         {
             replaced.push(' ');
         } else {
@@ -832,7 +949,11 @@ fn download_name(name: Option<&str>, id: i64, extension: &str) -> String {
     }
     let collapsed = text::collapse_whitespace(&replaced);
     let truncated: String = collapsed.chars().take(120).collect();
-    let safe_name = if truncated.is_empty() { fallback } else { truncated };
+    let safe_name = if truncated.is_empty() {
+        fallback
+    } else {
+        truncated
+    };
     format!("{safe_name}{extension}")
 }
 
@@ -840,7 +961,10 @@ fn encode_header_filename(filename: &str) -> String {
     let mut encoded = String::with_capacity(filename.len());
     for character in filename.chars() {
         let unreserved = character.is_ascii_alphanumeric()
-            || matches!(character, '-' | '_' | '.' | '~' | '!' | '*' | '\'' | '(' | ')');
+            || matches!(
+                character,
+                '-' | '_' | '.' | '~' | '!' | '*' | '\'' | '(' | ')'
+            );
         if unreserved {
             encoded.push(character);
         } else {
@@ -875,13 +999,24 @@ pub async fn download_song(
 
     let path = stored_song_path(&state.config.songs_path, &filename)?;
     if song.duration == Some(0.0) {
-        delete_invalid_file(&state, &filename, song.url.as_deref(), InvalidReason::NoDuration).await;
+        delete_invalid_file(
+            &state,
+            &filename,
+            song.url.as_deref(),
+            InvalidReason::NoDuration,
+        )
+        .await;
         return Err(ApiError::not_found("Song file not found"));
     }
 
-    let (file_size, mtime_ms) = resolve_file_meta(&state, &path, &filename, song.url.as_deref()).await?;
+    let (file_size, mtime_ms) =
+        resolve_file_meta(&state, &path, &filename, song.url.as_deref()).await?;
     let etag = file_etag(file_size, mtime_ms);
-    if headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) == Some(etag.as_str()) {
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
+    {
         return Ok(super::empty(StatusCode::NOT_MODIFIED));
     }
 
@@ -898,14 +1033,23 @@ pub async fn download_song(
     );
 
     let mut response = super::empty(StatusCode::OK);
-    set_header(&mut response, header::CONTENT_TYPE, "application/octet-stream");
+    set_header(
+        &mut response,
+        header::CONTENT_TYPE,
+        "application/octet-stream",
+    );
     set_header(&mut response, header::ETAG, &etag);
     set_header(&mut response, header::ACCEPT_RANGES, "bytes");
     set_header(&mut response, header::CACHE_CONTROL, MEDIA_CACHE);
     set_header(&mut response, header::CONTENT_DISPOSITION, &disposition);
 
-    if let Some(range_header) = headers.get(header::RANGE).and_then(|value| value.to_str().ok()) {
-        let if_range = headers.get(header::IF_RANGE).and_then(|value| value.to_str().ok());
+    if let Some(range_header) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let if_range = headers
+            .get(header::IF_RANGE)
+            .and_then(|value| value.to_str().ok());
         if if_range.is_none() || if_range == Some(etag.as_str()) {
             if let Some(range) = parse_range(range_header, file_size) {
                 set_header(
@@ -948,7 +1092,13 @@ pub async fn get_song_duration(
 
     if let Some(duration) = song.duration {
         if duration == 0.0 {
-            delete_invalid_file(&state, &filename, song.url.as_deref(), InvalidReason::NoDuration).await;
+            delete_invalid_file(
+                &state,
+                &filename,
+                song.url.as_deref(),
+                InvalidReason::NoDuration,
+            )
+            .await;
             return Err(ApiError::unprocessable("Could not determine file duration"));
         }
         let mut response = json_cached(json!({ "duration": js_float(duration) }));
@@ -976,7 +1126,13 @@ pub async fn get_song_duration(
     let duration = match get_duration(&state, &path, Some(mtime_ms)).await {
         Ok(Some(duration)) => duration,
         Ok(None) => {
-            delete_invalid_file(&state, &filename, song.url.as_deref(), InvalidReason::NoDuration).await;
+            delete_invalid_file(
+                &state,
+                &filename,
+                song.url.as_deref(),
+                InvalidReason::NoDuration,
+            )
+            .await;
             return Err(ApiError::unprocessable("Could not determine file duration"));
         }
         Err(ProbeError::BinaryMissing) => {
@@ -984,7 +1140,13 @@ pub async fn get_song_duration(
         }
         Err(ProbeError::Exit(_)) => {
             if song.url.is_some() {
-                delete_invalid_file(&state, &filename, song.url.as_deref(), InvalidReason::Unreadable).await;
+                delete_invalid_file(
+                    &state,
+                    &filename,
+                    song.url.as_deref(),
+                    InvalidReason::Unreadable,
+                )
+                .await;
                 return Err(ApiError::unprocessable("Could not determine file duration"));
             }
             eprintln!("failed to read song duration ffprobe exited non-zero");
@@ -1010,4 +1172,16 @@ pub async fn get_song_duration(
     let mut response = json_cached(json!({ "duration": js_float(duration) }));
     set_header(&mut response, header::CACHE_CONTROL, DURATION_CACHE);
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn category_emoji_resolves_known_ids() {
+        assert_eq!(category_emoji("best-of"), Some("⭐"));
+        assert_eq!(category_emoji("worst-of"), Some("🗑"));
+        assert!(category_emoji("bogus").is_none());
+    }
 }

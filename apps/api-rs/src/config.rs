@@ -44,7 +44,13 @@ impl Config {
             return Err("API_HOST must be a non-empty hostname or IP address".to_string());
         }
 
-        let api_port = read_port(env::var("API_PORT").ok().as_deref().or(env::var("PORT").ok().as_deref()), 3000)?;
+        let api_port = read_port(
+            env::var("API_PORT")
+                .ok()
+                .as_deref()
+                .or(env::var("PORT").ok().as_deref()),
+            3000,
+        )?;
         let cors_origins = read_origins(env::var("CORS_ORIGINS").ok().as_deref())?;
         let sync_on_start = read_bool(env::var("SYNC_ON_START").ok().as_deref(), true);
         let youtube_download = read_bool(env::var("YOUTUBE_DOWNLOAD").ok().as_deref(), true);
@@ -87,7 +93,11 @@ impl Config {
 
 fn resolve_path(workspace_root: &Path, value: &str) -> PathBuf {
     let path = Path::new(value);
-    if path.is_absolute() { path.to_path_buf() } else { workspace_root.join(path) }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    }
 }
 
 fn find_workspace_root(start: &Path) -> PathBuf {
@@ -128,11 +138,16 @@ fn is_ascii_digits(value: &str) -> bool {
 
 fn read_bool(value: Option<&str>, fallback: bool) -> bool {
     let raw = value.unwrap_or(if fallback { "true" } else { "false" });
-    !matches!(raw.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no")
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no"
+    )
 }
 
 fn read_port(value: Option<&str>, fallback: u16) -> Result<u16, String> {
-    let Some(value) = value else { return Ok(fallback) };
+    let Some(value) = value else {
+        return Ok(fallback);
+    };
     if value.is_empty() {
         return Ok(fallback);
     }
@@ -143,18 +158,29 @@ fn read_port(value: Option<&str>, fallback: u16) -> Result<u16, String> {
         .parse()
         .map_err(|_| format!("API port must be between 1 and 65535, received: {value}"))?;
     if !(1..=65_535).contains(&port) {
-        return Err(format!("API port must be between 1 and 65535, received: {value}"));
+        return Err(format!(
+            "API port must be between 1 and 65535, received: {value}"
+        ));
     }
     Ok(port as u16)
 }
 
-fn read_positive_integer(value: Option<&str>, fallback: u32, name: &str, max: u32) -> Result<u32, String> {
-    let Some(value) = value else { return Ok(fallback) };
+fn read_positive_integer(
+    value: Option<&str>,
+    fallback: u32,
+    name: &str,
+    max: u32,
+) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(fallback);
+    };
     if value.is_empty() {
         return Ok(fallback);
     }
     if !is_ascii_digits(value) {
-        return Err(format!("{name} must be a positive integer, received: {value}"));
+        return Err(format!(
+            "{name} must be a positive integer, received: {value}"
+        ));
     }
     let parsed: u64 = value
         .parse()
@@ -181,7 +207,9 @@ fn read_origins(value: Option<&str>) -> Result<Vec<String>, String> {
             continue;
         }
         if !is_exact_http_origin(origin) {
-            return Err(format!("CORS_ORIGINS must contain exact HTTP(S) origins, received: {origin}"));
+            return Err(format!(
+                "CORS_ORIGINS must contain exact HTTP(S) origins, received: {origin}"
+            ));
         }
     }
     Ok(origins)
@@ -190,7 +218,10 @@ fn read_origins(value: Option<&str>) -> Result<Vec<String>, String> {
 /// True when `new URL(origin).origin === origin` for an http(s) URL: no path,
 /// query or fragment, lower-cased ASCII host, optional valid port.
 fn is_exact_http_origin(origin: &str) -> bool {
-    let rest = match origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
+    let rest = match origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    {
         Some(rest) => rest,
         None => return false,
     };
@@ -199,7 +230,9 @@ fn is_exact_http_origin(origin: &str) -> bool {
     }
 
     let (host, port) = if rest.starts_with('[') {
-        let Some(close) = rest.find(']') else { return false };
+        let Some(close) = rest.find(']') else {
+            return false;
+        };
         let host = &rest[..=close];
         let tail = &rest[close + 1..];
         if tail.is_empty() {
@@ -255,7 +288,10 @@ mod tests {
         assert_eq!(read_port(Some("65535"), 3000).unwrap(), 65535);
         assert!(read_port(Some("0"), 3000).is_err());
         assert!(read_port(Some("abc"), 3000).is_err());
-        assert_eq!(read_positive_integer(Some("100"), 2, "MAX", 100).unwrap(), 100);
+        assert_eq!(
+            read_positive_integer(Some("100"), 2, "MAX", 100).unwrap(),
+            100
+        );
         assert!(read_positive_integer(Some("101"), 2, "MAX", 100).is_err());
     }
 }

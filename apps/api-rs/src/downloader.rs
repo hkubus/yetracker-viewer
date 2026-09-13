@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::db;
 use crate::error::ApiError;
-use crate::media::{delete_invalid_file, probe_audio_file, InvalidReason, ProbeOutcome};
+use crate::media::{InvalidReason, ProbeOutcome, delete_invalid_file, probe_audio_file};
 use crate::state::AppState;
 
 const COVER_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,11 +34,15 @@ fn sha256_hex(value: &str) -> String {
 }
 
 async fn stream_body_to_file(response: reqwest::Response, path: &Path) -> Result<(), String> {
-    let mut file = tokio::fs::File::create(path).await.map_err(|error| error.to_string())?;
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut body = response.bytes_stream();
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|error| error.to_string())?;
-        file.write_all(&chunk).await.map_err(|error| error.to_string())?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     file.flush().await.map_err(|error| error.to_string())?;
     Ok(())
@@ -49,18 +53,20 @@ struct EraCoverJob {
     name: Option<String>,
     image_url: Option<String>,
     dominant_color: Option<String>,
+    cover_source: Option<String>,
 }
 
 pub async fn download_covers(state: &AppState) -> Result<(), ApiError> {
     let eras = db::call(&state.pool, |conn| {
-        let mut statement =
-            conn.prepare("SELECT id, name, image_url, dominant_color FROM eras WHERE is_main = 1")?;
+        let mut statement = conn
+            .prepare("SELECT id, name, image_url, dominant_color, cover_source FROM eras WHERE is_main = 1")?;
         let rows = statement.query_map([], |row| {
             Ok(EraCoverJob {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 image_url: row.get(2)?,
                 dominant_color: row.get(3)?,
+                cover_source: row.get(4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(ApiError::from)
@@ -77,7 +83,10 @@ pub async fn download_covers(state: &AppState) -> Result<(), ApiError> {
             let client = &client;
             async move {
                 if let Err(error) = process_cover(state, client, &era).await {
-                    eprintln!("cover processing failed for era {} ({:?}) {error:?}", era.id, era.name);
+                    eprintln!(
+                        "cover processing failed for era {} ({:?}) {error:?}",
+                        era.id, era.name
+                    );
                 }
             }
         })
@@ -85,7 +94,11 @@ pub async fn download_covers(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn process_cover(state: &AppState, client: &reqwest::Client, era: &EraCoverJob) -> Result<(), ApiError> {
+async fn process_cover(
+    state: &AppState,
+    client: &reqwest::Client,
+    era: &EraCoverJob,
+) -> Result<(), ApiError> {
     let Some(image_url) = era.image_url.as_deref().filter(|url| !url.is_empty()) else {
         eprintln!("no image url for era id {}", era.id);
         return Ok(());
@@ -93,7 +106,10 @@ async fn process_cover(state: &AppState, client: &reqwest::Client, era: &EraCove
     let covers_dir = state.config.storage_path.join("covers");
     let cover_path = covers_dir.join(format!("{}.avif", era.id));
 
-    if era.dominant_color.is_some() {
+    // Skip only when the cover already reflects this artwork URL. The colour
+    // alone is not enough: it is preserved across imports even when the
+    // artwork changes, so the cover may still need re-encoding.
+    if era.dominant_color.is_some() && era.cover_source.as_deref() == Some(image_url) {
         if let Ok(metadata) = tokio::fs::metadata(&cover_path).await {
             if metadata.is_file() && metadata.len() > 0 {
                 return Ok(());
@@ -165,7 +181,10 @@ async fn process_cover(state: &AppState, client: &reqwest::Client, era: &EraCove
                 dominant_color_hex = extracted;
             }
         }
-        Err(error) => eprintln!("dominant color extraction failed for era {} ({:?}) {error}", era.id, era.name),
+        Err(error) => eprintln!(
+            "dominant color extraction failed for era {} ({:?}) {error}",
+            era.id, era.name
+        ),
     }
 
     if era.name.as_deref() == Some(LATE_REGISTRATION_ERA_NAME) {
@@ -173,10 +192,11 @@ async fn process_cover(state: &AppState, client: &reqwest::Client, era: &EraCove
     }
 
     let era_id = era.id;
+    let cover_source = image_url.to_string();
     db::call(&state.pool, move |conn| {
         conn.execute(
-            "UPDATE eras SET dominant_color = ?1 WHERE id = ?2",
-            rusqlite::params![dominant_color_hex, era_id],
+            "UPDATE eras SET dominant_color = ?1, cover_source = ?2 WHERE id = ?3",
+            rusqlite::params![dominant_color_hex, cover_source, era_id],
         )?;
         Ok(())
     })
@@ -209,14 +229,19 @@ fn split_filename(filename: &str) -> Option<(&str, &str)> {
 }
 
 fn parse_content_disposition_extension(header: Option<&str>) -> String {
-    let Some(header) = header else { return "bin".to_string() };
+    let Some(header) = header else {
+        return "bin".to_string();
+    };
     let Ok(regex) = regex::Regex::new(r#"filename\*?=(?:UTF-8'' )?"?([^";]+)"?"#) else {
         return "bin".to_string();
     };
     let Some(captures) = regex.captures(header) else {
         return "bin".to_string();
     };
-    let mut candidate = captures.get(1).map(|value| value.as_str().trim().to_string()).unwrap_or_default();
+    let mut candidate = captures
+        .get(1)
+        .map(|value| value.as_str().trim().to_string())
+        .unwrap_or_default();
     if header.to_ascii_lowercase().starts_with("utf-8''") || candidate.contains('%') {
         if let Ok(decoded) = percent_decode(&candidate) {
             candidate = decoded;
@@ -226,7 +251,10 @@ fn parse_content_disposition_extension(header: Option<&str>) -> String {
         Some(dot) => candidate[dot + 1..].to_ascii_lowercase(),
         None => candidate.to_ascii_lowercase(),
     };
-    if !extension.is_empty() && extension.len() <= 8 && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+    if !extension.is_empty()
+        && extension.len() <= 8
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
         extension
     } else {
         "bin".to_string()
@@ -254,7 +282,12 @@ fn percent_decode(value: &str) -> Result<String, ()> {
     String::from_utf8(decoded).map_err(|_| ())
 }
 
-async fn update_file_row(state: &AppState, url: &str, downloaded: i64, filename: &str) -> Result<(), ApiError> {
+async fn update_file_row(
+    state: &AppState,
+    url: &str,
+    downloaded: i64,
+    filename: &str,
+) -> Result<(), ApiError> {
     let url = url.to_string();
     let filename = filename.to_string();
     db::call(&state.pool, move |conn| {
@@ -275,7 +308,8 @@ pub async fn download_songs(state: &AppState) -> Result<(), ApiError> {
             .map_err(|error| ApiError::unexpected(error.to_string()))?;
     }
 
-    let mut hash_to_extension: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut hash_to_extension: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut entries = tokio::fs::read_dir(&songs_path)
         .await
         .map_err(|error| ApiError::unexpected(error.to_string()))?;
@@ -309,60 +343,79 @@ pub async fn download_songs(state: &AppState) -> Result<(), ApiError> {
         .for_each_concurrent(SONG_CONCURRENCY, |url| {
             let hash_to_extension = hash_to_extension.clone();
             async move {
-            let file_url = url;
-            let mut filename = sha256_hex(&file_url);
-            if let Some(extension) = hash_to_extension.get(&filename) {
-                let reused = format!("{filename}.{extension}");
-                let probe = probe_audio_file(state, &reused).await;
-                if probe.valid {
-                    let _ = update_file_row(state, &file_url, 1, &reused).await;
-                    state.playable.refresh_one(&state.config.songs_path, &reused).await;
+                let file_url = url;
+                let mut filename = sha256_hex(&file_url);
+                if let Some(extension) = hash_to_extension.get(&filename) {
+                    let reused = format!("{filename}.{extension}");
+                    let probe = probe_audio_file(state, &reused).await;
+                    if probe.valid {
+                        let _ = update_file_row(state, &file_url, 1, &reused).await;
+                        state
+                            .playable
+                            .refresh_one(&state.config.songs_path, &reused)
+                            .await;
+                        return;
+                    }
+                    // A file with this hash exists but is corrupt/not audio: remove
+                    // it and fall through to download a fresh copy.
+                    delete_invalid_file(
+                        state,
+                        &reused,
+                        Some(&file_url),
+                        probe.reason.unwrap_or(InvalidReason::Unreadable),
+                    )
+                    .await;
+                }
+
+                let outcome = download_one(state, &file_url, &mut filename).await;
+                if let Err(error) = outcome {
+                    eprintln!("download failed for {file_url} {error}");
+                    let _ = update_file_row(state, &file_url, 0, &filename).await;
+                    if !filename.is_empty() {
+                        state.playable.set_playable(&filename, false);
+                    }
+                    filename.clear();
+                }
+
+                if filename.is_empty() {
                     return;
                 }
-                // A file with this hash exists but is corrupt/not audio: remove
-                // it and fall through to download a fresh copy.
-                delete_invalid_file(state, &reused, Some(&file_url), probe.reason.unwrap_or(InvalidReason::Unreadable))
+                let probe: ProbeOutcome = probe_audio_file(state, &filename).await;
+                if !probe.valid {
+                    delete_invalid_file(
+                        state,
+                        &filename,
+                        Some(&file_url),
+                        probe.reason.unwrap_or(InvalidReason::Unreadable),
+                    )
                     .await;
-            }
-
-            let outcome = download_one(state, &file_url, &mut filename).await;
-            if let Err(error) = outcome {
-                eprintln!("download failed for {file_url} {error}");
-                let _ = update_file_row(state, &file_url, 0, &filename).await;
-                if !filename.is_empty() {
-                    state.playable.set_playable(&filename, false);
+                    return;
                 }
-                filename.clear();
-            }
-
-            if filename.is_empty() {
-                return;
-            }
-            let probe: ProbeOutcome = probe_audio_file(state, &filename).await;
-            if !probe.valid {
-                delete_invalid_file(
-                    state,
-                    &filename,
-                    Some(&file_url),
-                    probe.reason.unwrap_or(InvalidReason::Unreadable),
-                )
-                .await;
-                return;
-            }
-            let _ = update_file_row(state, &file_url, 1, &filename).await;
-            state.playable.refresh_one(&state.config.songs_path, &filename).await;
+                let _ = update_file_row(state, &file_url, 1, &filename).await;
+                state
+                    .playable
+                    .refresh_one(&state.config.songs_path, &filename)
+                    .await;
             }
         })
         .await;
     Ok(())
 }
 
-async fn download_one(state: &AppState, url_string: &str, filename: &mut String) -> Result<(), String> {
+async fn download_one(
+    state: &AppState,
+    url_string: &str,
+    filename: &mut String,
+) -> Result<(), String> {
     let url = Url::parse(url_string).map_err(|error| error.to_string())?;
     let host = url.host_str().unwrap_or_default().to_string();
     match host.as_str() {
         "pillows.su" => {
-            let hash = url.path().rsplit('/').find(|segment| !segment.is_empty()).unwrap_or_default();
+            let hash = url
+                .path()
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .unwrap_or_default();
             let response = reqwest::Client::new()
                 .get(format!("https://api.pillows.su/api/download/{hash}"))
                 .header(reqwest::header::USER_AGENT, FETCH_USER_AGENT)
@@ -371,7 +424,10 @@ async fn download_one(state: &AppState, url_string: &str, filename: &mut String)
                 .await
                 .map_err(|error| error.to_string())?;
             if !response.status().is_success() {
-                return Err(format!("Failed to download {url_string}: HTTP {}", response.status().as_u16()));
+                return Err(format!(
+                    "Failed to download {url_string}: HTTP {}",
+                    response.status().as_u16()
+                ));
             }
             let extension = parse_content_disposition_extension(
                 response
@@ -414,7 +470,10 @@ async fn download_one(state: &AppState, url_string: &str, filename: &mut String)
 
 async fn download_ytdlp(state: &AppState, url: &Url, filename: &str) -> Result<(), String> {
     let output_path = state.config.songs_path.join(filename);
-    let timestamp = url.query_pairs().find(|(key, _)| key == "t").map(|(_, value)| value.into_owned());
+    let timestamp = url
+        .query_pairs()
+        .find(|(key, _)| key == "t")
+        .map(|(_, value)| value.into_owned());
 
     let mut args: Vec<String> = vec![
         "-x".to_string(),
@@ -427,7 +486,9 @@ async fn download_ytdlp(state: &AppState, url: &Url, filename: &str) -> Result<(
     ];
     if let Some(timestamp) = timestamp {
         if !timestamp.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(format!("Refusing to pass non-numeric timestamp to yt-dlp: {timestamp}"));
+            return Err(format!(
+                "Refusing to pass non-numeric timestamp to yt-dlp: {timestamp}"
+            ));
         }
         args.push("--download-sections".to_string());
         args.push(format!("*{timestamp}-inf"));
@@ -468,7 +529,9 @@ async fn download_ytdlp(state: &AppState, url: &Url, filename: &str) -> Result<(
     } else if tokio::fs::metadata(&ogg_path).await.is_ok() {
         Ok(())
     } else {
-        Err(format!("yt-dlp produced neither {opus_path} nor {ogg_path}"))
+        Err(format!(
+            "yt-dlp produced neither {opus_path} nor {ogg_path}"
+        ))
     }
 }
 
@@ -478,13 +541,19 @@ mod tests {
 
     #[test]
     fn parses_content_disposition_extensions() {
-        assert_eq!(parse_content_disposition_extension(Some("attachment; filename=\"x.mp3\"")), "mp3");
+        assert_eq!(
+            parse_content_disposition_extension(Some("attachment; filename=\"x.mp3\"")),
+            "mp3"
+        );
         assert_eq!(
             parse_content_disposition_extension(Some("attachment; filename*=UTF-8''a%20b.flac")),
             "flac"
         );
         assert_eq!(parse_content_disposition_extension(None), "bin");
-        assert_eq!(parse_content_disposition_extension(Some("attachment; filename=\"noext\"")), "noext");
+        assert_eq!(
+            parse_content_disposition_extension(Some("attachment; filename=\"noext\"")),
+            "noext"
+        );
     }
 
     #[test]

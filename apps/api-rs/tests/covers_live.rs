@@ -37,10 +37,14 @@ async fn downloads_and_encodes_a_cover() {
     .await
     .unwrap();
 
-    downloader::download_covers(&state).await.expect("covers complete");
+    downloader::download_covers(&state)
+        .await
+        .expect("covers complete");
 
     let cover_path = state.config.storage_path.join("covers").join("1.avif");
-    let metadata = tokio::fs::metadata(&cover_path).await.expect("cover written");
+    let metadata = tokio::fs::metadata(&cover_path)
+        .await
+        .expect("cover written");
     assert!(metadata.len() > 0, "cover non-empty");
 
     let color: Option<String> = db::call(&state.pool, |conn| {

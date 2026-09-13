@@ -6,6 +6,10 @@ fn is_ascii_digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// JavaScript's `Number.MAX_SAFE_INTEGER`. The TS validators use
+/// `Number.isSafeInteger`, so anything above this must be rejected.
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
 /// `positiveInteger`: non-empty ASCII digits, safe integer, at least 1.
 pub fn positive_integer(value: Option<&str>, label: &str) -> Result<i64, ApiError> {
     let invalid = || ApiError::bad_request(format!("Invalid {label}"));
@@ -14,7 +18,7 @@ pub fn positive_integer(value: Option<&str>, label: &str) -> Result<i64, ApiErro
         return Err(invalid());
     }
     let parsed: i64 = value.parse().map_err(|_| invalid())?;
-    if parsed < 1 {
+    if parsed < 1 || parsed > MAX_SAFE_INTEGER {
         return Err(invalid());
     }
     Ok(parsed)
@@ -22,7 +26,12 @@ pub fn positive_integer(value: Option<&str>, label: &str) -> Result<i64, ApiErro
 
 /// `paginationValue`: missing/empty → fallback, invalid → 400, otherwise
 /// clamped to `maximum`.
-pub fn pagination_value(value: Option<&str>, fallback: i64, maximum: i64, label: &str) -> Result<i64, ApiError> {
+pub fn pagination_value(
+    value: Option<&str>,
+    fallback: i64,
+    maximum: i64,
+    label: &str,
+) -> Result<i64, ApiError> {
     let value = match value {
         None | Some("") => return Ok(fallback),
         Some(value) => value,
@@ -33,7 +42,7 @@ pub fn pagination_value(value: Option<&str>, fallback: i64, maximum: i64, label:
     }
     let parsed: i64 = value.parse().map_err(|_| invalid())?;
     let minimum = if label == "limit" { 1 } else { 0 };
-    if parsed < minimum {
+    if parsed < minimum || parsed > MAX_SAFE_INTEGER {
         return Err(invalid());
     }
     Ok(parsed.min(maximum))
@@ -69,10 +78,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_values_above_js_safe_integer_ceiling() {
+        assert_eq!(
+            positive_integer(Some("9007199254740991"), "era id").unwrap(),
+            MAX_SAFE_INTEGER
+        );
+        assert!(positive_integer(Some("9007199254740992"), "era id").is_err());
+        assert!(positive_integer(Some("9223372036854775807"), "era id").is_err());
+        assert!(pagination_value(Some("9007199254740992"), 100, 500, "limit").is_err());
+        assert!(pagination_value(Some("9007199254740992"), 0, 10_000, "offset").is_err());
+        assert_eq!(
+            pagination_value(Some("9007199254740991"), 100, 500, "limit").unwrap(),
+            500
+        );
+    }
+
+    #[test]
     fn pagination_clamps_and_rejects() {
         assert_eq!(pagination_value(None, 100, 500, "limit").unwrap(), 100);
         assert_eq!(pagination_value(Some(""), 100, 500, "limit").unwrap(), 100);
-        assert_eq!(pagination_value(Some("9999"), 100, 500, "limit").unwrap(), 500);
+        assert_eq!(
+            pagination_value(Some("9999"), 100, 500, "limit").unwrap(),
+            500
+        );
         assert_eq!(pagination_value(Some("0"), 0, 10_000, "offset").unwrap(), 0);
         assert!(pagination_value(Some("0"), 100, 500, "limit").is_err());
         assert!(pagination_value(Some("abc"), 100, 500, "limit").is_err());

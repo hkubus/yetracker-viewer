@@ -1,4 +1,8 @@
 node_modules
 storage
 .env
+dist/
+.astro/
+*.log
+.DS_Store
 /apps/api-rs/target

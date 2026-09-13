@@ -37,11 +37,14 @@ async fn downloads_a_pillows_file_and_records_it() {
     .await
     .unwrap();
 
-    downloader::download_songs(&state).await.expect("download completes");
+    downloader::download_songs(&state)
+        .await
+        .expect("download completes");
 
     let url_owned = url.to_string();
     let row: (i64, Option<String>) = db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare("SELECT downloaded, filename FROM files WHERE url = ?1")?;
+        let mut statement =
+            conn.prepare("SELECT downloaded, filename FROM files WHERE url = ?1")?;
         let row = statement.query_row([url_owned], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(row)
     })
@@ -50,9 +53,15 @@ async fn downloads_a_pillows_file_and_records_it() {
 
     assert_eq!(row.0, 1, "downloaded flag");
     let filename = row.1.expect("filename recorded");
-    assert!(state.config.songs_path.join(&filename).exists(), "file on disk: {filename}");
+    assert!(
+        state.config.songs_path.join(&filename).exists(),
+        "file on disk: {filename}"
+    );
     let probe = yetracker_api::media::probe_audio_file(&state, &filename).await;
     assert!(probe.valid, "probe valid: {probe:?}");
-    assert!(state.playable.is_playable(Some(&filename)), "marked playable");
+    assert!(
+        state.playable.is_playable(Some(&filename)),
+        "marked playable"
+    );
     println!("downloaded {filename}");
 }

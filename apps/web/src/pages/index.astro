@@ -1,7 +1,5 @@
 ---
-import type { AlbumCopyGroup, Category, Era } from '@yetracker/types';
-import AlbumCopies from '../components/AlbumCopies.astro';
-import CategoryComponent from '../components/Category.astro';
+import type { Era } from '@yetracker/types';
 import EraComponent from '../components/Era.astro';
 import GlobalSongSearch from '../components/GlobalSongSearch.astro';
 import { ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../config';
@@ -33,13 +31,8 @@ async function loadList<T>(path: string, isItem: (item: unknown) => boolean): Pr
   return data.filter(isItem) as T[];
 }
 
-const [eras, categories, albumCopies] = await Promise.all([
+const [eras] = await Promise.all([
   loadList<Era>('/eras', (item): item is Era => isRecord(item) && typeof item.id === 'number'),
-  loadList<Category>('/categories', (item): item is Category => isRecord(item) && typeof item.id === 'string'),
-  loadList<AlbumCopyGroup>(
-    '/album-copies',
-    (item): item is AlbumCopyGroup => isRecord(item) && Array.isArray(item.copies),
-  ),
 ]);
 const songsCount = eras.reduce((total, era) => total + (era.songsCount ?? 0), 0);
 ---
@@ -62,23 +55,6 @@ const songsCount = eras.reduce((total, era) => total + (era.songsCount ?? 0), 0)
             ))
         }
     </div>
-    <AlbumCopies
-        groups={albumCopies}
-        apiBaseUrl={publicApiBaseUrl}
-        sourceUrl="https://yetracker.net/#gid=1297512832"
-    />
-    <section class="categories" aria-labelledby="categories-heading">
-        <div class="categories__header">
-            <p class="eyebrow">More from Ye Tracker</p>
-            <h2 id="categories-heading">Other categories</h2>
-            <p>Browse the additional Yetracker sheets alongside the main eras.</p>
-        </div>
-        <div class="category-grid">
-            {
-                categories.map((category) => <CategoryComponent category={category} />)
-            }
-        </div>
-    </section>
 </Layout>
 
 <style>
@@ -91,40 +67,5 @@ const songsCount = eras.reduce((total, era) => total + (era.songsCount ?? 0), 0)
         align-items: stretch;
         gap: clamp(0.75rem, 1vw, 1rem);
         padding: clamp(0.75rem, 1.5vw, 1.5rem);
-    }
-
-    .categories {
-        padding: 0 clamp(0.75rem, 1.5vw, 1.5rem) 2rem;
-    }
-
-    .categories__header {
-        max-width: 42rem;
-        margin: 1rem 0 1rem;
-    }
-
-    .eyebrow {
-        margin: 0 0 0.35rem;
-        color: #999;
-        font-size: 0.7rem;
-        font-weight: 700;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-    }
-
-    h2 {
-        margin: 0;
-        color: #f3f3f3;
-        font-size: clamp(1.6rem, 3vw, 2.2rem);
-    }
-
-    .categories__header p:last-child {
-        margin: 0.55rem 0 0;
-        color: #aaa;
-    }
-
-    .category-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
-        gap: clamp(0.75rem, 1vw, 1rem);
     }
 </style>

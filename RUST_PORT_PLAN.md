@@ -1,6 +1,11 @@
 # Rust Port Plan — `apps/api` (Hono → Rust)
 
-Goal: reimplement `apps/api/src` in Rust with **byte-for-byte behavioral parity**, verified by existing black-box contract tests in `apps/api/tests/api.test.mjs`. Web app (`apps/web`) is untouched.
+> Status: the port is complete and the TypeScript `apps/api` tree has been
+> removed. `apps/api-rs` is now the only API. The `apps/api/src` paths below
+> are the historical port sources; the acceptance suite now lives at
+> `apps/api-rs/tests/api.test.mjs`.
+
+Goal: reimplement `apps/api/src` in Rust with **byte-for-byte behavioral parity**, verified by existing black-box contract tests in `apps/api-rs/tests/api.test.mjs`. Web app (`apps/web`) is untouched.
 
 ## 0. Source inventory (read these first)
 
@@ -31,9 +36,9 @@ apps/api/src/routes/**/*.ts             # 14 route files (see §4)
 packages/types/src/index.d.ts           # Quality / AvailableLength enums
 ```
 
-Test harness: `apps/api/tests/api.test.mjs` — adaptive (discovers IDs), runs against `API_BASE_URL`. **This is the acceptance gate.**
+Test harness: `apps/api-rs/tests/api.test.mjs` — adaptive (discovers IDs), runs against `API_BASE_URL`. **This is the acceptance gate.**
 
-> Run original as: `SYNC_ON_START=false API_PORT=3100 node src/index.ts &` then `API_BASE_URL=http://127.0.0.1:3100 node --test tests/`. Run against a **copy** of `storage/` — media 404 paths mutate `files` rows.
+> Run as: `SYNC_ON_START=false API_PORT=3100 ./apps/api-rs/target/release/yetracker-api &` then `API_BASE_URL=http://127.0.0.1:3100 node --test apps/api-rs/tests/` (or `pnpm test:contract`). Run against a **copy** of `storage/` — media 404 paths mutate `files` rows.
 
 ## 1. Recommended Rust stack
 

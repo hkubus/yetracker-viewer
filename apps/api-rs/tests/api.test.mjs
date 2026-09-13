@@ -1,18 +1,19 @@
-// Black-box HTTP contract tests for the YeTracker Viewer API.
+// Black-box HTTP contract tests for the YeTracker Viewer API (Rust/axum).
 //
-// Run against a running API (original or reimplementation):
-//   SYNC_ON_START=false API_PORT=3100 node src/index.ts &
-//   API_BASE_URL=http://127.0.0.1:3100 npm test
-//   # or: API_BASE_URL=http://127.0.0.1:3100 node --test tests/
+// Run against a running API server:
+//   # from apps/api-rs:
+//   SYNC_ON_START=false STORAGE_DIR=/tmp/yt-test API_PORT=3100 ./target/release/yetracker-api &
+//   API_BASE_URL=http://127.0.0.1:3100 node --test tests/
+//   # or from the repo root: pnpm test:contract (reads API_BASE_URL, default http://127.0.0.1:3000)
 //
 // Env:
 //   API_BASE_URL (fallback: BASE_URL, fallback: http://127.0.0.1:3000)
 //
-// Notes for reimplementation verification:
+// Notes:
 // - Tests are adaptive: IDs are discovered from list endpoints instead of
 //   hardcoded, so they work with any dataset.
-// - Hono error responses from route handlers are `text/plain` with the
-//   thrown message (e.g. "Invalid era id"). Only the global unknown-route
+// - Route error responses are `text/plain` with the thrown message
+//   (e.g. "Invalid era id"). Only the global unknown-route
 //   handler returns JSON `{"error":"Not found"}`.
 // - Media 404s (`/stream`, `/download`, `/duration` when the file is absent
 //   from disk) intentionally reset the file's DB row so the downloader
@@ -48,8 +49,6 @@ async function text(res) {
 const F = {
   eras: [],
   eraId: null,
-  categories: [],
-  categoryId: null,
   songId: null,
   nonPlayableSongId: null,
   playableSongId: null,
@@ -63,7 +62,7 @@ before(async () => {
     health = await req('/health');
   } catch (error) {
     throw new Error(
-      `API not reachable at ${BASE}: ${error.message}. Start it first, e.g. SYNC_ON_START=false API_PORT=3000 node src/index.ts`,
+      `API not reachable at ${BASE}: ${error.message}. Start it first, e.g. SYNC_ON_START=false API_PORT=3000 ./apps/api-rs/target/release/yetracker-api`,
     );
   }
   assert.equal(health.status, 200, `GET /health status (body: ${await health.text()})`);
@@ -74,13 +73,6 @@ before(async () => {
   F.eras = await json(erasRes);
   assert.ok(Array.isArray(F.eras) && F.eras.length > 0, 'expected at least one era');
   F.eraId = F.eras[0].id;
-
-  // Discover categories.
-  const catsRes = await req('/categories');
-  assert.equal(catsRes.status, 200);
-  F.categories = await json(catsRes);
-  assert.ok(Array.isArray(F.categories) && F.categories.length > 0, 'expected at least one category');
-  F.categoryId = F.categories[0].id;
 
   // Discover a song id (plain list mode).
   const songsRes = await req('/songs?limit=5');
@@ -475,7 +467,7 @@ describe('GET /songs/:id', () => {
     assert.equal(res.headers.get('cache-control'), JSON_CACHE);
     const song = await json(res);
     assert.equal(song.id, F.songId);
-    // Drizzle maps DB columns to camelCase JS keys.
+    // The API maps DB columns to camelCase keys.
     assert.ok('eraId' in song && 'catalogId' in song);
     assert.ok('fileDate' in song && 'leakDate' in song);
     assert.ok('availableLength' in song && 'trackLength' in song);
@@ -666,125 +658,35 @@ describe('GET /songs/:id/duration', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /categories
+// GET /eras/:id/songs category filter
 // ---------------------------------------------------------------------------
 
-describe('GET /categories', () => {
-  it('returns category list with expected shape', async () => {
-    const res = await req('/categories');
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('cache-control'), JSON_CACHE);
-    const cats = await json(res);
-    assert.ok(Array.isArray(cats) && cats.length > 0);
-    const ids = new Set();
-    for (const c of cats) {
-      assert.equal(typeof c.id, 'string');
-      assert.equal(typeof c.name, 'string');
-      assert.equal(typeof c.description, 'string');
-      assert.equal(typeof c.songsCount, 'number');
-      assert.match(c.sourceUrl, /^https:\/\/yetracker\.net\/#gid=\d+$/);
-      ids.add(c.id);
+describe('GET /eras/:id/songs category filter', () => {
+  it('filters by emoji category and validates the filter value', async (t) => {
+    const probeRes = await req(`/songs?q=${encodeURIComponent('⭐')}&limit=1`);
+    assert.equal(probeRes.status, 200);
+    const probeBody = await json(probeRes);
+    if (!probeBody.songs || probeBody.songs.length === 0) {
+      t.skip('no best-of songs on this server');
+      return;
     }
-    assert.ok(!ids.has('unreleased'), 'primary catalog excluded from list');
-    assert.ok(!ids.has('album-copies'), 'album-copies excluded from list');
-  });
-});
+    const eraId = probeBody.songs[0].eraId ?? F.eraId;
 
-// ---------------------------------------------------------------------------
-// GET /categories/:id
-// ---------------------------------------------------------------------------
-
-describe('GET /categories/:id', () => {
-  it('returns a single category for a valid id', async () => {
-    const res = await req(`/categories/${F.categoryId}`);
+    const res = await req(`/eras/${eraId}/songs?category=best-of&limit=100`);
     assert.equal(res.status, 200);
-    assert.equal(res.headers.get('cache-control'), JSON_CACHE);
-    const cat = await json(res);
-    assert.equal(cat.id, F.categoryId);
-    assert.equal(typeof cat.songsCount, 'number');
-    assert.match(cat.sourceUrl, /^https:\/\/yetracker\.net\/#gid=\d+$/);
-  });
-
-  it('404 on unknown id and on the primary catalog', async () => {
-    let res = await req('/categories/no-such-category');
-    assert.equal(res.status, 404);
-    assert.match(await text(res), /Category does not exist/);
-
-    res = await req('/categories/unreleased');
-    assert.equal(res.status, 404);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// GET /categories/:id/songs
-// ---------------------------------------------------------------------------
-
-describe('GET /categories/:id/songs', () => {
-  it('returns paginated category songs with X-Total-Count', async () => {
-    const res = await req(`/categories/${F.categoryId}/songs?limit=2`);
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('cache-control'), JSON_CACHE);
-    const total = Number(res.headers.get('x-total-count'));
-    assert.ok(Number.isSafeInteger(total) && total >= 0);
     const songs = await json(res);
-    assert.ok(Array.isArray(songs) && songs.length <= 2);
+    assert.ok(Array.isArray(songs));
     for (const s of songs) {
-      assert.equal(s.catalogId, F.categoryId);
-      assert.equal(typeof s.playable, 'boolean');
-      if (!s.playable) assert.equal(s.duration, null);
+      assert.ok((s.name ?? '').includes('⭐'), `expected ⭐ in ${s.name}`);
     }
-  });
+    const total = Number(res.headers.get('x-total-count'));
+    if (songs.length < 100) assert.equal(total, songs.length);
 
-  it('q filters and invalid inputs are handled', async () => {
-    const res = await req(`/categories/${F.categoryId}/songs?limit=1`);
-    assert.equal(res.status, 200);
-    const songs = await json(res);
-    if (songs.length > 0) {
-      const probe = (songs[0].name ?? '').split(/\s+/).find((w) => w.length >= 3) ?? 'a';
-      const filtered = await req(`/categories/${F.categoryId}/songs?q=${encodeURIComponent(probe)}&limit=5`);
-      assert.equal(filtered.status, 200);
-    }
-
-    let bad = await req(`/categories/${F.categoryId}/songs?limit=abc`);
+    const bad = await req(`/eras/${eraId}/songs?category=bogus`);
     assert.equal(bad.status, 400);
-    bad = await req(`/categories/${F.categoryId}/songs?q=${'x'.repeat(101)}`);
-    assert.equal(bad.status, 400);
-    assert.match(await text(bad), /Search query is too long/);
-  });
+    assert.match(await text(bad), /Invalid category filter/);
 
-  it('404 on unknown category and primary catalog', async () => {
-    let res = await req('/categories/no-such-category/songs');
-    assert.equal(res.status, 404);
-    res = await req('/categories/unreleased/songs');
-    assert.equal(res.status, 404);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// GET /album-copies
-// ---------------------------------------------------------------------------
-
-describe('GET /album-copies', () => {
-  it('returns groups of copies with cover and playback fields', async () => {
-    const res = await req('/album-copies');
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('cache-control'), JSON_CACHE);
-    const groups = await json(res);
-    assert.ok(Array.isArray(groups) && groups.length > 0);
-    const seen = new Set();
-    for (const g of groups) {
-      assert.equal(typeof g.name, 'string');
-      assert.ok(Array.isArray(g.copies) && g.copies.length > 0);
-      const key = g.name.trim().replace(/\s+/g, ' ').toLowerCase();
-      assert.ok(!seen.has(key), `duplicate group key: ${g.name}`);
-      seen.add(key);
-      for (const copy of g.copies) {
-        assert.equal(typeof copy.id, 'number');
-        assert.ok('eraName' in copy);
-        assert.ok('coverVersion' in copy);
-        assert.equal(typeof copy.playable, 'boolean');
-        if (!copy.playable) assert.equal(copy.duration, null);
-      }
-    }
+    const empty = await req(`/eras/${eraId}/songs?category=`);
+    assert.equal(empty.status, 200);
   });
 });

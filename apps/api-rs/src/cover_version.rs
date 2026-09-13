@@ -13,7 +13,9 @@ pub struct CoverVersions {
 impl CoverVersions {
     pub fn new() -> Self {
         Self {
-            cache: Mutex::new(LruCache::new(NonZeroUsize::new(1000).expect("non-zero capacity"))),
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(1000).expect("non-zero capacity"),
+            )),
         }
     }
 
@@ -50,7 +52,10 @@ mod tests {
         let versions = CoverVersions::new();
         let version = versions.get(Some("https://example.com/a.avif"));
         assert_eq!(version.len(), 12);
-        assert_eq!(version, sha1_hex("https://example.com/a.avif")[..12].to_string());
+        assert_eq!(
+            version,
+            sha1_hex("https://example.com/a.avif")[..12].to_string()
+        );
         // Cached path returns the same value.
         assert_eq!(versions.get(Some("https://example.com/a.avif")), version);
         // Null maps to the empty-string digest.

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS eras (
   image_url TEXT,
   description TEXT,
   dominant_color TEXT,
+  cover_source TEXT,
   is_main INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS songs (
@@ -80,8 +81,13 @@ pub fn run_migrations(pool: &Pool) -> Result<(), ApiError> {
     if !has_column(&conn, "eras", "is_main")? {
         conn.execute_batch("ALTER TABLE eras ADD COLUMN is_main INTEGER NOT NULL DEFAULT 1")?;
     }
+    if !has_column(&conn, "eras", "cover_source")? {
+        conn.execute_batch("ALTER TABLE eras ADD COLUMN cover_source TEXT")?;
+    }
     if !has_column(&conn, "songs", "catalog_id")? {
-        conn.execute_batch("ALTER TABLE songs ADD COLUMN catalog_id TEXT NOT NULL DEFAULT 'unreleased'")?;
+        conn.execute_batch(
+            "ALTER TABLE songs ADD COLUMN catalog_id TEXT NOT NULL DEFAULT 'unreleased'",
+        )?;
     }
     Ok(())
 }

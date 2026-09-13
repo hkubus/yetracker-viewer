@@ -27,7 +27,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   const pathname = new URL(context.request.url).pathname;
-  if (pathname.startsWith('/eras/') || pathname.startsWith('/categories/') || pathname === '/') {
+  if (pathname.startsWith('/eras/') || pathname === '/') {
     response.headers.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
   }
   return response;

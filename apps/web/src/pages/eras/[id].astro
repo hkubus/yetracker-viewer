@@ -5,6 +5,7 @@ import Pagination from '../../components/Pagination.astro';
 import SongList from '../../components/SongList.astro';
 import { apiUrl, ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../../config';
 import Layout from '../../layouts/Layout.astro';
+import { songCategoryIds } from '../../songCategories';
 import { colorValue } from '../../utils/color';
 
 const { id } = Astro.params;
@@ -12,10 +13,16 @@ const pageValue = Astro.url.searchParams.get('page') ?? '1';
 const parsedPage = Number(pageValue);
 const currentPage = /^\d+$/.test(pageValue) && Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
 const rawQuery = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 200);
+const rawCategory = (Astro.url.searchParams.get('category') ?? '').trim();
+const category = songCategoryIds().includes(rawCategory) ? rawCategory : '';
 const offset = (currentPage - 1) * ERA_PAGE_SIZE;
-const songsPath =
-  `/eras/${encodeURIComponent(id ?? '')}/songs?limit=${ERA_PAGE_SIZE}&offset=${offset}` +
-  (rawQuery ? `&q=${encodeURIComponent(rawQuery)}` : '');
+const songsParams = new URLSearchParams({
+  limit: String(ERA_PAGE_SIZE),
+  offset: String(offset),
+});
+if (rawQuery) songsParams.set('q', rawQuery);
+if (category) songsParams.set('category', category);
+const songsPath = `/eras/${encodeURIComponent(id ?? '')}/songs?${songsParams.toString()}`;
 let data!: Era;
 let songData!: (Song & { url: string; downloaded: number })[];
 let headerTotalRaw: string | null = null;
@@ -31,9 +38,13 @@ try {
 const headerTotal = Number(headerTotalRaw);
 const totalSongs = Number.isFinite(headerTotal) ? Math.max(0, Math.trunc(headerTotal)) : songData.length;
 const pageCount = Math.max(1, Math.ceil(totalSongs / ERA_PAGE_SIZE));
-const querySuffix = rawQuery ? `?q=${encodeURIComponent(rawQuery)}` : '';
+const queryParams = new URLSearchParams();
+if (rawQuery) queryParams.set('q', rawQuery);
+if (category) queryParams.set('category', category);
+const queryString = queryParams.toString();
+const querySuffix = queryString ? `?${queryString}` : '';
 if (currentPage > pageCount) {
-  const target = `/eras/${id}${pageCount > 1 ? `?page=${pageCount}${rawQuery ? `&q=${encodeURIComponent(rawQuery)}` : ''}` : querySuffix}`;
+  const target = `/eras/${id}${pageCount > 1 ? `?page=${pageCount}${queryString ? `&${queryString}` : ''}` : querySuffix}`;
   return Astro.redirect(target);
 }
 const dominantColor = colorValue(data.dominantColor);
@@ -49,10 +60,10 @@ const paginationBase = `/eras/${id}${querySuffix}`;
       <img src={coverUrl} alt="" width="512" height="512" fetchpriority="high" decoding="async" />
       <div class="text">
         <h1>{data.name}</h1>
-        <p>{data.description}</p>
+        {data.description ? <p>{data.description}</p> : null}
       </div>
-      <div class="divider"></div>
-      <p class="notes">{data.notes}</p>
+      {data.notes ? <div class="divider"></div> : null}
+      {data.notes ? <p class="notes">{data.notes}</p> : null}
     </div>
     <div class="list">
       <Pagination
@@ -69,6 +80,7 @@ const paginationBase = `/eras/${id}${querySuffix}`;
         apiBaseUrl={publicApiBaseUrl}
         coverVersion={coverVersion}
         initialQuery={rawQuery}
+        initialCategory={category}
       />
       <Pagination
         currentPage={currentPage}
@@ -108,6 +120,9 @@ const paginationBase = `/eras/${id}${querySuffix}`;
     max-width: 25%;
     font-size: 1em;
     white-space: pre-line;
+    overflow-wrap: anywhere;
+    max-height: 30vh;
+    overflow-y: auto;
   }
   .divider {
     border: 1px solid color-mix(in srgb, var(--dominantColor) 30%, transparent);
@@ -123,6 +138,8 @@ const paginationBase = `/eras/${id}${querySuffix}`;
     color: color-mix(in oklab, var(--dominantColor) 20%, white);
     flex-direction: row;
     align-items: center;
+    flex-wrap: wrap;
+    margin-top: 4rem;
     padding: 1vh;
     border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
     background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
@@ -136,14 +153,21 @@ const paginationBase = `/eras/${id}${querySuffix}`;
     margin-top: 2vh;
   }
   .text {
+    flex: 1 1 16rem;
+    min-width: 0;
     padding: 1vw;
     padding-right: 0.25vw;
+  }
+
+  .text p {
+    overflow-wrap: anywhere;
   }
 
   @media (max-width: 700px) {
     .data {
       align-items: stretch;
       flex-direction: column;
+      margin-top: 0;
       padding: 0.75rem;
     }
 

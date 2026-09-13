@@ -1,14 +1,12 @@
 //! Route table and shared response helpers.
 
 use axum::body::Body;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use serde_json::Value;
 
 use crate::state::SharedState;
 
-pub mod album_copies;
-pub mod categories;
 pub mod eras;
 pub mod songs;
 
@@ -20,9 +18,10 @@ pub const DURATION_CACHE: &str = "public, max-age=86400, immutable";
 pub fn json_response(value: Value) -> Response {
     let body = serde_json::to_vec(&value).expect("JSON value is always serialisable");
     let mut response = Response::new(Body::from(body));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     response
 }
 
@@ -45,7 +44,9 @@ pub fn js_float(value: f64) -> Value {
     if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
         Value::Number(serde_json::Number::from(value as i64))
     } else {
-        serde_json::Number::from_f64(value).map(Value::Number).unwrap_or(Value::Null)
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
     }
 }
 
@@ -70,10 +71,6 @@ pub fn router(state: SharedState) -> axum::Router {
         .route("/songs/{id}/stream", get(songs::stream_song))
         .route("/songs/{id}/download", get(songs::download_song))
         .route("/songs/{id}/duration", get(songs::get_song_duration))
-        .route("/categories", get(categories::list_categories))
-        .route("/categories/{id}", get(categories::get_category))
-        .route("/categories/{id}/songs", get(categories::list_category_songs))
-        .route("/album-copies", get(album_copies::list_album_copies))
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(state)

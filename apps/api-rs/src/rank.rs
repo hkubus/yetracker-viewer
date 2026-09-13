@@ -33,7 +33,9 @@ pub struct RankCache {
 impl RankCache {
     pub fn new() -> Self {
         Self {
-            strip: Mutex::new(LruCache::new(NonZeroUsize::new(MAX_STRIP_CACHE).expect("non-zero capacity"))),
+            strip: Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAX_STRIP_CACHE).expect("non-zero capacity"),
+            )),
         }
     }
 
@@ -91,9 +93,12 @@ fn field_score(value: &str, query: &str, base: f64) -> f64 {
     let before = value[..byte_index].chars().next_back();
     let after = value[byte_index + query.len()..].chars().next();
     let starts_at_word = position == 0 || !before.map(is_word_char).unwrap_or(false);
-    let ends_at_word = after.map(|character| !is_word_char(character)).unwrap_or(true);
+    let ends_at_word = after
+        .map(|character| !is_word_char(character))
+        .unwrap_or(true);
     let length_difference = text::utf16_len(value).saturating_sub(text::utf16_len(query));
-    let closeness = (position.min(99) as f64) / 100.0 + (length_difference.min(999) as f64) / 100_000.0;
+    let closeness =
+        (position.min(99) as f64) / 100.0 + (length_difference.min(999) as f64) / 100_000.0;
 
     if value == query {
         return base;
@@ -156,7 +161,11 @@ fn relevance_score<T: Searchable>(song: &T, query: &str, title_without_markers: 
     if title_score.is_finite() {
         return title_score;
     }
-    let era_score = field_score(&text::normalize(song.era_name().unwrap_or("")), query, 2_000.0);
+    let era_score = field_score(
+        &text::normalize(song.era_name().unwrap_or("")),
+        query,
+        2_000.0,
+    );
     if era_score.is_finite() {
         return era_score;
     }
@@ -164,11 +173,19 @@ fn relevance_score<T: Searchable>(song: &T, query: &str, title_without_markers: 
     if notes_score.is_finite() {
         return notes_score;
     }
-    let quality_score = field_score(&text::normalize(song.quality().unwrap_or("")), query, 4_000.0);
+    let quality_score = field_score(
+        &text::normalize(song.quality().unwrap_or("")),
+        query,
+        4_000.0,
+    );
     if quality_score.is_finite() {
         return quality_score;
     }
-    let availability_score = field_score(&text::normalize(song.available_length().unwrap_or("")), query, 4_100.0);
+    let availability_score = field_score(
+        &text::normalize(song.available_length().unwrap_or("")),
+        query,
+        4_100.0,
+    );
     if availability_score.is_finite() {
         return availability_score;
     }
@@ -198,7 +215,10 @@ fn collator_compare(left: &str, right: &str) -> Ordering {
             let right_digits: String = right[right_start..j].iter().collect();
             let left_trimmed = left_digits.trim_start_matches('0');
             let right_trimmed = right_digits.trim_start_matches('0');
-            let ordering = left_trimmed.len().cmp(&right_trimmed.len()).then_with(|| left_trimmed.cmp(right_trimmed));
+            let ordering = left_trimmed
+                .len()
+                .cmp(&right_trimmed.len())
+                .then_with(|| left_trimmed.cmp(right_trimmed));
             if ordering != Ordering::Equal {
                 return ordering;
             }
@@ -253,7 +273,7 @@ fn compare_ranked<T: Searchable>(left: &Ranked<T>, right: &Ranked<T>) -> f64 {
     if title_difference != 0.0 {
         return title_difference;
     }
-    (left.song.id() - right.song.id()) as f64
+    left.song.id() as f64 - right.song.id() as f64
 }
 
 /// `Array.prototype.sort` coerces a `NaN` comparator result to `+0`.
@@ -268,7 +288,12 @@ fn compare_for_sort<T: Searchable>(left: &Ranked<T>, right: &Ranked<T>) -> Order
     }
 }
 
-pub fn rank_song_search<T: Searchable>(songs: Vec<T>, query: &str, limit: usize, cache: &RankCache) -> Vec<T> {
+pub fn rank_song_search<T: Searchable>(
+    songs: Vec<T>,
+    query: &str,
+    limit: usize,
+    cache: &RankCache,
+) -> Vec<T> {
     let mut ranked_songs: Vec<Ranked<T>> = songs
         .into_iter()
         .map(|song| {
@@ -395,7 +420,10 @@ mod tests {
             Song::new(3, "Love"),
         ];
         let ranked = rank_song_search(songs, "love", 10, &cache);
-        assert_eq!(ranked[0].id, 2, "⭐-prefixed exact title wins on category priority");
+        assert_eq!(
+            ranked[0].id, 2,
+            "⭐-prefixed exact title wins on category priority"
+        );
         assert_eq!(ranked[1].id, 3);
         assert_eq!(ranked[2].id, 1);
     }
@@ -403,11 +431,16 @@ mod tests {
     #[test]
     fn limit_uses_max_heap_and_stays_sorted() {
         let cache = RankCache::new();
-        let songs: Vec<Song> = (0..20).map(|index| Song::new(index, &format!("song {index} love"))).collect();
+        let songs: Vec<Song> = (0..20)
+            .map(|index| Song::new(index, &format!("song {index} love")))
+            .collect();
         let ranked = rank_song_search(songs, "love", 5, &cache);
         assert_eq!(ranked.len(), 5);
         let ids: Vec<i64> = ranked.iter().map(|song| song.id).collect();
-        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "ids stay ascending: {ids:?}");
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "ids stay ascending: {ids:?}"
+        );
     }
 
     #[test]

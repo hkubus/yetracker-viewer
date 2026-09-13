@@ -4,7 +4,7 @@
 //! thrown message as the body; anything else that escapes a handler lands in
 //! the global error handler and becomes `500 {"error":"Internal server error"}`.
 
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 #[derive(Debug)]

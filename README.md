@@ -1,6 +1,6 @@
 # yetracker-viewer
 
-An Astro SSR frontend and Hono API for browsing and playing the Ye Tracker catalog.
+An Astro SSR frontend and Rust/axum API for browsing and playing the Ye Tracker catalog.
 
 ## Requirements
 
@@ -21,7 +21,7 @@ The defaults bind the API to `127.0.0.1:3000` and the web app to
 `127.0.0.1:4321`.
 
 On startup, the importer refreshes the main Unreleased catalog and the
-song-oriented Yetracker sheets listed in `apps/api/src/catalogs.ts`. The web
+song-oriented Yetracker sheets listed in `apps/api-rs/src/catalogs.rs`. The web
 home page exposes those additional sheets under the main era list, and each
 category has its own paginated song view.
 
@@ -31,7 +31,7 @@ Build the web app once:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm build
+pnpm --filter web build
 ```
 
 Run the API and web app as separate supervised processes:

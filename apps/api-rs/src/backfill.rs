@@ -5,16 +5,32 @@ use futures_util::stream::{self, StreamExt};
 
 use crate::db;
 use crate::error::ApiError;
-use crate::media::{delete_invalid_file, get_duration, InvalidReason, ProbeError};
+use crate::media::{InvalidReason, ProbeError, delete_invalid_file, get_duration};
 use crate::playable::{mtime_ms_of, stored_song_path};
 use crate::state::AppState;
 
+fn backfill_concurrency_from(raw: Option<&str>) -> usize {
+    // Mirrors `Number(process.env.BACKFILL_CONCURRENCY ?? 8) || 8`: missing,
+    // empty, zero and unparsable values fall back to 8. Negative values become
+    // 0, matching `Array.from({ length })`'s ToLength coercion.
+    let parsed = match raw.map(str::trim) {
+        None | Some("") => 8.0,
+        Some(value) => value.parse::<f64>().unwrap_or(f64::NAN),
+    };
+    let effective = if parsed == 0.0 || parsed.is_nan() {
+        8.0
+    } else {
+        parsed
+    };
+    if effective < 1.0 {
+        0
+    } else {
+        effective.floor() as usize
+    }
+}
+
 fn backfill_concurrency() -> usize {
-    std::env::var("BACKFILL_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(8)
+    backfill_concurrency_from(std::env::var("BACKFILL_CONCURRENCY").ok().as_deref())
 }
 
 async fn reset_row(state: &AppState, url: &str) -> Result<(), ApiError> {
@@ -31,7 +47,11 @@ async fn reset_row(state: &AppState, url: &str) -> Result<(), ApiError> {
 
 /// Probes one downloaded file and caches its duration, deleting files that are
 /// missing, empty or unreadable so the downloader retries them.
-pub async fn cache_file_duration(state: &AppState, url: &str, filename: &str) -> Result<(), ApiError> {
+pub async fn cache_file_duration(
+    state: &AppState,
+    url: &str,
+    filename: &str,
+) -> Result<(), ApiError> {
     let path = match stored_song_path(&state.config.songs_path, filename) {
         Ok(path) => path,
         Err(error) => {
@@ -43,7 +63,9 @@ pub async fn cache_file_duration(state: &AppState, url: &str, filename: &str) ->
     let metadata = match tokio::fs::metadata(&path).await {
         Ok(metadata) => metadata,
         Err(error) => {
-            eprintln!("backfill: missing file for {url} ({filename}), resetting for re-download {error}");
+            eprintln!(
+                "backfill: missing file for {url} ({filename}), resetting for re-download {error}"
+            );
             state.playable.set_playable(filename, false);
             return reset_row(state, url).await;
         }
@@ -70,7 +92,10 @@ pub async fn cache_file_duration(state: &AppState, url: &str, filename: &str) ->
         Ok(Some(duration)) => {
             let url = url.to_string();
             db::call(&state.pool, move |conn| {
-                conn.execute("UPDATE files SET duration = ?1 WHERE url = ?2", rusqlite::params![duration, url])?;
+                conn.execute(
+                    "UPDATE files SET duration = ?1 WHERE url = ?2",
+                    rusqlite::params![duration, url],
+                )?;
                 Ok(())
             })
             .await?;
@@ -97,8 +122,12 @@ pub async fn backfill_durations(state: &AppState) -> Result<(), ApiError> {
     }
     println!("backfilling duration of {} files", files.len());
 
+    let concurrency = backfill_concurrency().min(files.len());
+    if concurrency == 0 {
+        return Ok(());
+    }
     stream::iter(files)
-        .for_each_concurrent(backfill_concurrency(), |(url, filename)| async move {
+        .for_each_concurrent(concurrency, |(url, filename)| async move {
             let Some(filename) = filename else { return };
             if let Err(error) = cache_file_duration(state, &url, &filename).await {
                 eprintln!("backfill failed for {url} ({filename}) {error:?}");
@@ -106,4 +135,20 @@ pub async fn backfill_durations(state: &AppState) -> Result<(), ApiError> {
         })
         .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrency_matches_node_number_or_fallback() {
+        assert_eq!(backfill_concurrency_from(None), 8);
+        assert_eq!(backfill_concurrency_from(Some("")), 8);
+        assert_eq!(backfill_concurrency_from(Some("0")), 8);
+        assert_eq!(backfill_concurrency_from(Some("abc")), 8);
+        assert_eq!(backfill_concurrency_from(Some("4")), 4);
+        assert_eq!(backfill_concurrency_from(Some("3.9")), 3);
+        assert_eq!(backfill_concurrency_from(Some("-3")), 0);
+    }
 }

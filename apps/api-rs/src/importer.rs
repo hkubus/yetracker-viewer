@@ -44,6 +44,8 @@ static ROW_RE: Lazy<Regex> =
 static LINE_BREAK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)<br\s*/?>").expect("valid br regex"));
 static CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("td, th").expect("valid selector"));
 static IMG_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("img").expect("valid selector"));
+static IMAGE_RENDER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"=[whs]\d+(?:-[a-z0-9]+)*$").expect("valid image render regex"));
 
 #[derive(Clone)]
 struct EraRecord {
@@ -53,6 +55,7 @@ struct EraRecord {
     image_url: String,
     description: String,
     dominant_color: Option<String>,
+    cover_source: Option<String>,
     is_main: i64,
 }
 
@@ -263,7 +266,14 @@ fn sanitize_image_url(raw: &str) -> String {
             pairs.append_pair(key, value);
         }
     }
-    parsed.to_string()
+    let mut sanitized = parsed.to_string();
+    // Google Sheets serves artwork at the displayed cell size (e.g.
+    // `=w102-h104`); request a full 512px rendition so covers aren't upscaled
+    // from a thumbnail.
+    if sanitized.contains("docs.google.com/sheets-images-rt") {
+        sanitized = IMAGE_RENDER_RE.replace(&sanitized, "=s512").into_owned();
+    }
+    sanitized
 }
 
 fn parse_available_length(value: &str) -> Option<String> {
@@ -302,6 +312,22 @@ fn ensure_era(state: &mut ImportState, name: &str, is_main: bool, metadata: Opti
         if is_main {
             state.eras[index].is_main = 1;
         }
+        if let Some(metadata) = metadata {
+            // An era first seen on a song row has no metadata yet; backfill it
+            // when the era's metadata row is parsed later.
+            if state.eras[index].image_url.is_empty() {
+                state.eras[index].image_url = metadata.image_url.clone();
+            }
+            if state.eras[index].notes.is_empty() {
+                state.eras[index].notes = metadata.notes.clone();
+            }
+            if state.eras[index].description.is_empty() {
+                state.eras[index].description = metadata.description.clone();
+            }
+            if state.eras[index].dominant_color.is_none() {
+                state.eras[index].dominant_color = metadata.dominant_color.clone();
+            }
+        }
         return state.eras[index].id;
     }
 
@@ -312,6 +338,7 @@ fn ensure_era(state: &mut ImportState, name: &str, is_main: bool, metadata: Opti
         image_url: metadata.map(|metadata| metadata.image_url.clone()).unwrap_or_default(),
         description: metadata.map(|metadata| metadata.description.clone()).unwrap_or_default(),
         dominant_color: metadata.and_then(|metadata| metadata.dominant_color.clone()),
+        cover_source: None,
         is_main: if is_main { 1 } else { 0 },
     };
     state.next_era_id += 1;
@@ -366,7 +393,7 @@ fn import_catalog(text: &str, catalog: &CatalogDefinition, state: &mut ImportSta
                 cells.iter().map(|cell| normalize_header(&cell.text().collect::<String>())).collect();
             era_column = find_column(&new_headers, |header| header == "era" || header == "main era");
             name_column = find_column(&new_headers, |header| header == "name" || header.starts_with("name "));
-            notes_column = find_column(&new_headers, |header| header == "notes");
+            notes_column = find_column(&new_headers, |header| header == "notes" || header.starts_with("notes "));
             track_length_column = find_column(&new_headers, |header| {
                 header == "track length" || header == "length" || header == "full length" || header == "copy length"
             });
@@ -384,37 +411,56 @@ fn import_catalog(text: &str, catalog: &CatalogDefinition, state: &mut ImportSta
         }
         let current_headers = headers.as_ref().expect("headers set above");
 
-        if catalog.id == PRIMARY_CATALOG_ID && cells.len() == 5 {
-            let raw_name = cells
-                .get(1)
-                .map(|cell| cell.text().collect::<String>())
-                .unwrap_or_default();
-            let first_line = raw_name.split('\n').next().unwrap_or_default().trim_end_matches('\r');
-            let name = normalize_era_name(first_line);
-            if name.is_empty() {
+        if catalog.id == PRIMARY_CATALOG_ID && cells.len() >= 5 {
+            // Era metadata rows carry the artwork <img> in the penultimate cell.
+            // The sheet gained a leading stats column, but name/notes/image/
+            // description are always the last four cells in every layout.
+            let image_element = cells
+                .get(cells.len() - 2)
+                .and_then(|cell| cell.select(&IMG_SELECTOR).next());
+            if let Some(image_element) = image_element {
+                let raw_name = cells
+                    .get(cells.len() - 4)
+                    .map(|cell| cell.text().collect::<String>())
+                    .unwrap_or_default();
+                // Some name cells start with a leading <br>, so take the first
+                // non-empty line (the italic alias/subtitle follows on later lines).
+                let first_line = raw_name
+                    .split('\n')
+                    .map(|line| line.trim_end_matches('\r'))
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or_default();
+                let name = normalize_era_name(first_line);
+                if name.is_empty() {
+                    continue;
+                }
+
+                let raw_image_url = image_element.value().attr("src").unwrap_or_default();
+                let image_url = sanitize_image_url(raw_image_url);
+
+                let metadata = EraRecord {
+                    id: 0,
+                    name: name.clone(),
+                    notes: normalize_text(
+                        &cells
+                            .get(cells.len() - 3)
+                            .map(|cell| cell.text().collect::<String>())
+                            .unwrap_or_default(),
+                    ),
+                    image_url,
+                    description: normalize_text(
+                        &cells
+                            .get(cells.len() - 1)
+                            .map(|cell| cell.text().collect::<String>())
+                            .unwrap_or_default(),
+                    ),
+                    dominant_color: None,
+                    cover_source: None,
+                    is_main: 1,
+                };
+                ensure_era(state, &name, true, Some(&metadata));
                 continue;
             }
-
-            let raw_image_url = cells
-                .get(3)
-                .and_then(|cell| cell.select(&IMG_SELECTOR).next())
-                .and_then(|image| image.value().attr("src"))
-                .unwrap_or_default();
-            let image_url = sanitize_image_url(raw_image_url);
-
-            let metadata = EraRecord {
-                id: 0,
-                name: name.clone(),
-                notes: normalize_text(&cells.get(2).map(|cell| cell.text().collect::<String>()).unwrap_or_default()),
-                image_url,
-                description: normalize_text(
-                    &cells.get(4).map(|cell| cell.text().collect::<String>()).unwrap_or_default(),
-                ),
-                dominant_color: None,
-                is_main: 1,
-            };
-            ensure_era(state, &name, true, Some(&metadata));
-            continue;
         }
 
         if cells.len() != current_headers.len() || era_column < 0 || name_column < 0 {
@@ -615,26 +661,35 @@ pub async fn import_data(state: &AppState) -> Result<(), ApiError> {
         ));
     }
 
-    // Preserve existing cover colours by normalized era name so re-imports
-    // don't drop them (the downloader re-derives them otherwise).
-    let existing_colors = db::call(&state.pool, |conn| {
-        let mut statement = conn.prepare("SELECT name, dominant_color FROM eras")?;
+    // Preserve existing cover colours and the artwork URL the current cover was
+    // generated from, keyed by normalized era name. The colour survives even if
+    // a later cover refresh fails; `cover_source` lets the downloader know when
+    // the artwork URL changed and the cover must be re-fetched.
+    let existing_eras = db::call(&state.pool, |conn| {
+        let mut statement = conn.prepare("SELECT name, dominant_color, cover_source FROM eras")?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(ApiError::from)
     })
     .await?;
-    let colors_by_era_name: HashMap<String, Option<String>> = existing_colors
+    let preserved_by_era_name: HashMap<String, (Option<String>, Option<String>)> = existing_eras
         .into_iter()
-        .filter_map(|(name, color)| name.map(|name| (normalize_era_key(&name), color)))
+        .filter_map(|(name, color, cover_source)| name.map(|name| (normalize_era_key(&name), (color, cover_source))))
         .collect();
     let eras_final: Vec<EraRecord> = import_state
         .eras
         .iter()
         .map(|era| {
             let mut era = era.clone();
-            era.dominant_color = colors_by_era_name.get(&normalize_era_key(&era.name)).cloned().flatten();
+            if let Some((color, cover_source)) = preserved_by_era_name.get(&normalize_era_key(&era.name)) {
+                era.dominant_color = color.clone();
+                era.cover_source = cover_source.clone();
+            }
             era
         })
         .collect();
@@ -677,8 +732,8 @@ pub async fn import_data(state: &AppState) -> Result<(), ApiError> {
 
         {
             let mut statement = transaction.prepare(
-                "INSERT OR IGNORE INTO eras (id, name, notes, image_url, description, dominant_color, is_main) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR IGNORE INTO eras (id, name, notes, image_url, description, dominant_color, cover_source, is_main) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for era in &eras_final {
                 statement.execute(rusqlite::params![
@@ -688,6 +743,7 @@ pub async fn import_data(state: &AppState) -> Result<(), ApiError> {
                     era.image_url,
                     era.description,
                     era.dominant_color,
+                    era.cover_source,
                     era.is_main,
                 ])?;
             }
@@ -741,9 +797,9 @@ mod tests {
 
     #[test]
     fn parses_primary_eras_and_songs() {
-        let html = r#"
+let html = r#"
             <table>
-              <tr><th>Era</th><th>Name<br>(Sheet Link)</th><th>Notes</th><th>Link</th><th>Type</th><th>Quality</th></tr>
+              <tr><th>Era</th><th>Name<br>(Sheet Link)</th><th>Notes (Official Discord Server)</th><th>Link</th><th>Type</th><th>Quality</th></tr>
               <tr><td>1</td><td>Era One<br>meta</td><td>Era notes</td><td><img src="https://img.example/a.jpg?utm_source=x"></td><td>Description</td></tr>
               <tr><td>Era One</td><td>My Song</td><td>Song notes</td><td>https://pillows.su/f/abc123</td><td>Leak</td><td>CD Quality</td></tr>
             </table>
@@ -761,6 +817,47 @@ mod tests {
         assert_eq!(state.urls[0].1.len(), 64);
     }
 
+    #[test]
+    fn parses_six_cell_primary_era_rows() {
+        let html = r#"
+            <table>
+              <tr><th>Era</th><th>Name<br>(Sheet Link)</th><th>Notes</th><th>Link</th><th>Type</th><th>Quality</th></tr>
+              <tr><th>2</th><td>1 OG File(s)<br>38 Full</td><td>Era One<br><span>(Sub)</span></td><td>Era notes</td><td><img src="https://docs.google.com/sheets-images-rt/abc=w102-h104"></td><td>Description text</td></tr>
+            </table>
+        "#;
+        let state = import_primary(html);
+        assert_eq!(state.eras.len(), 1);
+        assert_eq!(state.eras[0].name, "Era One");
+        assert_eq!(state.eras[0].notes, "Era notes");
+        assert_eq!(state.eras[0].description, "Description text");
+        assert_eq!(state.eras[0].image_url, "https://docs.google.com/sheets-images-rt/abc=s512");
+    }
+
+    #[test]
+    fn ignores_footer_stat_rows_without_images() {
+        let html = r#"
+            <table>
+              <tr><th>Era</th><th>Name<br>(Sheet Link)</th><th>Notes</th><th>Link</th><th>Type</th><th>Quality</th></tr>
+              <tr><td>1</td><td>Era One<br>meta</td><td>Era notes</td><td><img src="https://img.example/a.jpg?utm_source=x"></td><td>Description</td></tr>
+              <tr><th>1</th><td>Links</td><td>Quality</td><td>Availability</td><td>Highlighted</td></tr>
+              <tr><td>Era One</td><td>My Song</td><td>Song notes</td><td>https://pillows.su/f/abc123</td><td>Leak</td><td>CD Quality</td></tr>
+            </table>
+        "#;
+        let state = import_primary(html);
+        assert!(state.eras.iter().all(|era| era.name != "Links"));
+        assert_eq!(state.eras.len(), 1);
+        assert_eq!(state.eras[0].name, "Era One");
+        assert_eq!(state.songs.len(), 1);
+    }
+
+    #[test]
+    fn sanitize_image_url_upgrades_google_render_spec() {
+        assert_eq!(
+            sanitize_image_url("https://docs.google.com/sheets-images-rt/abc=w102-h104"),
+            "https://docs.google.com/sheets-images-rt/abc=s512"
+        );
+        assert_eq!(sanitize_image_url("https://img.example/a.jpg"), "https://img.example/a.jpg");
+    }
 
     #[test]
     fn duration_and_date_parsing() {
@@ -784,6 +881,15 @@ mod tests {
         let mut state = ImportState::new();
         let count = import_catalog(&text, catalog, &mut state).unwrap();
         println!("count={count} eras={} urls={}", state.eras.len(), state.urls.len());
+        assert!(state.main_era_count > 0, "expected main eras");
+        assert!(
+            state.eras.iter().filter(|era| era.is_main == 1).all(|era| !era.image_url.is_empty()),
+            "every main era should have artwork"
+        );
+        assert!(
+            state.eras.iter().filter(|era| era.is_main == 1).all(|era| !era.description.is_empty()),
+            "every main era should have a description"
+        );
         if let Ok(dump) = std::env::var("IMPORT_SHEET_DUMP") {
             let body: String = state.urls.iter().map(|(url, _)| format!("{url}\n")).collect();
             std::fs::write(dump, body).unwrap();

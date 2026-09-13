@@ -2,16 +2,19 @@
 //! router and serve it. Mirrors the boot/shutdown sequence in
 //! `apps/api/src/index.ts`, including the sequential background sync phases.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use axum::http::{
+    Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version, header,
+};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use tower_http::compression::predicate::Predicate;
 use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::Predicate;
+use tower_http::limit::RequestBodyLimitLayer;
 
 use yetracker_api::backfill;
 use yetracker_api::config::Config;
@@ -54,13 +57,20 @@ async fn run() -> Result<(), String> {
 
     if state.config.sync_on_start {
         // Import blocks startup (as in the Node original); a failure aborts boot.
-        importer::import_data(&state).await.map_err(|error| format!("{error:?}"))?;
+        importer::import_data(&state)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
         spawn_background_sync(state.clone(), shutdown_requested.clone());
     }
 
     let app = routes::router(state.clone())
         .layer(CompressionLayer::new().compress_when(compression_predicate()))
-        .layer(middleware::from_fn_with_state(state.clone(), cors_and_secure_headers));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            cors_and_secure_headers,
+        ))
+        // Mirrors Hono's global `bodyLimit({ maxSize: 64 * 1024 })`.
+        .layer(RequestBodyLimitLayer::new(64 * 1024));
 
     let listener = tokio::net::TcpListener::bind((api_host.as_str(), api_port))
         .await
@@ -122,7 +132,10 @@ const SECURE_HEADERS: [(&str, &str); 11] = [
     ("cross-origin-resource-policy", "cross-origin"),
     ("origin-agent-cluster", "?1"),
     ("referrer-policy", "no-referrer"),
-    ("strict-transport-security", "max-age=15552000; includeSubDomains"),
+    (
+        "strict-transport-security",
+        "max-age=15552000; includeSubDomains",
+    ),
     ("x-content-type-options", "nosniff"),
     ("x-dns-prefetch-control", "off"),
     ("x-download-options", "noopen"),
@@ -133,9 +146,10 @@ const SECURE_HEADERS: [(&str, &str); 11] = [
 
 fn apply_security_headers(response: &mut Response) {
     for (name, value) in SECURE_HEADERS {
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+        response.headers_mut().insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
     }
 }
 
@@ -144,17 +158,31 @@ fn apply_cors(state: &AppState, response: &mut Response, origin: Option<&str>) {
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         HeaderValue::from_static("X-Total-Count"),
     );
-    response.headers_mut().insert(header::VARY, HeaderValue::from_static("Origin"));
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Origin"));
 
-    let wildcard = state.config.cors_origins.iter().any(|allowed| allowed == "*");
+    let wildcard = state
+        .config
+        .cors_origins
+        .iter()
+        .any(|allowed| allowed == "*");
     let allowed = if wildcard {
         Some("*")
     } else {
-        origin.filter(|origin| state.config.cors_origins.iter().any(|allowed| allowed == origin))
+        origin.filter(|origin| {
+            state
+                .config
+                .cors_origins
+                .iter()
+                .any(|allowed| allowed == origin)
+        })
     };
     if let Some(allowed) = allowed {
         if let Ok(value) = HeaderValue::from_str(allowed) {
-            response.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+            response
+                .headers_mut()
+                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
         }
     }
 }
@@ -201,7 +229,9 @@ async fn cors_and_secure_headers(
         // Hono echoes the requested headers and widens `Vary` accordingly.
         if let Some(requested_headers) = requested_headers {
             if let Ok(value) = HeaderValue::from_str(&requested_headers) {
-                response.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_HEADERS, value);
+                response
+                    .headers_mut()
+                    .insert(header::ACCESS_CONTROL_ALLOW_HEADERS, value);
             }
             response.headers_mut().insert(
                 header::VARY,

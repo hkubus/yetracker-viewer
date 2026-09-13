@@ -23,8 +23,7 @@ pub fn parse_range(header: &str, size: u64) -> Option<FileRange> {
     if end_text.contains('-') {
         return None;
     }
-    let digits_or_empty =
-        |value: &str| value.bytes().all(|byte| byte.is_ascii_digit());
+    let digits_or_empty = |value: &str| value.bytes().all(|byte| byte.is_ascii_digit());
     if !digits_or_empty(start_text) || !digits_or_empty(end_text) {
         return None;
     }
@@ -96,12 +95,33 @@ mod tests {
 
     #[test]
     fn parses_closed_open_and_suffix_ranges() {
-        assert_eq!(parse_range("bytes=0-99", 1000), Some(FileRange { start: 0, end: 99 }));
-        assert_eq!(parse_range("bytes=5-", 1000), Some(FileRange { start: 5, end: 999 }));
-        assert_eq!(parse_range("bytes=-10", 1000), Some(FileRange { start: 990, end: 999 }));
-        assert_eq!(parse_range("bytes=-2000", 1000), Some(FileRange { start: 0, end: 999 }));
-        assert_eq!(parse_range("bytes=0-100000", 1000), Some(FileRange { start: 0, end: 999 }));
-        assert_eq!(parse_range("bytes=-", 1000), Some(FileRange { start: 0, end: 999 }));
+        assert_eq!(
+            parse_range("bytes=0-99", 1000),
+            Some(FileRange { start: 0, end: 99 })
+        );
+        assert_eq!(
+            parse_range("bytes=5-", 1000),
+            Some(FileRange { start: 5, end: 999 })
+        );
+        assert_eq!(
+            parse_range("bytes=-10", 1000),
+            Some(FileRange {
+                start: 990,
+                end: 999
+            })
+        );
+        assert_eq!(
+            parse_range("bytes=-2000", 1000),
+            Some(FileRange { start: 0, end: 999 })
+        );
+        assert_eq!(
+            parse_range("bytes=0-100000", 1000),
+            Some(FileRange { start: 0, end: 999 })
+        );
+        assert_eq!(
+            parse_range("bytes=-", 1000),
+            Some(FileRange { start: 0, end: 999 })
+        );
     }
 
     #[test]

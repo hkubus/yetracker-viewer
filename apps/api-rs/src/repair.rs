@@ -64,7 +64,12 @@ fn remove_trailing_parenthetical(value: &str) -> Option<String> {
 fn choose_era(eras: &[EraRow], primary_song_counts: &HashMap<i64, i64>) -> i64 {
     let name_lengths: HashMap<i64, usize> = eras
         .iter()
-        .map(|era| (era.id, text::utf16_len(&normalize_name(era.name.as_deref()))))
+        .map(|era| {
+            (
+                era.id,
+                text::utf16_len(&normalize_name(era.name.as_deref())),
+            )
+        })
         .collect();
 
     let mut sorted: Vec<&EraRow> = eras.iter().collect();
@@ -89,11 +94,18 @@ fn choose_era(eras: &[EraRow], primary_song_counts: &HashMap<i64, i64>) -> i64 {
 }
 
 fn resolve_era_id(era_id: i64, merge_targets: &[(i64, i64)]) -> i64 {
-    let lookup = |id: i64| merge_targets.iter().find(|(from, _)| *from == id).map(|(_, to)| *to);
+    let lookup = |id: i64| {
+        merge_targets
+            .iter()
+            .find(|(from, _)| *from == id)
+            .map(|(_, to)| *to)
+    };
     let mut current_id = era_id;
     let mut seen = HashSet::new();
     while !seen.contains(&current_id) {
-        let Some(next_id) = lookup(current_id) else { break };
+        let Some(next_id) = lookup(current_id) else {
+            break;
+        };
         seen.insert(current_id);
         current_id = next_id;
     }
@@ -138,12 +150,20 @@ pub fn repair_era_duplicates(conn: &Connection) -> Result<(), ApiError> {
         if key.is_empty() {
             continue;
         }
-        match eras_by_name.iter_mut().find(|(existing, _)| *existing == key) {
+        match eras_by_name
+            .iter_mut()
+            .find(|(existing, _)| *existing == key)
+        {
             Some((_, group)) => group.push(era.clone()),
             None => eras_by_name.push((key, vec![era.clone()])),
         }
     }
-    let group_for = |key: &str| eras_by_name.iter().find(|(existing, _)| existing == key).map(|(_, group)| group);
+    let group_for = |key: &str| {
+        eras_by_name
+            .iter()
+            .find(|(existing, _)| existing == key)
+            .map(|(_, group)| group)
+    };
 
     let mut merge_targets: Vec<(i64, i64)> = Vec::new();
     for (_, group) in &eras_by_name {
@@ -171,7 +191,9 @@ pub fn repair_era_duplicates(conn: &Connection) -> Result<(), ApiError> {
             if candidate.is_empty() {
                 break;
             }
-            if let Some(matching_era) = group_for(&name_key(Some(&candidate))).and_then(|group| group.first()) {
+            if let Some(matching_era) =
+                group_for(&name_key(Some(&candidate))).and_then(|group| group.first())
+            {
                 if matching_era.id != era.id {
                     let resolved = resolve_era_id(matching_era.id, &merge_targets);
                     merge_targets.push((era.id, resolved));
@@ -207,11 +229,20 @@ mod tests {
 
     #[test]
     fn strips_only_trailing_parentheticals() {
-        assert_eq!(remove_trailing_parenthetical("Era (Annotated)").as_deref(), Some("Era"));
-        assert_eq!(remove_trailing_parenthetical("Era (A) (B)").as_deref(), Some("Era (A)"));
+        assert_eq!(
+            remove_trailing_parenthetical("Era (Annotated)").as_deref(),
+            Some("Era")
+        );
+        assert_eq!(
+            remove_trailing_parenthetical("Era (A) (B)").as_deref(),
+            Some("Era (A)")
+        );
         assert_eq!(remove_trailing_parenthetical("Era(Annotated)"), None);
         assert_eq!(remove_trailing_parenthetical("Era (a(b))"), None);
-        assert_eq!(remove_trailing_parenthetical("Era (Annotated) ").as_deref(), Some("Era"));
+        assert_eq!(
+            remove_trailing_parenthetical("Era (Annotated) ").as_deref(),
+            Some("Era")
+        );
         assert_eq!(remove_trailing_parenthetical("Era"), None);
     }
 }

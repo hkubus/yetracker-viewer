@@ -6,8 +6,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use futures_util::future::{BoxFuture, Shared};
 use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
 use tokio::process::Command;
 
 use crate::db;
@@ -131,7 +131,11 @@ async fn stat_mtime_ms(path: &Path) -> Option<i64> {
 
 /// Returns the (shared, deduplicated) duration probe for `path`, caching it
 /// against the file's mtime.
-pub async fn duration_future(state: &AppState, path: &Path, known_mtime_ms: Option<i64>) -> DurationFuture {
+pub async fn duration_future(
+    state: &AppState,
+    path: &Path,
+    known_mtime_ms: Option<i64>,
+) -> DurationFuture {
     let mtime_ms = match known_mtime_ms {
         Some(value) => Some(value),
         None => stat_mtime_ms(path).await,
@@ -139,7 +143,10 @@ pub async fn duration_future(state: &AppState, path: &Path, known_mtime_ms: Opti
     let key = path.to_string_lossy().into_owned();
 
     {
-        let mut cache = state.duration_cache.lock().expect("duration cache poisoned");
+        let mut cache = state
+            .duration_cache
+            .lock()
+            .expect("duration cache poisoned");
         if let Some(entry) = cache.get(&key) {
             if let Some(mtime_ms) = mtime_ms {
                 if entry.mtime_ms == mtime_ms {
@@ -168,7 +175,10 @@ pub async fn duration_future(state: &AppState, path: &Path, known_mtime_ms: Opti
         .await;
 
         if outcome.is_err() {
-            cache.lock().expect("duration cache poisoned").pop(&error_key);
+            cache
+                .lock()
+                .expect("duration cache poisoned")
+                .pop(&error_key);
         }
         outcome
     }
@@ -190,7 +200,11 @@ pub async fn duration_future(state: &AppState, path: &Path, known_mtime_ms: Opti
 }
 
 /// `getDuration`: probes and awaits the shared future.
-pub async fn get_duration(state: &AppState, path: &Path, known_mtime_ms: Option<i64>) -> Result<Option<f64>, ProbeError> {
+pub async fn get_duration(
+    state: &AppState,
+    path: &Path,
+    known_mtime_ms: Option<i64>,
+) -> Result<Option<f64>, ProbeError> {
     duration_future(state, path, known_mtime_ms).await.await
 }
 
@@ -235,7 +249,12 @@ pub async fn probe_audio_file(state: &AppState, filename: &str) -> ProbeOutcome 
 }
 
 /// `deleteInvalidFile`: unlink, drop from the playable cache, reset the DB row.
-pub async fn delete_invalid_file(state: &AppState, filename: &str, url: Option<&str>, reason: InvalidReason) {
+pub async fn delete_invalid_file(
+    state: &AppState,
+    filename: &str,
+    url: Option<&str>,
+    reason: InvalidReason,
+) {
     if is_safe_filename(filename) {
         let _ = tokio::fs::remove_file(state.config.songs_path.join(filename)).await;
         state.playable.set_playable(filename, false);
@@ -256,5 +275,8 @@ pub async fn delete_invalid_file(state: &AppState, filename: &str, url: Option<&
         }
     }
 
-    eprintln!("deleted invalid file {filename} (reason: {})", reason.as_str());
+    eprintln!(
+        "deleted invalid file {filename} (reason: {})",
+        reason.as_str()
+    );
 }

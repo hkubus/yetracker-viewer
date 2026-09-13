@@ -310,6 +310,7 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                     return {
                         query,
                         hasFilters:
+                            query !== "" ||
                             startIndex > 0 ||
                             endIndex < lastEraIndex ||
                             playableOnly.checked,
@@ -447,6 +448,7 @@ const eraRange = eras.map(({ id, name, dominantColor }) => ({
                 });
                 playableOnly.addEventListener("change", updateResults);
                 clearFilters.addEventListener("click", () => {
+                    input.value = "";
                     eraStart.value = "0";
                     eraEnd.value = String(lastEraIndex);
                     playableOnly.checked = false;

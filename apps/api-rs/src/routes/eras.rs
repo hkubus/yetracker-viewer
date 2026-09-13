@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use serde_json::json;
 
-use super::{empty, json_cached, set_header, songs, COVER_CACHE};
+use super::{COVER_CACHE, empty, json_cached, set_header, songs};
 use crate::db;
 use crate::error::ApiError;
 use crate::playable::mtime_ms_of;
@@ -40,23 +40,28 @@ pub async fn list_eras(State(state): State<SharedState>) -> Result<Response, Api
 
     let eras: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(id, name, notes, description, dominant_color, image_url, songs_count)| {
-            json!({
-                "id": id,
-                "name": name,
-                "notes": notes,
-                "description": description,
-                "dominantColor": dominant_color,
-                "songsCount": songs_count,
-                "coverVersion": state.cover_versions.get(image_url.as_deref()),
-            })
-        })
+        .map(
+            |(id, name, notes, description, dominant_color, image_url, songs_count)| {
+                json!({
+                    "id": id,
+                    "name": name,
+                    "notes": notes,
+                    "description": description,
+                    "dominantColor": dominant_color,
+                    "songsCount": songs_count,
+                    "coverVersion": state.cover_versions.get(image_url.as_deref()),
+                })
+            },
+        )
         .collect();
 
     Ok(json_cached(serde_json::Value::Array(eras)))
 }
 
-pub async fn get_era(State(state): State<SharedState>, Path(id): Path<String>) -> Result<Response, ApiError> {
+pub async fn get_era(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
     let id = positive_integer(Some(&id), "era id")?;
 
     let row = db::call(&state.pool, move |conn| {
@@ -112,7 +117,7 @@ pub async fn list_era_songs(
         return Err(ApiError::not_found("Era does not exist"));
     }
 
-    songs::paginated_songs(&state, songs::SongScope::Era(id), &params).await
+    songs::paginated_songs(&state, id, &params).await
 }
 
 pub async fn get_era_cover(
@@ -121,7 +126,11 @@ pub async fn get_era_cover(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let id = positive_integer(Some(&id), "era id")?;
-    let path = state.config.storage_path.join("covers").join(format!("{id}.avif"));
+    let path = state
+        .config
+        .storage_path
+        .join("covers")
+        .join(format!("{id}.avif"));
 
     let metadata = match tokio::fs::metadata(&path).await {
         Ok(metadata) => metadata,
@@ -149,16 +158,28 @@ pub async fn get_era_cover(
     set_header(&mut response, header::CACHE_CONTROL, COVER_CACHE);
     set_header(&mut response, header::ETAG, &etag);
     if let Ok(modified) = metadata.modified() {
-        set_header(&mut response, header::LAST_MODIFIED, &httpdate::fmt_http_date(modified));
+        set_header(
+            &mut response,
+            header::LAST_MODIFIED,
+            &httpdate::fmt_http_date(modified),
+        );
     }
 
-    if headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) == Some(etag.as_str()) {
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
+    {
         *response.status_mut() = StatusCode::NOT_MODIFIED;
         return Ok(response);
     }
 
     set_header(&mut response, header::CONTENT_TYPE, "image/avif");
-    set_header(&mut response, header::CONTENT_LENGTH, &metadata.len().to_string());
+    set_header(
+        &mut response,
+        header::CONTENT_LENGTH,
+        &metadata.len().to_string(),
+    );
     response
         .headers_mut()
         .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));

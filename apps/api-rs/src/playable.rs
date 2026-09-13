@@ -37,7 +37,9 @@ impl PlayableFiles {
 
     /// Rebuilds the set from disk, then publishes it atomically.
     pub async fn refresh(&self, songs_path: &Path) -> Result<(), ApiError> {
-        let mut entries = tokio::fs::read_dir(songs_path).await.map_err(ApiError::unexpected)?;
+        let mut entries = tokio::fs::read_dir(songs_path)
+            .await
+            .map_err(ApiError::unexpected)?;
         let mut filenames = Vec::new();
         while let Some(entry) = entries.next_entry().await.map_err(ApiError::unexpected)? {
             let file_type = entry.file_type().await.map_err(ApiError::unexpected)?;
@@ -46,16 +48,17 @@ impl PlayableFiles {
             }
         }
 
-        let scanned: Vec<(String, Option<FileMeta>)> = stream::iter(filenames.into_iter().map(|filename| {
-            let dir = songs_path.to_path_buf();
-            async move {
-                let meta = stat_meta(&dir.join(&filename)).await;
-                (filename, meta)
-            }
-        }))
-        .buffer_unordered(SCAN_CONCURRENCY)
-        .collect()
-        .await;
+        let scanned: Vec<(String, Option<FileMeta>)> =
+            stream::iter(filenames.into_iter().map(|filename| {
+                let dir = songs_path.to_path_buf();
+                async move {
+                    let meta = stat_meta(&dir.join(&filename)).await;
+                    (filename, meta)
+                }
+            }))
+            .buffer_unordered(SCAN_CONCURRENCY)
+            .collect()
+            .await;
 
         let mut next = Inner::default();
         for (filename, meta) in scanned {
@@ -82,7 +85,9 @@ impl PlayableFiles {
     }
 
     pub fn is_playable(&self, filename: Option<&str>) -> bool {
-        let Some(filename) = filename else { return false };
+        let Some(filename) = filename else {
+            return false;
+        };
         if !is_bare_filename(filename) {
             return false;
         }
