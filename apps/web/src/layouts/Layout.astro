@@ -65,6 +65,14 @@ const description =
 		max-width: 90rem;
 		margin-inline: auto;
 	}
+	/* The player is fixed to the bottom of the viewport: reserve room for it so
+	   it never covers the last rows, and keep anchored rows clear of it. */
+	body:has(.player:not([hidden])) .main {
+		padding-bottom: 11rem;
+	}
+	html {
+		scroll-padding-bottom: 11rem;
+	}
 	.skip-link {
 		position: absolute;
 		z-index: 100;
@@ -91,5 +99,20 @@ const description =
 			transition-duration: 0.01ms;
 			scroll-behavior: auto;
 		}
+	}
+</style>
+
+<style is:global>
+	/* Shared with pages and components, so it cannot live in a scoped block. */
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		padding: 0;
+		overflow: hidden;
+		clip-path: inset(50%);
+		border: 0;
+		white-space: nowrap;
 	}
 </style>

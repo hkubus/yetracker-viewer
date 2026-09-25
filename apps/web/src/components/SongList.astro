@@ -3,22 +3,25 @@ import type { Song } from '@yetracker/types';
 import { Icon } from 'astro-icon/components';
 import { apiUrl } from '../config';
 import { SONG_CATEGORIES } from '../songCategories';
+import { DEFAULT_SONG_SORT, SONG_SORTS } from '../songSorts';
 import { convertDuration } from '../utils/convertDuration';
 
 type SongRow = Song & {
   url?: string;
   filename?: string;
   fileName?: string;
-  downloaded?: number | string;
+  downloaded?: number | string | null;
   playable?: boolean;
   duration?: number | null;
 };
 
 const songs = (Astro.props.songs ?? []) as SongRow[];
 const eraId = Astro.props.eraId;
+const eraName = (Astro.props.eraName as string | undefined) ?? '';
 const scopeName = (Astro.props.scopeName as string | undefined) ?? 'era';
 const apiBaseUrl = Astro.props.apiBaseUrl as string;
 const coverVersion = Astro.props.coverVersion as string | undefined;
+const sort = (Astro.props.sort as string | undefined) ?? DEFAULT_SONG_SORT;
 const initialQuery = String(
   (Astro.props.initialQuery as string | undefined) ??
     (Astro.props.searchQuery as string | undefined) ??
@@ -33,7 +36,8 @@ const shortDate = new Intl.DateTimeFormat('en-US', {
 const safeIdPart = String(eraId ?? 'list').replace(/[^a-zA-Z0-9_-]/g, '-');
 const searchInputId = `song-search-${safeIdPart || 'list'}`;
 const categorySelectId = `song-category-${safeIdPart || 'list'}`;
-const hasServerFilter = initialQuery.trim().length > 0 || initialCategory.length > 0;
+const sortSelectId = `song-sort-${safeIdPart || 'list'}`;
+const hasServerFilter = initialQuery.trim().length > 0 || initialCategory.length > 0 || sort !== DEFAULT_SONG_SORT;
 const clearHref = eraId != null ? `/eras/${encodeURIComponent(eraId)}` : '.';
 
 function isPlayable(song: SongRow): boolean {
@@ -43,6 +47,13 @@ function isPlayable(song: SongRow): boolean {
   const file = song.filename ?? song.fileName;
   if (typeof file === 'string' && file.trim().length > 0) return true;
   return false;
+}
+
+/** Explains *why* a row cannot be played instead of showing nothing at all. */
+function unavailableLabel(song: SongRow): string {
+  if (song.downloaded === 0) return 'Download failed for this track — open the source instead';
+  if (song.url) return 'No local file yet — open the source instead';
+  return 'No audio file and no source link for this track';
 }
 
 function formatSongDate(value: unknown): string {
@@ -67,6 +78,11 @@ function formatLength(song: SongRow): string {
   return parts.join(' - ');
 }
 
+/** `is-blank` lets the mobile card layout drop cells that have nothing to show. */
+function blankClass(value: string): string {
+  return value.trim().length === 0 ? ' is-blank' : '';
+}
+
 function rowId(song: SongRow, index: number): string {
   const id = Number(song.id);
   if (song.id != null && Number.isFinite(id)) return `song-${Math.trunc(id)}`;
@@ -79,26 +95,40 @@ function eraIdAttr(song: SongRow): string | undefined {
   if (Number.isFinite(n)) return String(Math.trunc(n));
   return undefined;
 }
+
+/** Everything the server-side query matches, so the instant filter agrees with it. */
+function searchText(song: SongRow): string {
+  return [song.name, song.notes, song.quality, song.availableLength, formatLength(song)]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .join(' ');
+}
 ---
 
-<section class="song-list" data-song-list>
+<section class="song-list" data-song-list data-play-scope>
     <div class="song-search">
         <label for={searchInputId}>Search songs in this {scopeName}</label>
         <form method="get" action="" data-song-search-form>
             <div class="song-search__controls">
-                <div class="song-search__category-group">
-                    <label class="song-search__category-label" for={categorySelectId}>Category</label>
-                    <select
-                        id={categorySelectId}
-                        name="category"
-                        class="song-search__category"
-                        data-song-category
-                    >
+                <div class="song-search__select-group">
+                    <label class="song-search__control-label" for={categorySelectId}>Category</label>
+                    <select id={categorySelectId} name="category" class="song-search__select" data-song-select>
                         <option value="" selected={initialCategory === ''}>All categories</option>
                         {
                             SONG_CATEGORIES.map((category) => (
                                 <option value={category.id} selected={category.id === initialCategory}>
                                     {`${category.emoji} ${category.label}`}
+                                </option>
+                            ))
+                        }
+                    </select>
+                </div>
+                <div class="song-search__select-group">
+                    <label class="song-search__control-label" for={sortSelectId}>Sort</label>
+                    <select id={sortSelectId} name="sort" class="song-search__select" data-song-select>
+                        {
+                            SONG_SORTS.map((option) => (
+                                <option value={option.id} selected={option.id === sort}>
+                                    {option.label}
                                 </option>
                             ))
                         }
@@ -117,53 +147,66 @@ function eraIdAttr(song: SongRow): string | undefined {
                 {
                     hasServerFilter && (
                         <a class="song-search__clear" href={clearHref}>
-                            Clear
+                            Clear all filters
                         </a>
                     )
                 }
                 <p class="song-count" aria-live="polite" data-song-count>
-                    {songs.length} {songs.length === 1 ? "song" : "songs"}
+                    {songs.length} {songs.length === 1 ? 'song' : 'songs'}
                 </p>
             </div>
             <p class="song-search__hint">
-                Searches the full catalog on the server. Typing also filters
-                this page instantly. Use the category picker to filter by emoji category.
+                Searches titles, notes, quality and length on the server across the whole era. Typing also filters
+                this page instantly; the sort applies to every page.
             </p>
         </form>
     </div>
 
     <div class="song-table-wrap">
     <table>
-        <tr>
-            <th></th>
-            <th>Title</th>
-            <th>Notes</th>
-            <th>Quality</th>
-            <th>Available Length</th>
-            <th>File Date</th>
-            <th>Leak Date</th>
-        </tr>
+        <caption class="sr-only">Songs in {eraName || scopeName}</caption>
+        <thead>
+            <tr>
+                <th scope="col"><span class="sr-only">Actions</span></th>
+                <th scope="col">Title</th>
+                <th scope="col">Notes</th>
+                <th scope="col">Quality</th>
+                <th scope="col">Available Length</th>
+                <th scope="col">File Date</th>
+                <th scope="col">Leak Date</th>
+            </tr>
+        </thead>
+        <tbody>
         {
             songs.map((e, index) => {
                 const playable = isPlayable(e);
                 const idAttr = eraIdAttr(e);
                 const numericId = Number(e.id);
                 const hasId = e.id != null && Number.isFinite(numericId);
+                const notes = typeof e.notes === 'string' ? e.notes.trim() : '';
+                const quality = typeof e.quality === 'string' ? e.quality : '';
+                const length = formatLength(e);
+                const fileDate = formatSongDate(e.fileDate);
+                const leakDate = formatSongDate(e.leakDate);
                 return (
                     <tr
                         id={rowId(e, index)}
                         class="song-row"
+                        data-play-row
                         data-song-name={e.name ?? ''}
+                        data-search-text={searchText(e)}
                     >
-                        <td class="song-actions-cell">
+                        <td class="song-actions-cell" data-label="Actions">
                             {playable ? (
                                 <div class="song-actions">
                                     <button
                                         class="play-song"
                                         type="button"
+                                        data-play-target
                                         data-id={hasId ? String(Math.trunc(numericId)) : undefined}
                                         data-title={e.name ?? 'Untitled'}
                                         data-eraId={idAttr}
+                                        data-era-name={eraName}
                                         data-track-length={e.duration ?? e.trackLength ?? 0}
                                         data-cover-version={coverVersion}
                                         aria-label={`Play ${e.name ?? 'Untitled'}`}
@@ -191,31 +234,55 @@ function eraIdAttr(song: SongRow): string | undefined {
                                     target="_blank"
                                     rel="noreferrer"
                                     aria-label={`Open source for ${e.name ?? 'Untitled'}`}
-                                    title="Open source"
+                                    title={unavailableLabel(e)}
                                 >
                                     <Icon name="link" />
                                 </a>
+                            ) : (
+                                <span class="song-unavailable" title={unavailableLabel(e)} aria-hidden="true">
+                                    —
+                                </span>
+                            )}
+                        </td>
+                        <th scope="row" class="title" data-label="Title">{e.name}</th>
+                        <td class={`notes-cell${blankClass(notes)}`} data-label="Notes">
+                            {notes ? (
+                                <>
+                                    <span class="notes-text" data-notes-text>{notes}</span>
+                                    <button
+                                        type="button"
+                                        class="notes-toggle"
+                                        data-notes-toggle
+                                        aria-expanded="false"
+                                        hidden
+                                    >
+                                        More
+                                    </button>
+                                </>
                             ) : null}
                         </td>
-                        <th class="title">{e.name}</th>
-                        <td class="notes">{e.notes}</td>
-                        <td class="quality">{e.quality}</td>
-                        <td class="availableLength">{formatLength(e)}</td>
-                        <td class="fileDate">{formatSongDate(e.fileDate)}</td>
-                        <td class="leakDate">{formatSongDate(e.leakDate)}</td>
+                        <td class={`quality${blankClass(quality)}`} data-label="Quality">{quality}</td>
+                        <td class={`availableLength${blankClass(length)}`} data-label="Available Length">
+                            {length}
+                        </td>
+                        <td class={`fileDate${blankClass(fileDate)}`} data-label="File Date">{fileDate}</td>
+                        <td class={`leakDate${blankClass(leakDate)}`} data-label="Leak Date">{leakDate}</td>
                     </tr>
                 );
             })
         }
+        </tbody>
     </table>
     </div>
     <p class="song-empty" data-song-empty hidden>
-        No songs match your search.
+        No songs on this page match your filter — press <strong>Search</strong> to look through the whole era.
     </p>
 </section>
 
 <script is:inline data-astro-rerun>
     (() => {
+        const normalize = (value) => value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+
         document.querySelectorAll("[data-song-list]").forEach((songList) => {
             if (songList.dataset.searchBound === "true") return;
 
@@ -223,7 +290,6 @@ function eraIdAttr(song: SongRow): string | undefined {
             const count = songList.querySelector("[data-song-count]");
             const empty = songList.querySelector("[data-song-empty]");
             const form = songList.querySelector("[data-song-search-form]");
-            const categorySelect = songList.querySelector("[data-song-category]");
             const rows = [...songList.querySelectorAll(".song-row")];
 
             if (!(input instanceof HTMLInputElement) || !count || !empty) return;
@@ -232,31 +298,70 @@ function eraIdAttr(song: SongRow): string | undefined {
             const totalOnPage = rows.length;
 
             const updateResults = () => {
-                const normalize = (value) =>
-                    value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
                 const query = normalize(input.value);
                 let visible = 0;
 
                 rows.forEach((row) => {
-                    const songName = normalize(row.dataset.songName ?? "");
-                    const matches = !query || songName.includes(query);
+                    const haystack = row.dataset.searchText ?? row.dataset.songName ?? "";
+                    const matches = !query || haystack.includes(query);
 
                     row.hidden = !matches;
                     if (matches) visible += 1;
                 });
 
                 count.textContent = query
-                    ? `${visible} of ${totalOnPage} on this page — use Search for the full catalog`
+                    ? `${visible} of ${totalOnPage} on this page — use Search for the whole era`
                     : `${totalOnPage} ${totalOnPage === 1 ? "song" : "songs"}`;
                 empty.hidden = visible !== 0;
+                measureNotes();
             };
 
-            input.addEventListener("input", updateResults);
-            if (categorySelect instanceof HTMLSelectElement && form instanceof HTMLFormElement) {
-                categorySelect.addEventListener("change", () => {
-                    form.requestSubmit();
+            // Long notes are clamped to two lines; the toggle is only offered
+            // when the text really overflows, and only after JS has measured it.
+            const measureNotes = () => {
+                rows.forEach((row) => {
+                    if (row.hidden) return;
+                    const text = row.querySelector("[data-notes-text]");
+                    const toggle = row.querySelector("[data-notes-toggle]");
+                    if (!(text instanceof HTMLElement) || !(toggle instanceof HTMLButtonElement)) return;
+                    const expanded = text.dataset.expanded === "true";
+                    text.dataset.clamped = "true";
+                    if (expanded) {
+                        toggle.hidden = false;
+                        return;
+                    }
+                    const overflows = text.scrollHeight > text.clientHeight + 1;
+                    toggle.hidden = !overflows;
+                    if (!overflows) delete text.dataset.clamped;
                 });
-            }
+            };
+
+            songList.addEventListener("click", (event) => {
+                const target = event.target;
+                if (!(target instanceof Element)) return;
+                const toggle = target.closest("[data-notes-toggle]");
+                if (!(toggle instanceof HTMLButtonElement)) return;
+                const text = toggle.parentElement?.querySelector("[data-notes-text]");
+                if (!(text instanceof HTMLElement)) return;
+
+                const expanded = text.dataset.expanded === "true";
+                if (expanded) {
+                    delete text.dataset.expanded;
+                    text.dataset.clamped = "true";
+                } else {
+                    text.dataset.expanded = "true";
+                    delete text.dataset.clamped;
+                }
+                toggle.textContent = expanded ? "More" : "Less";
+                toggle.setAttribute("aria-expanded", String(!expanded));
+            });
+
+            // Selecting a filter submits the form so the whole era is re-queried.
+            songList.querySelectorAll("[data-song-select]").forEach((select) => {
+                if (!(select instanceof HTMLSelectElement) || !(form instanceof HTMLFormElement)) return;
+                select.addEventListener("change", () => form.requestSubmit());
+            });
+
             if (form instanceof HTMLFormElement) {
                 // GET submit preserves ?q= server-side search and resets to page 1.
                 form.addEventListener("submit", () => {
@@ -269,7 +374,15 @@ function eraIdAttr(song: SongRow): string | undefined {
                     }
                 });
             }
+
+            let resizeTimer;
+            window.addEventListener("resize", () => {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(measureNotes, 150);
+            });
+
             updateResults();
+            requestAnimationFrame(measureNotes);
         });
     })();
 </script>
@@ -279,7 +392,7 @@ function eraIdAttr(song: SongRow): string | undefined {
         margin-inline: 1vh;
         margin-bottom: 0.8rem;
     }
-    .song-search label {
+    .song-search > label {
         display: block;
         margin-bottom: 0.35rem;
         color: color-mix(in srgb, var(--dominantColor) 30%, white);
@@ -295,7 +408,7 @@ function eraIdAttr(song: SongRow): string | undefined {
         gap: 0.75rem;
     }
     .song-search input,
-    .song-search__category {
+    .song-search__select {
         box-sizing: border-box;
         min-width: 0;
         width: 100%;
@@ -315,21 +428,22 @@ function eraIdAttr(song: SongRow): string | undefined {
         flex: 1 1 12rem;
         width: auto;
     }
-    .song-search__category-group {
+    .song-search__select-group {
         display: flex;
         flex: none;
         flex-direction: column;
         align-items: stretch;
         gap: 0.25rem;
     }
-    .song-search__category {
+    .song-search__select {
         flex: none;
         width: auto;
         min-width: 9rem;
         max-width: 13rem;
         color-scheme: dark;
+        cursor: pointer;
     }
-    .song-search .song-search__category-label {
+    .song-search .song-search__control-label {
         flex: none;
         margin: 0;
         color: color-mix(in srgb, var(--dominantColor) 30%, white);
@@ -342,7 +456,7 @@ function eraIdAttr(song: SongRow): string | undefined {
         color: color-mix(in srgb, var(--dominantColor) 20%, #aaa);
     }
     .song-search input:focus-visible,
-    .song-search__category:focus-visible {
+    .song-search__select:focus-visible {
         border-color: color-mix(
             in srgb,
             var(--dominantColor) 75%,
@@ -414,6 +528,18 @@ function eraIdAttr(song: SongRow): string | undefined {
             #242424
         );
     }
+    .song-row[data-playing='true'] th,
+    .song-row[data-playing='true'] td {
+        background-color: color-mix(
+            in srgb,
+            var(--dominantColor) 32%,
+            #1f1f1f
+        );
+    }
+    .song-row[data-playing='true'] .title::after {
+        content: ' ♪';
+        color: color-mix(in oklab, var(--dominantColor) 20%, white);
+    }
     .song-list {
         min-width: 0;
         width: calc(100% + 2vh);
@@ -430,10 +556,10 @@ function eraIdAttr(song: SongRow): string | undefined {
             flex-direction: column;
             gap: 0.35rem;
         }
-        .song-search__category-group {
+        .song-search__select-group {
             width: 100%;
         }
-        .song-search__category {
+        .song-search__select {
             width: 100%;
             max-width: none;
         }
@@ -495,6 +621,12 @@ function eraIdAttr(song: SongRow): string | undefined {
         cursor: default;
         opacity: 0.35;
     }
+    .song-unavailable {
+        display: inline-block;
+        width: 2rem;
+        color: color-mix(in srgb, var(--dominantColor) 20%, #888);
+        text-align: center;
+    }
     .leakDate,
     .quality,
     .availableLength,
@@ -519,6 +651,42 @@ function eraIdAttr(song: SongRow): string | undefined {
     td {
         padding: 0.75vh;
     }
+    .notes-cell {
+        max-width: 34rem;
+    }
+    .notes-text {
+        overflow-wrap: anywhere;
+    }
+    /* Only applied by script once it knows the text overflows. */
+    .notes-text[data-clamped='true'] {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+    }
+    .notes-toggle {
+        margin-top: 0.15rem;
+        padding: 0.1rem 0.4rem;
+        border: 0;
+        border-radius: 0.4rem;
+        background: transparent;
+        color: color-mix(in oklab, var(--dominantColor) 25%, white);
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-decoration: underline;
+    }
+    .notes-toggle:hover,
+    .notes-toggle:focus-visible {
+        background: color-mix(in srgb, var(--dominantColor) 35%, transparent);
+        color: white;
+        outline: none;
+    }
+    .notes-toggle[hidden] {
+        display: none;
+    }
     table {
         width: 100%;
         min-width: 56rem;
@@ -526,23 +694,93 @@ function eraIdAttr(song: SongRow): string | undefined {
         border-collapse: collapse;
         border-spacing: 0;
     }
-    tr:first-child th,
-    tr:first-child td {
+    thead tr:first-child th {
         border-top: none;
     }
-
-    tr:last-child th,
-    tr:last-child td {
+    tbody tr:last-child th,
+    tbody tr:last-child td {
         border-bottom: none;
     }
-
     th:first-child,
     td:first-child {
         border-left: none;
     }
-
     th:last-child,
     td:last-child {
         border-right: none;
+    }
+
+    /* Phones get one card per song instead of a 900px-wide scroller. */
+    @media (max-width: 640px) {
+        .song-table-wrap {
+            overflow-x: visible;
+        }
+        table {
+            min-width: 0;
+            border-collapse: separate;
+        }
+        thead {
+            display: none;
+        }
+        tbody tr {
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 0.6rem;
+            padding: 0.55rem 0.7rem;
+            border: 2px solid
+                color-mix(in srgb, var(--dominantColor) 45%, transparent);
+            border-radius: 0.7rem;
+            background: color-mix(
+                in srgb,
+                var(--dominantColor) 12%,
+                transparent
+            );
+        }
+        tbody th,
+        tbody td {
+            display: block;
+            width: auto;
+            max-width: none;
+            padding: 0.15rem 0;
+            border: 0;
+            text-align: left;
+        }
+        tbody th.title {
+            order: -1;
+            font-size: 1.02rem;
+            overflow-wrap: anywhere;
+        }
+        /* Cells with nothing in them are dropped from the card layout. */
+        tbody td.is-blank {
+            display: none;
+        }
+        tbody td[data-label]::before {
+            display: block;
+            color: color-mix(in srgb, var(--dominantColor) 30%, #aaa);
+            content: attr(data-label);
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .song-actions-cell {
+            width: auto;
+            margin-bottom: 0.35rem;
+        }
+        .song-actions {
+            justify-content: flex-start;
+        }
+        .play-song,
+        .download-song,
+        .source-link {
+            border: 1px solid
+                color-mix(in srgb, var(--dominantColor) 40%, transparent);
+        }
+        .leakDate,
+        .quality,
+        .availableLength,
+        .fileDate {
+            text-align: left;
+        }
     }
 </style>

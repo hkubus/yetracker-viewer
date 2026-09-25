@@ -41,6 +41,15 @@ export function apiUrl(baseUrl: string, path: string) {
   return `${base}/${cleanPath}`;
 }
 
+/**
+ * Marks the current response as uncacheable. The middleware only applies its
+ * public cache policy when a page has not set `Cache-Control` itself, so a page
+ * that rendered without its data can opt out of edge caching.
+ */
+export function noStore(response: { headers: Headers }): void {
+  response.headers.set('Cache-Control', 'no-store');
+}
+
 export type ApiError = Error & { status?: number };
 
 function toApiError(status: number, path: string): ApiError {

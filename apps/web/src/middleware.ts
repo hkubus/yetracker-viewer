@@ -27,7 +27,13 @@ export const onRequest = defineMiddleware(async (context, next) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   const pathname = new URL(context.request.url).pathname;
-  if (pathname.startsWith('/eras/') || pathname === '/') {
+  // Pages that could not load their data set Cache-Control themselves (see
+  // `noStore()` in src/config.ts) so a blip is never cached as an empty site.
+  if (
+    (pathname.startsWith('/eras/') || pathname === '/') &&
+    !response.headers.has('Cache-Control') &&
+    response.status < 400
+  ) {
     response.headers.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
   }
   return response;

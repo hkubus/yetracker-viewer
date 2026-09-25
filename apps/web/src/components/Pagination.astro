@@ -47,6 +47,7 @@ const isLastPage = currentPage >= pageCount;
         >
           Previous
         </a>
+        <p class="pagination__mobile">Page {currentPage} of {pageCount}</p>
         <div class="pagination__pages" data-page-count={pageCount}>
           {visiblePages.map((page, index) => (
             <>
@@ -92,6 +93,13 @@ const isLastPage = currentPage >= pageCount;
     display: flex;
     align-items: center;
     gap: 0.4rem;
+  }
+
+  .pagination__mobile {
+    display: none;
+    margin: 0;
+    color: #b9b9b9;
+    font-size: 0.85rem;
   }
 
   a {
@@ -147,16 +155,13 @@ const isLastPage = currentPage >= pageCount;
       justify-content: space-between;
     }
 
-    .pagination__pages a {
+    /* Numbered pages do not fit a phone; prev/next plus a page indicator do. */
+    .pagination__pages {
       display: none;
     }
 
-    .pagination__pages a[aria-current='page'] {
-      display: inline-flex;
-    }
-
-    .pagination__pages::after {
-      content: 'of ' attr(data-page-count);
+    .pagination__mobile {
+      display: block;
     }
   }
 

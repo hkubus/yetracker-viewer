@@ -1,0 +1,213 @@
+---
+import type { Song } from '@yetracker/types';
+import { Icon } from 'astro-icon/components';
+import { fetchApi, noStore } from '../config';
+import { colorValue } from '../utils/color';
+
+type LeakSong = Song & {
+  eraPosition?: number;
+  dominantColor?: string;
+  eraName?: string;
+  playable?: boolean;
+  leakDate?: number | null;
+};
+
+const LIMIT = 8;
+const eraPageSize = Number(Astro.props.eraPageSize) > 0 ? Number(Astro.props.eraPageSize) : 100;
+
+const leakDateFormatter = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' });
+
+function formatLeakDate(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 'Unknown date';
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? 'Unknown date' : leakDateFormatter.format(date);
+}
+
+function isoDate(value: number | null | undefined): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10);
+}
+
+/** Deep link to the row inside the era, using the same page size as the list. */
+function songHref(song: LeakSong): string {
+  const eraId = Number(song.eraId);
+  const songId = Number(song.id);
+  if (!Number.isFinite(eraId) || !Number.isFinite(songId)) return '/';
+  const position = Number(song.eraPosition);
+  const page = Number.isFinite(position) && position > 0 ? Math.ceil(position / eraPageSize) : 1;
+  const base = `/eras/${Math.trunc(eraId)}`;
+  const anchor = `#song-${Math.trunc(songId)}`;
+  return page > 1 ? `${base}?page=${page}${anchor}` : `${base}${anchor}`;
+}
+
+// Newest leaks first. The strip is decoration for the home page: a failure here
+// must not take the page down, so it renders nothing and opts out of caching.
+let songs: LeakSong[] = [];
+try {
+  const response = await fetchApi(`/songs?playable=true&sort=leak-newest&limit=${LIMIT}`);
+  const body: unknown = await response.json();
+  const list = body && typeof body === 'object' ? (body as { songs?: unknown }).songs : undefined;
+  if (Array.isArray(list)) songs = list as LeakSong[];
+} catch (error) {
+  console.error('[home] recently leaked request failed, hiding strip:', error);
+  noStore(Astro.response);
+}
+---
+
+{
+  songs.length > 0 && (
+    <section class="recent" data-play-scope aria-labelledby="recent-heading">
+      <div class="recent__head">
+        <h2 id="recent-heading">Recently leaked</h2>
+        <p>Newest tracks that can be played right now.</p>
+      </div>
+      <ul class="recent__list">
+        {songs.map((song) => {
+          const songId = Number(song.id);
+          const eraId = Number(song.eraId);
+          const hasId = Number.isFinite(songId);
+          return (
+            <li class="recent__item" data-play-row style={`--dominantColor: ${colorValue(song.dominantColor)}`}>
+              <div class="recent__text">
+                <a class="recent__title" href={songHref(song)}>
+                  {song.name ?? 'Untitled'}
+                </a>
+                <p class="recent__meta">
+                  <span class="recent__era">{song.eraName ?? 'Unknown era'}</span>
+                  <span aria-hidden="true">•</span>
+                  <time datetime={isoDate(song.leakDate)}>{formatLeakDate(song.leakDate)}</time>
+                </p>
+              </div>
+              {hasId ? (
+                <button
+                  class="play-song recent__play"
+                  type="button"
+                  data-play-target
+                  data-id={String(Math.trunc(songId))}
+                  data-title={song.name ?? 'Untitled'}
+                  data-eraId={Number.isFinite(eraId) ? String(Math.trunc(eraId)) : undefined}
+                  data-era-name={song.eraName ?? ''}
+                  aria-label={`Play ${song.name ?? 'Untitled'}`}
+                  title="Play"
+                >
+                  <Icon name="play" />
+                </button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  )
+}
+
+<style>
+  .recent {
+    margin: clamp(0.75rem, 1.5vw, 1.5rem);
+    margin-bottom: 0;
+  }
+  .recent__head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+  }
+  .recent__head h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    letter-spacing: -0.02em;
+  }
+  .recent__head p {
+    margin: 0;
+    color: #9a9a9a;
+    font-size: 0.8rem;
+  }
+  .recent__list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .recent__item {
+    display: flex;
+    box-sizing: border-box;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--dominantColor) 55%, #3a3a3a);
+    border-left: 4px solid color-mix(in srgb, var(--dominantColor) 80%, white);
+    border-radius: 0.6rem;
+    background: color-mix(in srgb, var(--dominantColor) 18%, #202020);
+  }
+  .recent__item[data-playing='true'] {
+    border-color: #fff;
+    border-left-color: #fff;
+    background: color-mix(in srgb, var(--dominantColor) 30%, #2a2a2a);
+  }
+  .recent__text {
+    min-width: 0;
+  }
+  .recent__title {
+    display: block;
+    overflow: hidden;
+    color: #f6f6f6;
+    font-weight: 600;
+    font-size: 0.92rem;
+    text-decoration: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .recent__title:hover,
+  .recent__title:focus-visible {
+    text-decoration: underline;
+  }
+  .recent__title:focus-visible {
+    outline: 3px solid #fff;
+    outline-offset: 2px;
+  }
+  .recent__meta {
+    display: flex;
+    gap: 0.35rem;
+    margin: 0.2rem 0 0;
+    overflow: hidden;
+    color: color-mix(in oklab, var(--dominantColor) 25%, #c9c9c9);
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+  .recent__era {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .recent__play {
+    display: inline-grid;
+    flex: none;
+    width: 2.1rem;
+    height: 2.1rem;
+    place-items: center;
+    border: 0;
+    border-radius: 999px;
+    color: color-mix(in oklab, var(--dominantColor) 10%, white);
+    background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
+    cursor: pointer;
+  }
+  .recent__play svg {
+    width: 1.15em;
+    height: 1.15em;
+  }
+  .recent__play:hover,
+  .recent__play:focus-visible {
+    color: #fff;
+    background: color-mix(in srgb, var(--dominantColor) 55%, transparent);
+    outline: none;
+  }
+  .recent__play:focus-visible {
+    outline: 3px solid #fff;
+    outline-offset: 2px;
+  }
+</style>

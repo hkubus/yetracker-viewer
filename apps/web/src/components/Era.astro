@@ -13,7 +13,7 @@ const coverUrl = rawCoverVersion
   : apiUrl(apiBaseUrl, `/eras/${era.id}/cover`);
 const songsCount = typeof era.songsCount === 'number' ? era.songsCount : 0;
 ---
-<a href={`/eras/${era.id}`}>
+<a href={`/eras/${era.id}`} data-era-name={era.name}>
 <div style={`--dominantColor: ${dominantColor};`}>
     <img
         src={coverUrl}

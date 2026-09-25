@@ -19,9 +19,35 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             <div class="metadata">
                 <p class="eyebrow">Now playing</p>
                 <p class="title"></p>
+                <a class="era-link" data-player-era hidden></a>
             </div>
         </div>
         <div class="controls" aria-label="Playback controls">
+            <button id="previous" type="button" data-player-previous aria-label="Previous track" title="Previous track">
+                <svg class="skip-icon" aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M18 6v12"></path>
+                    <path d="M6.5 6.5v11L16 12z"></path>
+                </svg>
+            </button>
+            <button id="play" type="button" aria-label="Play" title="Play">
+                <svg class="play-icon" aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M7 5.5v13L18.5 12z"></path>
+                </svg>
+                <svg class="pause-icon" aria-hidden="true" viewBox="0 0 24 24">
+                    <rect x="6.5" y="5.5" width="4" height="13" rx="1.1"></rect>
+                    <rect x="13.5" y="5.5" width="4" height="13" rx="1.1"></rect>
+                </svg>
+            </button>
+            <button id="next" type="button" data-player-next aria-label="Next track" title="Next track">
+                <svg class="skip-icon" aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M6 6v12"></path>
+                    <path d="M17.5 6.5v11L8 12z"></path>
+                </svg>
+            </button>
+            <label class="volume-control">
+                <span>Volume</span>
+                <input id="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume" />
+            </label>
             <label class="quality-control">
                 <span>Quality</span>
                 <select id="quality" aria-label="Playback quality">
@@ -33,26 +59,13 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
                     <option value="320">320 kbps</option>
                 </select>
             </label>
-            <button id="play" type="button" aria-label="Play" title="Play">
-                <svg
-                    class="play-icon"
-                    aria-hidden="true"
-                    viewBox="0 0 24 24"
-                >
-                    <path d="M7 5.5v13L18.5 12z"></path>
-                </svg>
-                <svg
-                    class="pause-icon"
-                    aria-hidden="true"
-                    viewBox="0 0 24 24"
-                >
-                    <rect x="6.5" y="5.5" width="4" height="13" rx="1.1"></rect>
-                    <rect x="13.5" y="5.5" width="4" height="13" rx="1.1"></rect>
-                </svg>
-            </button>
         </div>
     </div>
-    <p class="player-error" data-player-error hidden role="status"></p>
+    <p class="player-status" data-player-status hidden role="status"></p>
+    <p class="player-error" data-player-error hidden role="alert">
+        <span data-player-error-text></span>
+        <button type="button" class="player-retry" data-player-retry>Retry</button>
+    </p>
     <div class="progress">
         <p id="timestamp" aria-live="polite">0:00</p>
         <input type="range" id="progressBar" value="0" min="0" step="0.1" aria-label="Track progress" />
@@ -70,6 +83,8 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
 
         const HEX_PATTERN = /^#?[\da-f]{6}$/i;
         const FALLBACK_COLOR = "#666666";
+        const QUALITY_KEY = "yetracker:quality";
+        const VOLUME_KEY = "yetracker:volume";
 
         const player = mainElement.querySelector("#audio") as HTMLAudioElement;
         const progressBar = mainElement.querySelector("#progressBar") as HTMLInputElement;
@@ -77,14 +92,45 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         const timestampEl = mainElement.querySelector("#timestamp") as HTMLParagraphElement;
         const imgEl = mainElement.querySelector("img") as HTMLImageElement;
         const title = mainElement.querySelector(".title") as HTMLElement;
+        const eraLink = mainElement.querySelector("[data-player-era]") as HTMLAnchorElement;
         const playButton = mainElement.querySelector("#play") as HTMLButtonElement;
+        const previousButton = mainElement.querySelector("[data-player-previous]") as HTMLButtonElement;
+        const nextButton = mainElement.querySelector("[data-player-next]") as HTMLButtonElement;
+        const volumeInput = mainElement.querySelector("#volume") as HTMLInputElement;
         const qualitySelect = mainElement.querySelector("#quality") as HTMLSelectElement;
         const errorEl = mainElement.querySelector("[data-player-error]") as HTMLParagraphElement | null;
+        const errorTextEl = mainElement.querySelector("[data-player-error-text]") as HTMLElement | null;
+        const retryButton = mainElement.querySelector("[data-player-retry]") as HTMLButtonElement | null;
+        const statusEl = mainElement.querySelector("[data-player-status]") as HTMLParagraphElement | null;
         const apiBaseUrl = mainElement.dataset.apiBaseUrl?.replace(/\/+$/, "") ?? "";
+
         let catalogDuration = 0;
         let currentSongId: number | null = null;
         let streamRevision = 0;
         let previousSrc = "";
+        /** Quality of the stream that is loaded right now ("" = stored file). */
+        let activeQuality = "";
+        /** Set while a quality switch owns the error event, so it can restore. */
+        let switching = false;
+        let lastFailedSrc = "";
+        /** The list the current track came from: next/previous walk it in DOM order. */
+        let currentList: Element | null = null;
+
+        function readStored(key: string): string | null {
+            try {
+                return window.localStorage.getItem(key);
+            } catch {
+                return null;
+            }
+        }
+
+        function writeStored(key: string, value: string) {
+            try {
+                window.localStorage.setItem(key, value);
+            } catch {
+                // Private mode / disabled storage: preferences simply do not persist.
+            }
+        }
 
         function sanitizeColor(value: unknown): string {
             const raw = String(value ?? "").trim().replace(/^#/, "");
@@ -93,21 +139,31 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
 
         function showError(message: string) {
             if (!errorEl) return;
-            errorEl.textContent = message;
+            if (errorTextEl) errorTextEl.textContent = message;
             errorEl.hidden = false;
         }
 
         function hideError() {
             if (!errorEl) return;
-            errorEl.textContent = "";
+            if (errorTextEl) errorTextEl.textContent = "";
             errorEl.hidden = true;
         }
 
-        function getStreamUrl(id: number) {
+        function showStatus(message: string) {
+            if (!statusEl) return;
+            statusEl.textContent = message;
+            statusEl.hidden = false;
+        }
+
+        function hideStatus() {
+            if (!statusEl) return;
+            statusEl.textContent = "";
+            statusEl.hidden = true;
+        }
+
+        function getStreamUrl(id: number, quality: string) {
             const baseUrl = `${apiBaseUrl}/songs/${id}/stream`;
-            return qualitySelect.value
-                ? `${baseUrl}?quality=${qualitySelect.value}`
-                : baseUrl;
+            return quality ? `${baseUrl}?quality=${quality}` : baseUrl;
         }
 
         function startPlayback() {
@@ -144,10 +200,92 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             return version ? `${base}?v=${encodeURIComponent(version)}` : base;
         }
 
+        function playableButtons(): HTMLButtonElement[] {
+            if (currentList && !currentList.isConnected) currentList = null;
+            const scope: ParentNode = currentList ?? document;
+            return Array.from(scope.querySelectorAll<HTMLButtonElement>("[data-play-target]:not([disabled])"));
+        }
+
+        /** Walks the list the current track was started from. */
+        function neighborButton(direction: number): HTMLButtonElement | null {
+            const buttons = playableButtons();
+            const index = buttons.findIndex((button) => Number(button.dataset.id) === currentSongId);
+            if (index === -1) return null;
+            return buttons[index + direction] ?? null;
+        }
+
+        function updateSkipButtons() {
+            const index = playableButtons().findIndex((button) => Number(button.dataset.id) === currentSongId);
+            previousButton.disabled = index <= 0;
+            nextButton.disabled = index === -1 || index >= playableButtons().length - 1;
+        }
+
+        function markActiveRow() {
+            document.querySelectorAll("[data-play-row][data-playing]").forEach((row) => {
+                row.removeAttribute("data-playing");
+                row.removeAttribute("aria-current");
+            });
+            if (currentSongId === null) return;
+            const button = document.querySelector(`[data-play-target][data-id="${currentSongId}"]`);
+            const row = button?.closest("[data-play-row]");
+            if (row instanceof HTMLElement) {
+                row.dataset.playing = "true";
+                row.setAttribute("aria-current", "true");
+            }
+        }
+
+        function setPlaybackState(state: MediaSessionPlaybackState) {
+            if ("mediaSession" in navigator) {
+                navigator.mediaSession.playbackState = state;
+            }
+        }
+
+        function updateMediaSession(name: string, artworkUrl: string, eraName: string) {
+            if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: name || "Ye Tracker",
+                artist: eraName || "Ye Tracker",
+                album: eraName || "Ye Tracker",
+                artwork: artworkUrl ? [{ src: artworkUrl, sizes: "512x512" }] : [],
+            });
+        }
+
+        function seekBy(offset: number) {
+            const max = Number(progressBar.max) || (Number.isFinite(player.duration) ? player.duration : 0);
+            const next = player.currentTime + offset;
+            player.currentTime = Math.max(0, max > 0 ? Math.min(max, next) : next);
+        }
+
+        function loadStream(id: number, quality: string, resumeAt = 0, resume = true): number {
+            streamRevision += 1;
+            const revision = streamRevision;
+            activeQuality = quality;
+            previousSrc = "";
+            player.src = getStreamUrl(id, quality);
+            player.load();
+            if (resumeAt > 0) {
+                player.addEventListener(
+                    "loadedmetadata",
+                    () => {
+                        if (revision !== streamRevision) return;
+                        try {
+                            player.currentTime = resumeAt;
+                        } catch {
+                            // Some streamed formats only become seekable after buffering.
+                        }
+                    },
+                    { once: true },
+                );
+            }
+            if (resume) startPlayback();
+            return revision;
+        }
+
         function playSong({
             id,
             name,
             eraId,
+            eraName,
             trackLength,
             accentColor,
             coverVersion,
@@ -155,6 +293,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             id: number;
             name: string;
             eraId: number;
+            eraName: string;
             trackLength: number;
             accentColor: string;
             coverVersion: string;
@@ -164,11 +303,11 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
                 return;
             }
             currentSongId = Math.trunc(id);
-            previousSrc = "";
             streamRevision += 1;
-            const revision = streamRevision;
+            lastFailedSrc = "";
             qualitySelect.disabled = false;
             hideError();
+            hideStatus();
             mainElement.hidden = false;
             mainElement.style.setProperty("--dominantColor", sanitizeColor(accentColor));
             const coverUrl = getCoverUrl(eraId, coverVersion);
@@ -179,14 +318,24 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             }
             imgEl.alt = name ? `Cover art for ${name}` : "";
             title.textContent = name;
+            if (Number.isFinite(eraId) && eraName) {
+                eraLink.href = `/eras/${Math.trunc(eraId)}`;
+                eraLink.textContent = eraName;
+                eraLink.hidden = false;
+            } else {
+                eraLink.hidden = true;
+                eraLink.removeAttribute("href");
+                eraLink.textContent = "";
+            }
             catalogDuration = Number.isFinite(trackLength) && trackLength > 0 ? trackLength : 0;
             progressBar.value = "0";
             progressBar.setAttribute("aria-valuetext", describeTime(0));
             timestampEl.innerText = "0:00";
             updateDuration();
-            player.src = getStreamUrl(currentSongId);
-            player.load();
-            startPlayback();
+            const revision = loadStream(currentSongId, qualitySelect.value, 0, true);
+            updateMediaSession(name, coverUrl, eraName);
+            markActiveRow();
+            updateSkipButtons();
 
             if (!(trackLength > 0)) {
                 void fetch(`${apiBaseUrl}/songs/${currentSongId}/duration`)
@@ -206,20 +355,34 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         }
 
         player.addEventListener("error", () => {
-            // Initial load failure (not a quality switch — that has its own handler).
-            if (!player.currentSrc || player.currentSrc === previousSrc) return;
+            if (switching) return;
+            const failedSrc = player.currentSrc || player.src;
+            if (!failedSrc || failedSrc === lastFailedSrc) return;
+            lastFailedSrc = failedSrc;
             if (currentSongId === null) return;
-            qualitySelect.disabled = false;
+
+            // A failed transcode is the common case (unsupported container,
+            // transcoder at capacity). Serve the stored file instead of stopping.
+            if (activeQuality !== "") {
+                showStatus("That quality did not load — retrying with the original file.");
+                hideError();
+                loadStream(currentSongId, "", player.currentTime, true);
+                return;
+            }
             showError("Audio failed to load. The file may be missing or unavailable.");
+            setPlaybackState("none");
         });
 
         qualitySelect.addEventListener("change", () => {
+            writeStored(QUALITY_KEY, qualitySelect.value);
             if (currentSongId === null) return;
 
             const revision = ++streamRevision;
             const resumeAt = player.currentTime;
             const shouldResume = !player.paused;
             const fallbackSrc = player.currentSrc || previousSrc;
+            const fallbackQuality = activeQuality;
+            switching = true;
             qualitySelect.disabled = true;
             hideError();
 
@@ -227,6 +390,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
                 if (revision !== streamRevision) return;
 
                 player.removeEventListener("error", handleStreamError);
+                switching = false;
                 qualitySelect.disabled = false;
                 if (Number.isFinite(resumeAt) && resumeAt > 0) {
                     try {
@@ -241,7 +405,9 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             const handleStreamError = () => {
                 player.removeEventListener("loadedmetadata", restorePlayback);
                 if (revision !== streamRevision) return;
+                switching = false;
                 // Restore the previous working stream instead of leaving a broken src.
+                activeQuality = fallbackQuality;
                 if (fallbackSrc && player.src !== fallbackSrc) {
                     player.src = fallbackSrc;
                     player.load();
@@ -254,7 +420,8 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             player.addEventListener("loadedmetadata", restorePlayback, { once: true });
             player.addEventListener("error", handleStreamError, { once: true });
             previousSrc = fallbackSrc;
-            player.src = getStreamUrl(currentSongId);
+            activeQuality = qualitySelect.value;
+            player.src = getStreamUrl(currentSongId, activeQuality);
             player.load();
         });
 
@@ -268,6 +435,44 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             if (player.paused) startPlayback();
             else player.pause();
         };
+
+        previousButton.onclick = () => neighborButton(-1)?.click();
+        nextButton.onclick = () => neighborButton(1)?.click();
+
+        volumeInput.addEventListener("input", () => {
+            const value = Number(volumeInput.value);
+            if (!Number.isFinite(value)) return;
+            player.volume = Math.min(1, Math.max(0, value));
+            player.muted = player.volume === 0;
+            writeStored(VOLUME_KEY, String(player.volume));
+        });
+
+        retryButton?.addEventListener("click", () => {
+            if (currentSongId === null) return;
+            hideError();
+            lastFailedSrc = "";
+            loadStream(currentSongId, qualitySelect.value, 0, true);
+        });
+
+        if ("mediaSession" in navigator) {
+            const session = navigator.mediaSession;
+            const bind = (action: MediaSessionAction, handler: (details: MediaSessionActionDetails) => void) => {
+                try {
+                    session.setActionHandler(action, handler);
+                } catch {
+                    // Unsupported action for this browser.
+                }
+            };
+            bind("play", () => startPlayback());
+            bind("pause", () => player.pause());
+            bind("seekbackward", (details) => seekBy(-(details.seekOffset ?? 5)));
+            bind("seekforward", (details) => seekBy(details.seekOffset ?? 5));
+            bind("seekto", (details) => {
+                if (typeof details.seekTime === "number") player.currentTime = details.seekTime;
+            });
+            bind("nexttrack", () => neighborButton(1)?.click());
+            bind("previoustrack", () => neighborButton(-1)?.click());
+        }
 
         document.addEventListener("keydown", (event) => {
             if (mainElement.hidden) return;
@@ -300,34 +505,29 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
                 return;
             }
 
-            const progressDuration = Number(progressBar.max);
-            const duration =
-                progressDuration > 0
-                    ? progressDuration
-                    : Number.isFinite(player.duration)
-                      ? player.duration
-                      : Number.POSITIVE_INFINITY;
-            const offset = event.code === "ArrowRight" ? 5 : -5;
-            player.currentTime = Math.min(duration, Math.max(0, player.currentTime + offset));
+            seekBy(event.code === "ArrowRight" ? 5 : -5);
         });
 
         document.addEventListener("click", (event) => {
             if (!(event.target instanceof Element)) return;
-            const button = event.target.closest<HTMLButtonElement>(".play-song");
+            const button = event.target.closest<HTMLButtonElement>("[data-play-target]");
             if (!button) return;
 
             const { id, title: name, eraid, trackLength, coverVersion } = button.dataset;
+            const eraName = button.dataset.eraName ?? "";
             const songId = Number(id);
             if (!id || !Number.isFinite(songId)) return;
             if (!name) return;
 
-            const eraId = eraid != null && eraid !== "" ? Number(eraid) : NaN;
+            currentList = button.closest("[data-play-scope]");
+            const eraId = eraid != null && eraid !== "" ? Number(eraid) : Number.NaN;
             const length = Number(trackLength);
             const rawAccent = window.getComputedStyle(button).getPropertyValue("--dominantColor");
             playSong({
                 id: songId,
                 name,
                 eraId,
+                eraName,
                 trackLength: Number.isFinite(length) ? length : 0,
                 accentColor: rawAccent,
                 coverVersion: (coverVersion ?? "").trim(),
@@ -337,8 +537,15 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         player.addEventListener("play", () => {
             hideError();
             setPlayButton(true);
+            setPlaybackState("playing");
         });
-        player.addEventListener("pause", () => setPlayButton(false));
+        player.addEventListener("pause", () => {
+            setPlayButton(false);
+            setPlaybackState("paused");
+        });
+        player.addEventListener("waiting", () => showStatus("Buffering…"));
+        player.addEventListener("playing", () => hideStatus());
+        player.addEventListener("canplay", () => hideStatus());
         player.addEventListener("loadedmetadata", () => {
             updateDuration();
         });
@@ -347,10 +554,39 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             progressBar.setAttribute("aria-valuetext", describeTime(player.currentTime));
             timestampEl.innerText = convertDuration(player.currentTime);
         });
+        player.addEventListener("ended", () => {
+            // Keep playing down the list instead of stopping dead.
+            const next = neighborButton(1);
+            if (next) {
+                next.click();
+                return;
+            }
+            setPlayButton(false);
+            setPlaybackState("none");
+        });
         progressBar.addEventListener("input", () => {
             const next = Number(progressBar.value);
             if (Number.isFinite(next)) player.currentTime = next;
             progressBar.setAttribute("aria-valuetext", describeTime(next));
+        });
+
+        // Restored preferences. The default stays 128 kbps for first-time visitors;
+        // an explicit choice is remembered from then on.
+        const storedQuality = readStored(QUALITY_KEY);
+        if (storedQuality !== null && Array.from(qualitySelect.options).some((option) => option.value === storedQuality)) {
+            qualitySelect.value = storedQuality;
+        }
+        const storedVolume = Number(readStored(VOLUME_KEY));
+        if (Number.isFinite(storedVolume) && storedVolume >= 0 && storedVolume <= 1) {
+            volumeInput.value = String(storedVolume);
+            player.volume = storedVolume;
+        }
+
+        document.addEventListener("astro:page-load", () => {
+            // Client-side navigation swaps the list under the player.
+            currentList = null;
+            markActiveRow();
+            updateSkipButtons();
         });
     }
 </script>
@@ -367,7 +603,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         box-sizing: border-box;
         display: grid;
         grid-template-columns: minmax(0, 1fr);
-        gap: 0.75rem;
+        gap: 0.6rem;
         width: min(52rem, calc(100vw - 2rem));
         padding: 0.75rem 1rem;
         transform: translateX(-50%);
@@ -377,13 +613,39 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         color: var(--player-text);
         background: color-mix(in oklab, var(--dominantColor) 40%, var(--bg-color) 60%);
     }
+    .player-status,
     .player-error {
         margin: 0;
-        color: #ffb4a9;
         font-size: 0.8rem;
     }
+    .player-status {
+        color: color-mix(in oklab, var(--player-text) 70%, transparent);
+    }
+    .player-error {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        color: #ffb4a9;
+    }
+    .player-status[hidden],
     .player-error[hidden] {
         display: none;
+    }
+    .player-retry {
+        padding: 0.25rem 0.6rem;
+        border: 1px solid #ffb4a9;
+        border-radius: 0.5rem;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
+    .player-retry:hover,
+    .player-retry:focus-visible {
+        background: rgb(255 180 169 / 18%);
+        outline: none;
     }
     .data {
         display: flex;
@@ -432,13 +694,32 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
+    .era-link {
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
+        color: color-mix(in oklab, var(--player-text) 70%, transparent);
+        font-size: 0.75rem;
+        text-decoration: none;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .era-link[hidden] {
+        display: none;
+    }
+    .era-link:hover,
+    .era-link:focus-visible {
+        color: var(--player-text);
+        text-decoration: underline;
+    }
     .controls {
         display: flex;
         flex: 0 0 auto;
         align-items: center;
-        gap: 0.65rem;
+        gap: 0.5rem;
     }
-    .quality-control {
+    .quality-control,
+    .volume-control {
         display: grid;
         gap: 0.2rem;
         color: color-mix(in oklab, var(--player-text) 68%, transparent);
@@ -447,6 +728,12 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         letter-spacing: 0.08em;
         line-height: 1;
         text-transform: uppercase;
+    }
+    .volume-control input {
+        width: 5rem;
+        height: 0.3rem;
+        accent-color: var(--player-text);
+        cursor: pointer;
     }
     .quality-control select {
         min-width: 5.75rem;
@@ -485,8 +772,23 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         font-size: 0.9rem;
         transition: transform 150ms ease, background-color 150ms ease;
     }
+    .controls button#previous,
+    .controls button#next {
+        width: 2.1rem;
+        height: 2.1rem;
+        color: var(--player-text);
+        background: color-mix(in srgb, var(--player-text) 14%, transparent);
+    }
+    .controls button#previous:disabled,
+    .controls button#next:disabled {
+        cursor: default;
+        opacity: 0.35;
+    }
     .controls button:hover {
         transform: scale(1.06);
+    }
+    .controls button:disabled:hover {
+        transform: none;
     }
     .controls button:focus-visible {
         outline: 3px solid color-mix(in srgb, var(--player-text) 80%, transparent);
@@ -496,6 +798,15 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         width: 1.5rem;
         height: 1.5rem;
         fill: currentColor;
+    }
+    .controls button .skip-icon {
+        width: 1.15rem;
+        height: 1.15rem;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
     }
     .controls button .play-icon {
         transform: translateX(0.1rem);
@@ -521,6 +832,11 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         accent-color: var(--player-text);
         cursor: pointer;
     }
+    @media (max-width: 46rem) {
+        .volume-control {
+            display: none;
+        }
+    }
     @media (max-width: 32rem) {
         .player {
             bottom: 0;
@@ -532,6 +848,12 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         }
         .progress {
             font-size: 0.7rem;
+        }
+        .data {
+            gap: 0.5rem;
+        }
+        .controls {
+            gap: 0.35rem;
         }
     }
 </style>
