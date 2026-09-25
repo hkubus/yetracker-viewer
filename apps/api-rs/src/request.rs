@@ -51,7 +51,14 @@ pub fn pagination_value(
 /// Sort keys accepted by the song list endpoints. `id` is the import order
 /// and stays the default so callers that never pass `sort` keep the historical
 /// ordering.
-pub const SORT_KEYS: [&str; 5] = ["id", "leak-newest", "leak-oldest", "file-newest", "name"];
+pub const SORT_KEYS: [&str; 6] = [
+    "id",
+    "category",
+    "leak-newest",
+    "leak-oldest",
+    "file-newest",
+    "name",
+];
 
 /// `sortValue`: missing/empty → `id`, unknown → 400 `Invalid sort`.
 pub fn sort_value(value: Option<&str>) -> Result<&'static str, ApiError> {
@@ -133,6 +140,7 @@ mod tests {
         assert_eq!(sort_value(Some("")).unwrap(), "id");
         assert_eq!(sort_value(Some("  ")).unwrap(), "id");
         assert_eq!(sort_value(Some("leak-newest")).unwrap(), "leak-newest");
+        assert_eq!(sort_value(Some("category")).unwrap(), "category");
         assert_eq!(sort_value(Some(" name ")).unwrap(), "name");
         assert!(sort_value(Some("bogus")).is_err());
         assert!(sort_value(Some("ID")).is_err());

@@ -292,6 +292,40 @@ describe('GET /eras/:id/songs', () => {
     assert.match(await text(bad), /Invalid sort/);
   });
 
+  it('sort=category groups marked songs by category, best-of first', async () => {
+    const rank = (name = '') => {
+      if (name.includes('⭐')) return 0;
+      if (name.includes('✨')) return 1;
+      if (name.includes('🏆')) return 2;
+      if (name.includes('🏅')) return 3;
+      if (name.includes('🗑')) return 4;
+      if (name.includes('🤖')) return 5;
+      return 6;
+    };
+
+    // Discover an era that actually carries category markers. `sort` alone is
+    // not a filter, so this is plain list mode and answers with a bare array.
+    const sample = await json(await req('/songs?sort=category&limit=1'));
+    const first = Array.isArray(sample) ? sample[0] : sample.songs?.[0];
+    assert.ok(first, 'expected at least one song');
+    const eraId = first.eraId;
+    assert.ok(eraId, 'expected the first categorised song to belong to an era');
+    assert.equal(rank(first.name), 0, 'first song overall must be best-of');
+
+    const songs = await json(await req(`/eras/${eraId}/songs?limit=100&sort=category`));
+    const ranks = songs.map((s) => rank(s.name));
+    for (let i = 1; i < ranks.length; i += 1) {
+      assert.ok(ranks[i] >= ranks[i - 1], `category order broke at ${i}: ${ranks[i - 1]} → ${ranks[i]}`);
+    }
+    assert.equal(ranks[0], 0, 'categorised songs come before unmarked ones');
+
+    // Sorting and filtering must agree about who belongs to a category.
+    const filtered = await json(await req(`/eras/${eraId}/songs?limit=100&sort=category&category=best-of`));
+    for (const song of filtered) {
+      assert.equal(rank(song.name), 0, `${song.name} is not a best-of song`);
+    }
+  });
+
   it('400 on invalid limit/offset and overlong q', async () => {
     let res = await req(`/eras/${F.eraId}/songs?limit=abc`);
     assert.equal(res.status, 400);

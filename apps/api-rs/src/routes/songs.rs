@@ -70,24 +70,42 @@ fn category_emoji(id: &str) -> Option<&'static str> {
     SONG_CATEGORIES.iter().find(|(key, _)| *key == id).map(|(_, emoji)| *emoji)
 }
 
+/// Ranks a song by its category marker in `SONG_CATEGORIES` order (best-of
+/// first), with unmarked songs last.
+///
+/// Matches with `instr` exactly like the `category` filter does, so sorting
+/// and filtering never disagree about which category a song is in. Built from
+/// `SONG_CATEGORIES` so a new category only has to be declared once.
+fn category_rank_sql() -> String {
+    let mut sql = String::from("CASE");
+    for (index, (_, emoji)) in SONG_CATEGORIES.iter().enumerate() {
+        sql.push_str(&format!(
+            " WHEN instr(coalesce(songs.name, ''), '{emoji}') > 0 THEN {index}"
+        ));
+    }
+    sql.push_str(&format!(" ELSE {} END", SONG_CATEGORIES.len()));
+    sql
+}
+
 /// `ORDER BY` fragment for a validated sort key (see `request::sort_value`).
 ///
 /// Every fragment ends with `songs.id ASC` so equal keys keep a stable,
 /// import-ordered tie-break, and the date sorts push rows with a missing or
 /// zero date to the end instead of pretending they leaked in 1970.
-fn sort_order_by(sort: &str) -> &'static str {
+fn sort_order_by(sort: &str) -> String {
     match sort {
         "leak-newest" => {
-            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date DESC, songs.id ASC"
+            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date DESC, songs.id ASC".to_string()
         }
         "leak-oldest" => {
-            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date ASC, songs.id ASC"
+            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date ASC, songs.id ASC".to_string()
         }
         "file-newest" => {
-            "songs.file_date IS NULL OR songs.file_date = 0, songs.file_date DESC, songs.id ASC"
+            "songs.file_date IS NULL OR songs.file_date = 0, songs.file_date DESC, songs.id ASC".to_string()
         }
-        "name" => "songs.name COLLATE NOCASE ASC, songs.id ASC",
-        _ => "songs.id ASC",
+        "name" => "songs.name COLLATE NOCASE ASC, songs.id ASC".to_string(),
+        "category" => format!("{}, songs.id ASC", category_rank_sql()),
+        _ => "songs.id ASC".to_string(),
     }
 }
 
@@ -377,7 +395,7 @@ async fn search_songs(
     // Shapes the candidate window; the relevance ranking below still decides the
     // final order whenever a query is present.
     sql.push_str(" ORDER BY ");
-    sql.push_str(order_by);
+    sql.push_str(&order_by);
     sql.push_str(" LIMIT 1000");
 
     let rows = db::call(&state.pool, move |conn| {
@@ -551,7 +569,7 @@ pub async fn paginated_songs(
         values.push(Value::Text(emoji.to_string()));
     }
     sql.push_str(" ORDER BY ");
-    sql.push_str(order_by);
+    sql.push_str(&order_by);
     sql.push_str(" LIMIT ? OFFSET ?");
     values.push(Value::Integer(requested_limit));
     values.push(Value::Integer(requested_offset));

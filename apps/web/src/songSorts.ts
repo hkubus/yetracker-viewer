@@ -9,6 +9,7 @@ export type SongSort = {
 
 export const SONG_SORTS: SongSort[] = [
   { id: 'id', label: 'Catalog order' },
+  { id: 'category', label: 'Category (best first)' },
   { id: 'leak-newest', label: 'Newest leak' },
   { id: 'leak-oldest', label: 'Oldest leak' },
   { id: 'file-newest', label: 'Newest file' },

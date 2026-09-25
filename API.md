@@ -126,9 +126,9 @@ Paginated, optionally searched songs for one era (primary catalog only).
   | `offset` | `0` | `10000` | min 0, `400 Invalid offset` |
   | `q` | — | 100 chars | optional; trimmed/collapsed; case-insensitive `LIKE %q%` (escaped `\ % _`) against `songs.name`, `songs.notes`, `songs.quality`, `songs.available_length` |
   | `category` | — | — | optional emoji-category filter (`best-of`, `special`, `grails`, `wanted`, `worst-of`, `ai`); keeps songs whose `songs.name` contains the category's emoji (`instr`, base codepoint so variation selectors also match); unknown id → `400 Invalid category filter`; empty = no filter |
-  | `sort` | `id` | — | `id` (import order), `leak-newest`, `leak-oldest`, `file-newest`, `name`; anything else → `400 Invalid sort` |
+  | `sort` | `id` | — | `id` (import order), `category`, `leak-newest`, `leak-oldest`, `file-newest`, `name`; anything else → `400 Invalid sort` |
 - Response headers: `X-Total-Count: <total matching, before limit/offset>` (via `count(*) over()`), `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`.
-- Ordering: `sort` (default `id`), always tie-broken by `songs.id ASC`; the date sorts push rows with a missing/zero date to the end. Output `200`: array ordered that way:
+- Ordering: `sort` (default `id`), always tie-broken by `songs.id ASC`; the date sorts push rows with a missing/zero date to the end. `sort=category` groups songs by their category marker in declaration order — `best-of`, `special`, `grails`, `wanted`, `worst-of`, `ai` — with unmarked songs last, matched with the same `instr` test as the `category` filter. Output `200`: array ordered that way:
   ```json
   [
     {
