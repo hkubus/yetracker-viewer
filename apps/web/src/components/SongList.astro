@@ -556,6 +556,10 @@ function searchText(song: SongRow): string {
             flex-direction: column;
             gap: 0.35rem;
         }
+        /* In a column flex container the input's 12rem basis becomes a *height*. */
+        .song-search input {
+            flex: 0 0 auto;
+        }
         .song-search__select-group {
             width: 100%;
         }
@@ -632,6 +636,7 @@ function searchText(song: SongRow): string {
     .availableLength,
     .fileDate {
         text-align: center;
+        font-size: 0.9rem;
     }
     th {
         background-color: color-mix(
@@ -652,9 +657,18 @@ function searchText(song: SongRow): string {
         padding: 0.75vh;
     }
     .notes-cell {
-        max-width: 34rem;
+        line-height: 1.45;
     }
     .notes-text {
+        overflow-wrap: anywhere;
+    }
+    /* The title is the anchor of the row, not a headline: left-aligned and the
+       same weight class as the rest of the table. */
+    th.title {
+        text-align: left;
+        font-size: 0.95rem;
+        font-weight: 600;
+        line-height: 1.35;
         overflow-wrap: anywhere;
     }
     /* Only applied by script once it knows the text overflows. */
@@ -662,8 +676,8 @@ function searchText(song: SongRow): string {
         display: -webkit-box;
         overflow: hidden;
         -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
-        line-clamp: 2;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
     }
     .notes-toggle {
         margin-top: 0.15rem;
@@ -693,6 +707,36 @@ function searchText(song: SongRow): string {
         margin: 0;
         border-collapse: collapse;
         border-spacing: 0;
+        /* Fixed columns keep the widths stable: with the auto layout the clamped
+           notes contribute almost no intrinsic width and the title column takes
+           everything left over (it used to render 680px wide against 240px). */
+        table-layout: fixed;
+    }
+    thead th:nth-child(1) {
+        width: 7.5%;
+    }
+    thead th:nth-child(2) {
+        width: 26%;
+    }
+    thead th:nth-child(3) {
+        width: 31%;
+    }
+    /* These two columns read left-aligned in the body, so their headers do too. */
+    thead th:nth-child(2),
+    thead th:nth-child(3) {
+        text-align: left;
+    }
+    thead th:nth-child(4) {
+        width: 11%;
+    }
+    thead th:nth-child(5) {
+        width: 11%;
+    }
+    thead th:nth-child(6) {
+        width: 6.75%;
+    }
+    thead th:nth-child(7) {
+        width: 6.75%;
     }
     thead tr:first-child th {
         border-top: none;
@@ -747,8 +791,7 @@ function searchText(song: SongRow): string {
         }
         tbody th.title {
             order: -1;
-            font-size: 1.02rem;
-            overflow-wrap: anywhere;
+            font-size: 1rem;
         }
         /* Cells with nothing in them are dropped from the card layout. */
         tbody td.is-blank {

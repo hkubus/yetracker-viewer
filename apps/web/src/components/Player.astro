@@ -17,7 +17,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         <div class="info">
             <img alt="" width="48" height="48" data-player-cover />
             <div class="metadata">
-                <p class="eyebrow">Now playing</p>
+                <p class="eyebrow" data-player-state aria-live="polite">Now playing</p>
                 <p class="title"></p>
                 <a class="era-link" data-player-era hidden></a>
             </div>
@@ -61,7 +61,6 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             </label>
         </div>
     </div>
-    <p class="player-status" data-player-status hidden role="status"></p>
     <p class="player-error" data-player-error hidden role="alert">
         <span data-player-error-text></span>
         <button type="button" class="player-retry" data-player-retry>Retry</button>
@@ -101,8 +100,13 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         const errorEl = mainElement.querySelector("[data-player-error]") as HTMLParagraphElement | null;
         const errorTextEl = mainElement.querySelector("[data-player-error-text]") as HTMLElement | null;
         const retryButton = mainElement.querySelector("[data-player-retry]") as HTMLButtonElement | null;
-        const statusEl = mainElement.querySelector("[data-player-status]") as HTMLParagraphElement | null;
+        const stateEl = mainElement.querySelector("[data-player-state]") as HTMLElement | null;
         const apiBaseUrl = mainElement.dataset.apiBaseUrl?.replace(/\/+$/, "") ?? "";
+
+        /** Shown while nothing else is happening on the state line. */
+        const STATE_IDLE = "Now playing";
+        /** A stream gap must last this long before the label changes at all. */
+        const BUFFER_HINT_DELAY_MS = 500;
 
         let catalogDuration = 0;
         let currentSongId: number | null = null;
@@ -113,6 +117,8 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         /** Set while a quality switch owns the error event, so it can restore. */
         let switching = false;
         let lastFailedSrc = "";
+        let bufferTimer = 0;
+        let buffering = false;
         /** The list the current track came from: next/previous walk it in DOM order. */
         let currentList: Element | null = null;
 
@@ -149,16 +155,25 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             errorEl.hidden = true;
         }
 
-        function showStatus(message: string) {
-            if (!statusEl) return;
-            statusEl.textContent = message;
-            statusEl.hidden = false;
+        // The state line replaces the "Now playing" label in place, so the player
+        // never changes height while buffering (a separate row used to shift the
+        // whole bar by ~25px on every stream gap).
+        function setState(message: string) {
+            if (stateEl) stateEl.textContent = message;
         }
 
-        function hideStatus() {
-            if (!statusEl) return;
-            statusEl.textContent = "";
-            statusEl.hidden = true;
+        function showBuffering() {
+            if (buffering) return;
+            buffering = true;
+            bufferTimer = window.setTimeout(() => {
+                if (buffering) setState("Buffering…");
+            }, BUFFER_HINT_DELAY_MS);
+        }
+
+        function clearBuffering() {
+            buffering = false;
+            window.clearTimeout(bufferTimer);
+            setState(STATE_IDLE);
         }
 
         function getStreamUrl(id: number, quality: string) {
@@ -307,7 +322,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             lastFailedSrc = "";
             qualitySelect.disabled = false;
             hideError();
-            hideStatus();
+            clearBuffering();
             mainElement.hidden = false;
             mainElement.style.setProperty("--dominantColor", sanitizeColor(accentColor));
             const coverUrl = getCoverUrl(eraId, coverVersion);
@@ -364,7 +379,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             // A failed transcode is the common case (unsupported container,
             // transcoder at capacity). Serve the stored file instead of stopping.
             if (activeQuality !== "") {
-                showStatus("That quality did not load — retrying with the original file.");
+                setState("Retrying original…");
                 hideError();
                 loadStream(currentSongId, "", player.currentTime, true);
                 return;
@@ -414,6 +429,7 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
                     if (shouldResume) startPlayback();
                 }
                 qualitySelect.disabled = false;
+                clearBuffering();
                 showError("Quality switch failed. Restored the previous stream.");
             };
 
@@ -543,9 +559,9 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
             setPlayButton(false);
             setPlaybackState("paused");
         });
-        player.addEventListener("waiting", () => showStatus("Buffering…"));
-        player.addEventListener("playing", () => hideStatus());
-        player.addEventListener("canplay", () => hideStatus());
+        player.addEventListener("waiting", showBuffering);
+        player.addEventListener("playing", clearBuffering);
+        player.addEventListener("canplay", clearBuffering);
         player.addEventListener("loadedmetadata", () => {
             updateDuration();
         });
@@ -613,13 +629,9 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         color: var(--player-text);
         background: color-mix(in oklab, var(--dominantColor) 40%, var(--bg-color) 60%);
     }
-    .player-status,
     .player-error {
         margin: 0;
         font-size: 0.8rem;
-    }
-    .player-status {
-        color: color-mix(in oklab, var(--player-text) 70%, transparent);
     }
     .player-error {
         display: flex;
@@ -627,7 +639,6 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
         gap: 0.6rem;
         color: #ffb4a9;
     }
-    .player-status[hidden],
     .player-error[hidden] {
         display: none;
     }
@@ -681,11 +692,15 @@ const apiBaseUrl = Astro.props.apiBaseUrl as string;
     }
     .eyebrow {
         margin-bottom: 0.15rem;
+        overflow: hidden;
         color: color-mix(in oklab, var(--player-text) 65%, transparent);
         font-size: 0.7rem;
         font-weight: 700;
         letter-spacing: 0.08em;
+        text-overflow: ellipsis;
         text-transform: uppercase;
+        /* Never wrap: a wrapped state line would resize the player again. */
+        white-space: nowrap;
     }
     .title {
         overflow: hidden;
