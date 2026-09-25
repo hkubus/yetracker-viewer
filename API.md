@@ -126,8 +126,9 @@ Paginated, optionally searched songs for one era (primary catalog only).
   | `offset` | `0` | `10000` | min 0, `400 Invalid offset` |
   | `q` | — | 100 chars | optional; trimmed/collapsed; case-insensitive `LIKE %q%` (escaped `\ % _`) against `songs.name`, `songs.notes`, `songs.quality`, `songs.available_length` |
   | `category` | — | — | optional emoji-category filter (`best-of`, `special`, `grails`, `wanted`, `worst-of`, `ai`); keeps songs whose `songs.name` contains the category's emoji (`instr`, base codepoint so variation selectors also match); unknown id → `400 Invalid category filter`; empty = no filter |
+  | `sort` | `id` | — | `id` (import order), `leak-newest`, `leak-oldest`, `file-newest`, `name`; anything else → `400 Invalid sort` |
 - Response headers: `X-Total-Count: <total matching, before limit/offset>` (via `count(*) over()`), `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`.
-- Output `200`: array ordered by `songs.id ASC`:
+- Ordering: `sort` (default `id`), always tie-broken by `songs.id ASC`; the date sorts push rows with a missing/zero date to the end. Output `200`: array ordered that way:
   ```json
   [
     {
@@ -181,7 +182,8 @@ Two modes sharing one path.
   | `playable` | optional `true`/`false` string else `400 Invalid playable filter`; applied in JS after DB fetch |
   | `limit` | default `50`, max `50`, min 1 |
   | `offset` | accepted by parser but **ignored** in this mode (ranking slices from 0) |
-- Behavior: DB fetches up to 1000 candidates (`catalog_id = "unreleased"` + filters), then `rankSongSearch(matches, q, limit)` in JS (title > parenthetical > era > notes > quality > availability; ⭐✨🏅🗑️🤖 markers, playable-first, word-boundary/length tie-breaks). Without `q`, first `limit` matches in DB order.
+  | `sort` | optional, same keys as above (`400 Invalid sort`); shapes the candidate window and decides the order when `q` is absent |
+- Behavior: DB fetches up to 1000 candidates (`catalog_id = "unreleased"` + filters, ordered by `sort`), then `rankSongSearch(matches, q, limit)` in JS (title > parenthetical > era > notes > quality > availability; ⭐✨🏅🗑️🤖 markers, playable-first, word-boundary/length tie-breaks). Without `q`, first `limit` matches in `sort` order; with `q`, relevance ranking still wins.
 - Output `200`: envelope (no `X-Total-Count` header here), header `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`:
   ```json
   {
@@ -196,19 +198,21 @@ Two modes sharing one path.
         "eraName": "Era name",
         "dominantColor": "666666",
         "playable": true,
-        "eraPosition": 3
+        "eraPosition": 3,
+        "leakDate": 1700000000
       }
     ],
     "total": 27
   }
   ```
-  - `eraPosition: number` = `row_number() over (partition by songs.era order by songs.id)` (fallback `1`).
+  - `eraPosition: number` = the song's 1-based index inside its era, computed over **all** songs of that era (not just the filtered ones), so `page = ceil(eraPosition / era-page-size)` deep links stay correct for filtered searches (fallback `1`).
+  - `leakDate: number|null` as in plain list mode.
   - `total: number` = pre-`limit` match count (post-`playable` filter, pre-rank slice).
 
 ### B. Plain list mode (no search/filter params)
 
-- Query params: `limit` default `100` max `500`; `offset` default `0` max `10000`.
-- Output `200`: bare array (no envelope, no `X-Total-Count`), ordered implicitly by rowid:
+- Query params: `limit` default `100` max `500`; `offset` default `0` max `10000`; `sort` (same keys, default `id` which matches the historical rowid order, `400 Invalid sort`).
+- Output `200`: bare array (no envelope, no `X-Total-Count`), ordered by `sort`:
   ```json
   [
     {

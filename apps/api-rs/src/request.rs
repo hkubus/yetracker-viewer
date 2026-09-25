@@ -48,6 +48,27 @@ pub fn pagination_value(
     Ok(parsed.min(maximum))
 }
 
+/// Sort keys accepted by the song list endpoints. `id` is the import order
+/// and stays the default so callers that never pass `sort` keep the historical
+/// ordering.
+pub const SORT_KEYS: [&str; 5] = ["id", "leak-newest", "leak-oldest", "file-newest", "name"];
+
+/// `sortValue`: missing/empty → `id`, unknown → 400 `Invalid sort`.
+pub fn sort_value(value: Option<&str>) -> Result<&'static str, ApiError> {
+    let value = match value {
+        None => return Ok("id"),
+        Some(value) => value.trim(),
+    };
+    if value.is_empty() {
+        return Ok("id");
+    }
+    SORT_KEYS
+        .iter()
+        .find(|key| **key == value)
+        .copied()
+        .ok_or_else(|| ApiError::bad_request("Invalid sort"))
+}
+
 pub use crate::text::{collapse_whitespace, normalize as normalize_query};
 
 /// Escapes `\`, `%` and `_` for use inside a `LIKE ... ESCAPE '\'` pattern.
@@ -104,6 +125,18 @@ mod tests {
         assert_eq!(pagination_value(Some("0"), 0, 10_000, "offset").unwrap(), 0);
         assert!(pagination_value(Some("0"), 100, 500, "limit").is_err());
         assert!(pagination_value(Some("abc"), 100, 500, "limit").is_err());
+    }
+
+    #[test]
+    fn sort_defaults_and_rejects_unknown_keys() {
+        assert_eq!(sort_value(None).unwrap(), "id");
+        assert_eq!(sort_value(Some("")).unwrap(), "id");
+        assert_eq!(sort_value(Some("  ")).unwrap(), "id");
+        assert_eq!(sort_value(Some("leak-newest")).unwrap(), "leak-newest");
+        assert_eq!(sort_value(Some(" name ")).unwrap(), "name");
+        assert!(sort_value(Some("bogus")).is_err());
+        assert!(sort_value(Some("ID")).is_err());
+        assert!(SORT_KEYS.contains(&"id"));
     }
 
     #[test]

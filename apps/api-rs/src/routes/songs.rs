@@ -26,7 +26,9 @@ use crate::media::{
 };
 use crate::playable::{mtime_ms_of, stored_song_path};
 use crate::rank::{Searchable, rank_song_search};
-use crate::request::{escape_like_pattern, normalize_query, pagination_value, positive_integer};
+use crate::request::{
+    escape_like_pattern, normalize_query, pagination_value, positive_integer, sort_value,
+};
 use crate::serve::{file_body, parse_range};
 use crate::state::{AppState, SharedState};
 use crate::text;
@@ -66,6 +68,27 @@ const SONG_CATEGORIES: [(&str, &str); 6] = [
 
 fn category_emoji(id: &str) -> Option<&'static str> {
     SONG_CATEGORIES.iter().find(|(key, _)| *key == id).map(|(_, emoji)| *emoji)
+}
+
+/// `ORDER BY` fragment for a validated sort key (see `request::sort_value`).
+///
+/// Every fragment ends with `songs.id ASC` so equal keys keep a stable,
+/// import-ordered tie-break, and the date sorts push rows with a missing or
+/// zero date to the end instead of pretending they leaked in 1970.
+fn sort_order_by(sort: &str) -> &'static str {
+    match sort {
+        "leak-newest" => {
+            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date DESC, songs.id ASC"
+        }
+        "leak-oldest" => {
+            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date ASC, songs.id ASC"
+        }
+        "file-newest" => {
+            "songs.file_date IS NULL OR songs.file_date = 0, songs.file_date DESC, songs.id ASC"
+        }
+        "name" => "songs.name COLLATE NOCASE ASC, songs.id ASC",
+        _ => "songs.id ASC",
+    }
 }
 
 fn enum_filter(
@@ -127,6 +150,7 @@ pub struct SearchSong {
     pub era_name: Option<String>,
     pub dominant_color: Option<String>,
     pub era_position: Option<i64>,
+    pub leak_date: Option<i64>,
     pub filename: Option<String>,
     pub playable: bool,
 }
@@ -167,6 +191,7 @@ impl SearchSong {
             "eraName": self.era_name,
             "dominantColor": self.dominant_color,
             "eraPosition": self.era_position.unwrap_or(1),
+            "leakDate": self.leak_date,
             "playable": self.playable,
         })
     }
@@ -259,12 +284,13 @@ pub async fn list_songs(
         10_000,
         "offset",
     )?;
+    let order_by = sort_order_by(sort_value(params.get("sort").map(String::as_str))?);
 
     let songs = db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare(
+        let mut statement = conn.prepare(&format!(
             "SELECT id, era, catalog_id, name, notes, file_date, leak_date, available_length, track_length, quality, url \
-             FROM songs WHERE catalog_id = 'unreleased' LIMIT ?1 OFFSET ?2",
-        )?;
+             FROM songs WHERE catalog_id = 'unreleased' ORDER BY {order_by} LIMIT ?1 OFFSET ?2",
+        ))?;
         let rows = statement.query_map([requested_limit, requested_offset], |row| {
             Ok(PlainSong {
                 id: row.get(0)?,
@@ -304,12 +330,19 @@ async fn search_songs(
 ) -> Result<Response, ApiError> {
     let requested_limit =
         pagination_value(params.get("limit").map(String::as_str), 50, 50, "limit")?;
+    let order_by = sort_order_by(sort_value(params.get("sort").map(String::as_str))?);
 
+    // `eraPosition` must be the song's index inside its *unfiltered* era: the web
+    // client turns it into a page number for `/eras/{id}?page=N#song-{id}`. A
+    // window function in the outer query numbers only the filtered rows, which
+    // sent deep links to the wrong page whenever a query or filter was set.
     let mut sql = String::from(
-        "SELECT songs.id, songs.era, songs.name, songs.notes, songs.quality, songs.available_length, \
-         eras.name, eras.dominant_color, files.filename, \
-         row_number() OVER (PARTITION BY songs.era ORDER BY songs.id) AS eraPosition \
+        "WITH era_positions AS (SELECT id, row_number() OVER (PARTITION BY era ORDER BY id) AS position \
+         FROM songs WHERE catalog_id = 'unreleased') \
+         SELECT songs.id, songs.era, songs.name, songs.notes, songs.quality, songs.available_length, \
+         eras.name, eras.dominant_color, files.filename, era_positions.position, songs.leak_date \
          FROM songs LEFT JOIN eras ON songs.era = eras.id LEFT JOIN files ON songs.url = files.url \
+         LEFT JOIN era_positions ON era_positions.id = songs.id \
          WHERE songs.catalog_id = 'unreleased'",
     );
     let mut values: Vec<Value> = Vec::new();
@@ -341,6 +374,10 @@ async fn search_songs(
         sql.push_str(" AND songs.available_length = ?");
         values.push(Value::Text(availability.clone()));
     }
+    // Shapes the candidate window; the relevance ranking below still decides the
+    // final order whenever a query is present.
+    sql.push_str(" ORDER BY ");
+    sql.push_str(order_by);
     sql.push_str(" LIMIT 1000");
 
     let rows = db::call(&state.pool, move |conn| {
@@ -357,6 +394,7 @@ async fn search_songs(
                 era_name: row.get(6)?,
                 dominant_color: row.get(7)?,
                 era_position: row.get(9)?,
+                leak_date: row.get(10)?,
                 playable: false,
                 filename,
             })
@@ -474,6 +512,7 @@ pub async fn paginated_songs(
         10_000,
         "offset",
     )?;
+    let order_by = sort_order_by(sort_value(params.get("sort").map(String::as_str))?);
     let category_filter = params.get("category").map(|value| value.trim()).filter(|value| !value.is_empty());
     let category_emoji_value = match category_filter {
         Some(id) => match category_emoji(id) {
@@ -511,7 +550,9 @@ pub async fn paginated_songs(
         sql.push_str(" AND instr(coalesce(songs.name, ''), ?) > 0");
         values.push(Value::Text(emoji.to_string()));
     }
-    sql.push_str(" ORDER BY songs.id ASC LIMIT ? OFFSET ?");
+    sql.push_str(" ORDER BY ");
+    sql.push_str(order_by);
+    sql.push_str(" LIMIT ? OFFSET ?");
     values.push(Value::Integer(requested_limit));
     values.push(Value::Integer(requested_offset));
 

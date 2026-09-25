@@ -263,6 +263,35 @@ describe('GET /eras/:id/songs', () => {
     assert.ok(songs.length > 0, `expected q=${probe} to match`);
   });
 
+  it('sort=leak-newest orders by leak date, newest first, empties last', async () => {
+    const res = await req(`/eras/${F.eraId}/songs?limit=100&sort=leak-newest`);
+    assert.equal(res.status, 200);
+    const songs = await json(res);
+    const dates = songs.map((s) => s.leakDate ?? 0).filter((d) => d > 0);
+    for (let i = 1; i < dates.length; i += 1) {
+      assert.ok(dates[i] <= dates[i - 1], `leak dates not descending at ${i}: ${dates[i - 1]} → ${dates[i]}`);
+    }
+    const firstEmpty = songs.findIndex((s) => !s.leakDate);
+    if (firstEmpty !== -1) {
+      assert.ok(
+        songs.slice(firstEmpty).every((s) => !s.leakDate),
+        'rows without a leak date must sort to the end',
+      );
+    }
+  });
+
+  it('sort=name orders by title and unknown sorts are 400', async () => {
+    const res = await req(`/eras/${F.eraId}/songs?limit=50&sort=name`);
+    assert.equal(res.status, 200);
+    const names = (await json(res)).map((s) => (s.name ?? '').toLowerCase());
+    const sorted = [...names].sort();
+    assert.deepEqual(names, sorted);
+
+    const bad = await req(`/eras/${F.eraId}/songs?sort=bogus`);
+    assert.equal(bad.status, 400);
+    assert.match(await text(bad), /Invalid sort/);
+  });
+
   it('400 on invalid limit/offset and overlong q', async () => {
     let res = await req(`/eras/${F.eraId}/songs?limit=abc`);
     assert.equal(res.status, 400);
@@ -355,6 +384,19 @@ describe('GET /songs plain list', () => {
     }
   });
 
+  it('sort=leak-newest reorders the bare array', async () => {
+    const res = await req('/songs?limit=20&sort=leak-newest');
+    assert.equal(res.status, 200);
+    const songs = await json(res);
+    const dates = songs.map((s) => s.leakDate ?? 0).filter((d) => d > 0);
+    for (let i = 1; i < dates.length; i += 1) {
+      assert.ok(dates[i] <= dates[i - 1], 'expected newest leaks first in plain list mode');
+    }
+    const bad = await req('/songs?limit=1&sort=bogus');
+    assert.equal(bad.status, 400);
+    assert.match(await text(bad), /Invalid sort/);
+  });
+
   it('offset works and invalid pagination is 400', async () => {
     const a = await json(await req('/songs?limit=1&offset=0'));
     const b = await json(await req('/songs?limit=1&offset=1'));
@@ -425,6 +467,44 @@ describe('GET /songs search', () => {
     assert.equal(res.status, 200);
     body = await json(res);
     for (const s of body.songs) assert.equal(s.playable, false);
+  });
+
+  it('an unknown sort is 400', async () => {
+    const res = await req('/songs?playable=true&sort=bogus');
+    assert.equal(res.status, 400);
+    assert.match(await text(res), /Invalid sort/);
+  });
+
+  it('sort=leak-newest drives the filter-only window and returns leakDate', async () => {
+    const res = await req('/songs?playable=true&sort=leak-newest&limit=8');
+    assert.equal(res.status, 200);
+    const body = await json(res);
+    for (const song of body.songs) {
+      assert.ok('leakDate' in song, 'search payload must expose leakDate');
+      assert.equal(song.playable, true);
+    }
+    const dates = body.songs.map((s) => s.leakDate ?? 0).filter((d) => d > 0);
+    for (let i = 1; i < dates.length; i += 1) {
+      assert.ok(dates[i] <= dates[i - 1], 'expected newest leaks first');
+    }
+  });
+
+  it('eraPosition counts the whole era, not just the filtered rows', async () => {
+    // Filtering by quality must not renumber the era: the web client turns
+    // eraPosition into a page number for /eras/{id}?page=N#song-{id}.
+    const res = await req(`/songs?era=${F.eraId}&quality=CD%20Quality&limit=3`);
+    assert.equal(res.status, 200);
+    const body = await json(res);
+    if (body.songs.length === 0) return;
+
+    const first = body.songs[0];
+    const expected = await json(await req(`/eras/${F.eraId}/songs?limit=1&offset=${first.eraPosition - 1}`));
+    assert.equal(expected.length, 1);
+    assert.equal(
+      expected[0].id,
+      first.id,
+      `eraPosition ${first.eraPosition} does not point at song ${first.id} in the era listing`,
+    );
   });
 
   it('search limit is capped at 50', async () => {
