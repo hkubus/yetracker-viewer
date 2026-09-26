@@ -487,7 +487,11 @@ fn import_catalog(text: &str, catalog: &CatalogDefinition, state: &mut ImportSta
             }
         }
 
-        let era_id = ensure_era(state, &era_name, catalog_id == PRIMARY_CATALOG_ID, None);
+        // A song row only *references* an era; it does not define one. The sheet's
+        // era metadata rows (which carry artwork and a description) are what make an
+        // era browsable, so a placeholder or typo era name on a song row — the sheet
+        // uses "x" for one-off performances — must not become a real era.
+        let era_id = ensure_era(state, &era_name, false, None);
         let kind = cell_text(&cells, type_column);
         let streaming = cell_text(&cells, streaming_column);
         let mut extra_notes = Vec::new();
@@ -848,6 +852,31 @@ let html = r#"
         assert_eq!(state.eras.len(), 1);
         assert_eq!(state.eras[0].name, "Era One");
         assert_eq!(state.songs.len(), 1);
+    }
+
+    #[test]
+    fn song_rows_alone_do_not_create_browsable_eras() {
+        let html = r#"
+            <table>
+              <tr><th>Era</th><th>Name<br>(Sheet Link)</th><th>Notes</th><th>Link</th><th>Type</th><th>Quality</th></tr>
+              <tr><td>1</td><td>Era One<br>meta</td><td>Era notes</td><td><img src="https://img.example/a.jpg"></td><td>Description</td></tr>
+              <tr><td>x</td><td>Hollywood Bowl</td><td>Live show, no era</td><td></td><td></td><td></td></tr>
+              <tr><td>Era One</td><td>My Song</td><td>Song notes</td><td></td><td></td><td>CD Quality</td></tr>
+            </table>
+        "#;
+        let state = import_primary(html);
+        let main_eras: Vec<&str> = state
+            .eras
+            .iter()
+            .filter(|era| era.is_main == 1)
+            .map(|era| era.name.as_str())
+            .collect();
+        assert_eq!(main_eras, ["Era One"]);
+        // The song keeps its row so it stays searchable, but its placeholder era is
+        // not listed by /eras.
+        let placeholder = state.eras.iter().find(|era| era.name == "x").expect("placeholder era row");
+        assert_eq!(placeholder.is_main, 0);
+        assert_eq!(state.songs.len(), 2);
     }
 
     #[test]

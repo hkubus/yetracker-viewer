@@ -79,6 +79,8 @@ Smoke-test route.
 
 List main eras with song counts (primary catalog only).
 
+A *main* era is one the sheet defines with an era metadata row (artwork + description). An era name that only ever appears in a song row — a placeholder such as the sheet's `x` for one-off performances, or a typo — is stored (so the song keeps its era) but left out of this list.
+
 - Input: none (no query params).
 - Output `200`: `Era[]`, header `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600`.
   ```json
