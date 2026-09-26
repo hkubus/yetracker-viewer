@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -57,11 +58,18 @@ async fn run() -> Result<(), String> {
 
     if state.config.sync_on_start {
         // Import blocks startup (as in the Node original); a failure aborts boot.
-        importer::import_data(&state)
+        importer::import_data(state.clone())
             .await
             .map_err(|error| format!("{error:?}"))?;
+        // Kick the cover/song pipeline off right away; the periodic loop below
+        // re-runs the whole cycle on its own cadence.
         spawn_background_sync(state.clone(), shutdown_requested.clone());
     }
+
+    // Syncing also repeats in the background in every environment, independent
+    // of SYNC_ON_START, so a long-running server picks up new catalog entries
+    // and media without a restart.
+    spawn_periodic_sync(state.clone(), shutdown_requested.clone());
 
     let app = routes::router(state.clone())
         .layer(CompressionLayer::new().compress_when(compression_predicate()))
@@ -88,43 +96,93 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// How often the always-on background sync loop re-imports the catalogs and
+/// retries missing media. Deliberately a constant rather than an environment
+/// variable so every deployment keeps syncing.
+const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
 /// Sequential background chain mirroring `index.ts`: covers -> backfill ->
 /// songs -> backfill, bailing out between phases once shutdown is requested.
+async fn run_sync_chain(state: &AppState, shutdown: &AtomicBool) {
+    if let Err(error) = downloader::download_covers(state).await {
+        if !shutdown.load(Ordering::SeqCst) {
+            eprintln!("background song processing failed {error:?}");
+        }
+        return;
+    }
+    if shutdown.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(error) = backfill::backfill_durations(state).await {
+        if !shutdown.load(Ordering::SeqCst) {
+            eprintln!("background song processing failed {error:?}");
+        }
+        return;
+    }
+    if shutdown.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(error) = downloader::download_songs(state).await {
+        if !shutdown.load(Ordering::SeqCst) {
+            eprintln!("background song processing failed {error:?}");
+        }
+        return;
+    }
+    if shutdown.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(error) = backfill::backfill_durations(state).await {
+        if !shutdown.load(Ordering::SeqCst) {
+            eprintln!("background song processing failed {error:?}");
+        }
+    }
+}
+
 fn spawn_background_sync(state: SharedState, shutdown: Arc<AtomicBool>) {
     tokio::spawn(async move {
-        if let Err(error) = downloader::download_covers(&state).await {
-            if !shutdown.load(Ordering::SeqCst) {
-                eprintln!("background song processing failed {error:?}");
+        run_sync_chain(&state, &shutdown).await;
+    });
+}
+
+/// Re-imports the catalogs and re-runs the media pipeline every
+/// [`SYNC_INTERVAL`], regardless of `SYNC_ON_START`, until shutdown. The first
+/// run waits one interval so boot stays fast and offline-capable.
+fn spawn_periodic_sync(state: SharedState, shutdown: Arc<AtomicBool>) {
+    tokio::spawn(async move {
+        loop {
+            if !sleep_until_next_sync(&shutdown).await {
+                return;
             }
-            return;
-        }
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Err(error) = backfill::backfill_durations(&state).await {
-            if !shutdown.load(Ordering::SeqCst) {
-                eprintln!("background song processing failed {error:?}");
+            println!("background sync starting");
+            if let Err(error) = importer::import_data(state.clone()).await {
+                if !shutdown.load(Ordering::SeqCst) {
+                    eprintln!("background sync import failed {error:?}");
+                }
             }
-            return;
-        }
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Err(error) = downloader::download_songs(&state).await {
-            if !shutdown.load(Ordering::SeqCst) {
-                eprintln!("background song processing failed {error:?}");
-            }
-            return;
-        }
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Err(error) = backfill::backfill_durations(&state).await {
-            if !shutdown.load(Ordering::SeqCst) {
-                eprintln!("background song processing failed {error:?}");
+            // Retry pending media even when the import failed: the backfill and
+            // download phases still make progress on the existing catalog.
+            run_sync_chain(&state, &shutdown).await;
+            if shutdown.load(Ordering::SeqCst) {
+                return;
             }
         }
     });
+}
+
+/// Sleeps for [`SYNC_INTERVAL`], waking early if shutdown is requested. Returns
+/// `false` when the server is shutting down.
+async fn sleep_until_next_sync(shutdown: &AtomicBool) -> bool {
+    const TICK: Duration = Duration::from_secs(1);
+    let mut remaining = SYNC_INTERVAL;
+    while !remaining.is_zero() {
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+        let nap = remaining.min(TICK);
+        tokio::time::sleep(nap).await;
+        remaining = remaining.saturating_sub(nap);
+    }
+    !shutdown.load(Ordering::SeqCst)
 }
 
 const SECURE_HEADERS: [(&str, &str); 11] = [

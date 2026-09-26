@@ -25,6 +25,11 @@ song-oriented Yetracker sheets listed in `apps/api-rs/src/catalogs.rs`. The web
 home page exposes those additional sheets under the main era list, and each
 category has its own paginated song view.
 
+The API also re-imports the catalogs and retries missing covers/media in the
+background every 30 minutes, independent of `SYNC_ON_START`, so new entries and
+downloads appear without a restart. Setting `SYNC_ON_START=false` only skips the
+blocking import at boot.
+
 ## Production
 
 Build the web app once:

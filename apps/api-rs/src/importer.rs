@@ -18,7 +18,7 @@ use url::Url;
 use crate::catalogs::{catalog_source_url, CatalogDefinition, CATALOGS, PRIMARY_CATALOG_ID};
 use crate::db;
 use crate::error::ApiError;
-use crate::state::AppState;
+use crate::state::SharedState;
 use crate::text;
 
 const CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -622,29 +622,32 @@ fn pseudo_random(max: u64) -> u64 {
     nanos % max
 }
 
-pub async fn import_data(state: &AppState) -> Result<(), ApiError> {
+pub async fn import_data(state: SharedState) -> Result<(), ApiError> {
     let client = reqwest::Client::builder()
         .timeout(CATALOG_FETCH_TIMEOUT)
         .build()
         .map_err(ApiError::unexpected)?;
 
     let mut import_state = ImportState::new();
-    let results: Vec<(&CatalogDefinition, Option<String>)> = stream::iter(CATALOGS.iter())
-        .map(|catalog| {
-            let client = &client;
-            async move {
-                match fetch_catalog_text(client, catalog).await {
-                    Ok(text) => (catalog, Some(text)),
-                    Err(error) => {
-                        eprintln!("skipping catalog {} after fetch/import failure {error:?}", catalog.name);
-                        (catalog, None)
-                    }
+    // Futures are pushed directly rather than produced by a `map` closure:
+    // a closure here makes rustc demand higher-ranked lifetimes that its own
+    // region inference cannot satisfy once `import_data` runs inside
+    // `tokio::spawn` ("implementation of FnOnce is not general enough").
+    let mut fetches = Vec::with_capacity(CATALOGS.len());
+    for catalog in CATALOGS.iter() {
+        let client = &client;
+        fetches.push(async move {
+            match fetch_catalog_text(client, catalog).await {
+                Ok(text) => (catalog, Some(text)),
+                Err(error) => {
+                    eprintln!("skipping catalog {} after fetch/import failure {error:?}", catalog.name);
+                    (catalog, None)
                 }
             }
-        })
-        .buffered(4)
-        .collect()
-        .await;
+        });
+    }
+    let results: Vec<(&'static CatalogDefinition, Option<String>)> =
+        stream::iter(fetches).buffered(4).collect().await;
 
     for (catalog, text) in results {
         let Some(text) = text else { continue };
