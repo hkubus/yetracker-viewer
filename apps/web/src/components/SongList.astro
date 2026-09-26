@@ -381,6 +381,52 @@ function searchText(song: SongRow): string {
                 resizeTimer = setTimeout(measureNotes, 150);
             });
 
+            // Deep links (#song-123) drop the row flush against the top edge. Put
+            // it near the middle of the space above the fixed player instead, and
+            // re-centre while fonts and the notes measurement settle the layout.
+            const hashTarget = () => {
+                const hash = window.location.hash;
+                if (hash.length < 2) return null;
+                let id = hash.slice(1);
+                try {
+                    id = decodeURIComponent(id);
+                } catch {
+                    // Keep the raw fragment when it is not valid percent-encoding.
+                }
+                const target = document.getElementById(id);
+                return target instanceof HTMLElement && target.offsetParent !== null ? target : null;
+            };
+
+            const centerHashTarget = () => {
+                const target = hashTarget();
+                if (!target) return;
+                const player = document.querySelector(".player:not([hidden])");
+                const reserved = player instanceof HTMLElement ? player.getBoundingClientRect().height : 0;
+                const room = Math.max(0, window.innerHeight - reserved);
+                const rect = target.getBoundingClientRect();
+                if (rect.height === 0) return;
+                const top = window.scrollY + rect.top - Math.max(0, (room - rect.height) / 2);
+                window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+            };
+
+            if (window.location.hash.length > 1) {
+                let movedByUser = false;
+                const noteInteraction = () => {
+                    movedByUser = true;
+                };
+                for (const type of ["wheel", "touchstart", "keydown", "pointerdown"]) {
+                    window.addEventListener(type, noteInteraction, { once: true, passive: true });
+                }
+                const recenter = () => {
+                    if (!movedByUser) centerHashTarget();
+                };
+                centerHashTarget();
+                requestAnimationFrame(recenter);
+                for (const delay of [150, 400, 900]) setTimeout(recenter, delay);
+                window.addEventListener("load", recenter, { once: true });
+                document.fonts?.ready.then(recenter);
+            }
+
             updateResults();
             requestAnimationFrame(measureNotes);
         });
