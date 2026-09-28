@@ -354,13 +354,21 @@ async fn search_songs(
     // client turns it into a page number for `/eras/{id}?page=N#song-{id}`. A
     // window function in the outer query numbers only the filtered rows, which
     // sent deep links to the wrong page whenever a query or filter was set.
+    //
+    // Expressing it as a window function over the whole catalog and joining that
+    // back in is correct but quadratic: SQLite materialises the CTE without an
+    // index and rescans it for every candidate row (`SCAN era_positions
+    // LEFT-JOIN`), which cost ~3s on a 9.5k-song catalog — on the query the home
+    // page runs on every render. Counting the era rows up to this song's id is
+    // the same number, and `songs_catalog_era_id_index` answers it as an index
+    // range scan, so the whole statement is linear instead.
     let mut sql = String::from(
-        "WITH era_positions AS (SELECT id, row_number() OVER (PARTITION BY era ORDER BY id) AS position \
-         FROM songs WHERE catalog_id = 'unreleased') \
-         SELECT songs.id, songs.era, songs.name, songs.notes, songs.quality, songs.available_length, \
-         eras.name, eras.dominant_color, files.filename, era_positions.position, songs.leak_date \
+        "SELECT songs.id, songs.era, songs.name, songs.notes, songs.quality, songs.available_length, \
+         eras.name, eras.dominant_color, files.filename, \
+         (SELECT count(*) FROM songs era_positions WHERE era_positions.era = songs.era \
+          AND era_positions.catalog_id = 'unreleased' AND era_positions.id <= songs.id) AS position, \
+         songs.leak_date \
          FROM songs LEFT JOIN eras ON songs.era = eras.id LEFT JOIN files ON songs.url = files.url \
-         LEFT JOIN era_positions ON era_positions.id = songs.id \
          WHERE songs.catalog_id = 'unreleased'",
     );
     let mut values: Vec<Value> = Vec::new();
@@ -423,18 +431,19 @@ async fn search_songs(
     })
     .await?;
 
-    let mut matches: Vec<SearchSong> = rows
-        .into_iter()
-        .map(|mut song| {
-            song.playable = state.playable.is_playable(song.filename.as_deref());
-            song
-        })
-        .filter(|song| {
-            playable_filter
-                .map(|wanted| song.playable == wanted)
-                .unwrap_or(true)
-        })
-        .collect();
+    let mut matches: Vec<SearchSong> = Vec::with_capacity(rows.len());
+    for mut song in rows {
+        song.playable = state
+            .playable
+            .resolve_playable(&state.config.songs_path, song.filename.as_deref())
+            .await;
+        if playable_filter
+            .map(|wanted| song.playable == wanted)
+            .unwrap_or(true)
+        {
+            matches.push(song);
+        }
+    }
 
     let total = matches.len();
     let ranked = if query.is_empty() {
@@ -602,33 +611,34 @@ pub async fn paginated_songs(
     .await?;
 
     let total = songs.first().map(|song| song.total).unwrap_or(0);
-    let body: Vec<JsonValue> = songs
-        .iter()
-        .map(|song| {
-            let playable = state.playable.is_playable(song.filename.as_deref());
-            let duration = if playable {
-                song.file_duration.map(js_float).unwrap_or(JsonValue::Null)
-            } else {
-                JsonValue::Null
-            };
-            json!({
-                "id": song.id,
-                "eraId": song.era,
-                "catalogId": song.catalog_id,
-                "name": song.name,
-                "notes": song.notes,
-                "fileDate": song.file_date,
-                "leakDate": song.leak_date,
-                "availableLength": song.available_length,
-                "trackLength": song.track_length,
-                "quality": song.quality,
-                "url": song.url,
-                "downloaded": song.downloaded,
-                "playable": playable,
-                "duration": duration,
-            })
-        })
-        .collect();
+    let mut body: Vec<JsonValue> = Vec::with_capacity(songs.len());
+    for song in &songs {
+        let playable = state
+            .playable
+            .resolve_playable(&state.config.songs_path, song.filename.as_deref())
+            .await;
+        let duration = if playable {
+            song.file_duration.map(js_float).unwrap_or(JsonValue::Null)
+        } else {
+            JsonValue::Null
+        };
+        body.push(json!({
+            "id": song.id,
+            "eraId": song.era,
+            "catalogId": song.catalog_id,
+            "name": song.name,
+            "notes": song.notes,
+            "fileDate": song.file_date,
+            "leakDate": song.leak_date,
+            "availableLength": song.available_length,
+            "trackLength": song.track_length,
+            "quality": song.quality,
+            "url": song.url,
+            "downloaded": song.downloaded,
+            "playable": playable,
+            "duration": duration,
+        }));
+    }
 
     let mut response = json_cached(JsonValue::Array(body));
     set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);

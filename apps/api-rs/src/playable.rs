@@ -98,6 +98,29 @@ impl PlayableFiles {
             .contains(filename)
     }
 
+    /// [`Self::is_playable`], but re-stats the file when the set does not know
+    /// it yet, memoising the answer.
+    ///
+    /// The set is a snapshot taken at boot, so media copied in or restored out
+    /// of band stays invisible to it for the life of the process — even though
+    /// `/songs/{id}/stream` serves that very file, because the stream path
+    /// already falls back to a direct `stat` when the meta cache misses. The
+    /// listing endpoints resolved only against the set, so they reported
+    /// `playable: false` for audio the server would happily stream. Resolving a
+    /// miss the same way the stream path does keeps the two in agreement.
+    pub async fn resolve_playable(&self, songs_path: &Path, filename: Option<&str>) -> bool {
+        let Some(filename) = filename else {
+            return false;
+        };
+        if !is_bare_filename(filename) {
+            return false;
+        }
+        if self.is_playable(Some(filename)) {
+            return true;
+        }
+        self.refresh_one(songs_path, filename).await
+    }
+
     pub fn set_playable(&self, filename: &str, playable: bool) {
         if !is_bare_filename(filename) {
             return;
@@ -224,5 +247,40 @@ mod tests {
         assert!(!files.is_playable(None));
         files.set_playable("name.mp3", false);
         assert!(!files.is_playable(Some("name.mp3")));
+    }
+
+    /// A file restored out of band is invisible to the boot-time set, but the
+    /// stream endpoint still serves it (it stats on a meta-cache miss). The
+    /// listing endpoints must agree, or songs read as unplayable while
+    /// streaming fine.
+    #[tokio::test]
+    async fn resolve_playable_picks_up_files_added_after_the_boot_scan() {
+        let dir = std::env::temp_dir().join(format!("yt-playable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp songs dir");
+
+        let files = PlayableFiles::new();
+        files.refresh(&dir).await.expect("initial scan");
+
+        // Not on disk yet, and absent from the DB's point of view.
+        assert!(!files.is_playable(Some("restored.mp3")));
+        assert!(!files.resolve_playable(&dir, Some("restored.mp3")).await);
+
+        std::fs::write(dir.join("restored.mp3"), b"audio").expect("write media file");
+
+        // Still unknown to the set built at boot...
+        assert!(!files.is_playable(Some("restored.mp3")));
+        // ...but resolving it stats the directory, so the listing agrees with
+        // the stream endpoint, and the answer is memoised from then on.
+        assert!(files.resolve_playable(&dir, Some("restored.mp3")).await);
+        assert!(files.is_playable(Some("restored.mp3")));
+
+        // Empty files are not playable, and a `NULL` filename short-circuits.
+        std::fs::write(dir.join("empty.mp3"), b"").expect("write empty file");
+        assert!(!files.resolve_playable(&dir, Some("empty.mp3")).await);
+        assert!(!files.resolve_playable(&dir, None).await);
+        assert!(!files.resolve_playable(&dir, Some("nested/name.mp3")).await);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

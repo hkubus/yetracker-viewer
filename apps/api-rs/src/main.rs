@@ -104,6 +104,19 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Sequential background chain mirroring `index.ts`: covers -> backfill ->
 /// songs -> backfill, bailing out between phases once shutdown is requested.
 async fn run_sync_chain(state: &AppState, shutdown: &AtomicBool) {
+    // The playable set is a boot-time snapshot. The downloader keeps it current
+    // as it fetches, but media can also land out of band (a restored copy, an
+    // external sync), and listings would keep reporting those as unplayable
+    // until the next restart. One readdir per cycle is cheap next to the
+    // network and media work below.
+    if let Err(error) = state.playable.refresh(&state.config.songs_path).await {
+        if !shutdown.load(Ordering::SeqCst) {
+            eprintln!("playable file rescan failed {error:?}");
+        }
+    }
+    if shutdown.load(Ordering::SeqCst) {
+        return;
+    }
     if let Err(error) = downloader::download_covers(state).await {
         if !shutdown.load(Ordering::SeqCst) {
             eprintln!("background song processing failed {error:?}");
