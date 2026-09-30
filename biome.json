@@ -6,6 +6,9 @@
     "defaultBranch": "main",
     "useIgnoreFile": true
   },
+  "files": {
+    "includes": ["**", "!**/*.xcassets"]
+  },
   "formatter": {
     "indentStyle": "space",
     "indentWidth": 2,
@@ -18,7 +21,7 @@
   },
   "linter": {
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "style": {
         "noParameterAssign": "off",
         "useNodeAssertStrict": "error"
@@ -37,6 +40,16 @@
           "correctness": {
             "noUnusedVariables": "off",
             "noUnusedImports": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["**/*.svg"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noSvgWithoutTitle": "off"
           }
         }
       }

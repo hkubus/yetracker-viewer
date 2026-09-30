@@ -1,0 +1,136 @@
+---
+/**
+ * Era cover art with a no-JS fallback. When the era has a cover it renders the <img> (width/height set,
+ * decoding async, lazy unless `priority`); underneath, and instead of it when there is no cover, it paints a tile
+ * in the era's theme colors with the era's initials. The image's alt text is empty by default, so a failed load
+ * shows the tile rather than a broken-image icon. No inline event handlers (CSP-safe).
+ *
+ * Props:
+ * - eraId: number | string — used for the cover URL.
+ * - eraName: string — source of the initials only (it is not used as alt text).
+ * - hasCover?: boolean | null — whether a cover exists. When absent (older API payloads) it is derived from
+ *   `coverVersion`.
+ * - coverVersion?: string | null — sent as `?v=` so the browser can cache the cover indefinitely.
+ * - dominantColor?: string | null — the era's `rrggbb` color for the tile (fallback 666666), via `themeFor`.
+ * - size?: number — intrinsic width/height attributes of the <img> in px (default 512); CSS decides the
+ *   rendered size.
+ * - alt?: string — default '' (decorative: the era name is usually right next to the cover). With a non-empty
+ *   alt and no cover, the tile itself gets role="img" and that label.
+ * - priority?: boolean — for above-the-fold covers: loading="eager" and fetchpriority="high".
+ * - apiBaseUrl?: string — browser-facing API base URL (default: `publicApiBaseUrl` from config).
+ * - class?: string, style?: string, and other attributes are forwarded to the wrapper <span>.
+ *
+ * Layout: the wrapper is a square block that fills the width of a block container. In flex, grid or inline
+ * contexts give it a width (for example through `class`); round it with `border-radius` (it clips its content).
+ *
+ * Updating it from client code (e.g. the player): keep the wrapper, set `--cover-bg`, `--cover-bg-end` and
+ * `--cover-fg` from `themeFor()` (`surface`, `background`, `accentText`), set the text of `[data-cover-initials]`,
+ * and add, replace or remove the <img> child (give it `alt` and a `data-initials` attribute with the same initials,
+ * which the broken-image fallback displays). Children are styled through the wrapper, so new ones look the same.
+ */
+import type { HTMLAttributes } from 'astro/types';
+import { publicApiBaseUrl } from '../config';
+import { themeFor } from '../utils/color';
+import { coverUrl, eraInitials } from '../utils/cover';
+
+type Props = Omit<HTMLAttributes<'span'>, 'style'> & {
+  eraId: number | string;
+  eraName: string;
+  hasCover?: boolean | null | undefined;
+  coverVersion?: string | null | undefined;
+  dominantColor?: string | null | undefined;
+  size?: number;
+  alt?: string;
+  priority?: boolean;
+  apiBaseUrl?: string;
+  style?: string;
+};
+
+const {
+  eraId,
+  eraName,
+  hasCover,
+  coverVersion,
+  dominantColor,
+  size = 512,
+  alt = '',
+  priority = false,
+  apiBaseUrl = publicApiBaseUrl,
+  class: className,
+  style,
+  ...attrs
+} = Astro.props;
+
+const showImage = hasCover ?? Boolean(coverVersion);
+const initials = eraInitials(eraName);
+const theme = themeFor(dominantColor);
+const tileStyle = `--cover-bg: ${theme.surface}; --cover-bg-end: ${theme.background}; --cover-fg: ${theme.accentText}`;
+const labelTile = !showImage && alt.trim().length > 0;
+---
+
+<span
+  {...attrs}
+  class:list={['cover-image', className]}
+  style={style ? `${tileStyle}; ${style}` : tileStyle}
+  role={labelTile ? 'img' : undefined}
+  aria-label={labelTile ? alt : undefined}
+  data-cover-image
+>
+  <span data-cover-initials aria-hidden="true">{initials}</span>
+  {
+    showImage && (
+      <img
+        src={coverUrl(apiBaseUrl, eraId, coverVersion)}
+        alt={alt}
+        width={size}
+        height={size}
+        loading={priority ? 'eager' : 'lazy'}
+        fetchpriority={priority ? 'high' : undefined}
+        decoding="async"
+        data-initials={initials}
+      />
+    )
+  }
+</span>
+
+<style>
+  .cover-image {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    aspect-ratio: 1;
+    container-type: inline-size;
+    color: var(--cover-fg);
+    background: linear-gradient(135deg, var(--cover-bg), var(--cover-bg-end));
+  }
+  .cover-image :global([data-cover-initials]),
+  .cover-image :global(img)::after {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 1.25rem;
+    font-size: 32cqi;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    user-select: none;
+  }
+  .cover-image :global(img) {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    /* Hides the alt text a broken image would print over the tile. */
+    color: transparent;
+  }
+  /* Only a broken image renders ::after (a loaded one is replaced content): cover the browser's broken-image
+     icon with the same tile. */
+  .cover-image :global(img)::after {
+    content: attr(data-initials);
+    color: var(--cover-fg);
+    background: linear-gradient(135deg, var(--cover-bg), var(--cover-bg-end));
+  }
+</style>

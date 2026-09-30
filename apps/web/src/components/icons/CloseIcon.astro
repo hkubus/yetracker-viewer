@@ -1,0 +1,21 @@
+---
+/**
+ * Close / clear: an X.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  {...Astro.props}
+>
+  <path d="M6 6l12 12M18 6 6 18" />
+</SvgIcon>

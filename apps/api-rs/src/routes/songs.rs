@@ -1,35 +1,31 @@
-//! `/songs` routes plus the paginated era song list.
-//!
-//! Mirrors `apps/api/src/routes/songs/**`.
+//! `/songs` (plain list and search/filter mode), `/songs/{id}` and the song
+//! list of `/eras/{id}/songs`. The media endpoints (stream, download,
+//! duration, cover) live in `media.rs`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
-use axum::body::Body;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use bytes::Bytes;
-use futures_util::stream;
-use rusqlite::params_from_iter;
-use rusqlite::types::Value;
-use serde_json::{Value as JsonValue, json};
-use tokio::io::AsyncReadExt;
+use axum::extract::{RawQuery, State};
+use axum::response::Response;
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, Row, params_from_iter};
+use serde_json::{Map, Value, json};
 use tokio::sync::OwnedSemaphorePermit;
+use url::Url;
 
-use super::{DURATION_CACHE, JSON_CACHE, MEDIA_CACHE, js_float, json_cached, set_header};
-use crate::db;
+use super::{EraId, Params, SongId, js_float, json_cached, json_list};
+use crate::config::Config;
+use crate::db::{self, meta_keys};
+use crate::downloader::{Source, source_of};
 use crate::error::ApiError;
-use crate::media::{
-    InvalidReason, ProbeError, delete_invalid_file, get_duration, probe_audio_file,
-};
-use crate::playable::{mtime_ms_of, stored_song_path};
-use crate::rank::{Searchable, rank_song_search};
+use crate::importer::is_downloadable_url;
+use crate::rank::{CatalogIndex, SearchQuery, SongTexts};
 use crate::request::{
-    escape_like_pattern, normalize_query, pagination_value, positive_integer, sort_value,
+    SONG_LIST_PARAMS, SongSort, limit_value, offset_value, positive_integer, search_query,
+    sort_value,
 };
-use crate::serve::{file_body, parse_range};
+use crate::search_text::SONG_CATEGORIES;
 use crate::state::{AppState, SharedState};
 use crate::text;
 
@@ -54,1203 +50,1156 @@ const AVAILABILITY_FILTERS: [&str; 10] = [
     "Conflicting Sources",
 ];
 
-/// Emoji category markers that prefix `unreleased` song names. `id` is the
-/// public filter value; `emoji` is matched with `instr` (use the base codepoint
-/// so variation-selector forms also match).
-const SONG_CATEGORIES: [(&str, &str); 6] = [
-    ("best-of", "⭐"),
-    ("special", "✨"),
-    ("grails", "🏆"),
-    ("wanted", "🏅"),
-    ("worst-of", "🗑"),
-    ("ai", "🤖"),
-];
+/// Quality of songs that have no audio anywhere.
+const NOT_AVAILABLE: &str = "Not Available";
 
-fn category_emoji(id: &str) -> Option<&'static str> {
-    SONG_CATEGORIES.iter().find(|(key, _)| *key == id).map(|(_, emoji)| *emoji)
-}
+/// Fallback era color: six hex digits, never null in payloads.
+const DEFAULT_COLOR: &str = "666666";
 
-/// Ranks a song by its category marker in `SONG_CATEGORIES` order (best-of
-/// first), with unmarked songs last.
-///
-/// Matches with `instr` exactly like the `category` filter does, so sorting
-/// and filtering never disagree about which category a song is in. Built from
-/// `SONG_CATEGORIES` so a new category only has to be declared once.
-fn category_rank_sql() -> String {
-    let mut sql = String::from("CASE");
-    for (index, (_, emoji)) in SONG_CATEGORIES.iter().enumerate() {
-        sql.push_str(&format!(
-            " WHEN instr(coalesce(songs.name, ''), '{emoji}') > 0 THEN {index}"
-        ));
-    }
-    sql.push_str(&format!(" ELSE {} END", SONG_CATEGORIES.len()));
-    sql
-}
+/// Page sizes: default and maximum.
+const ERA_PAGE_LIMIT: (i64, i64) = (100, 500);
+const SEARCH_PAGE_LIMIT: (i64, i64) = (50, 50);
 
-/// `ORDER BY` fragment for a validated sort key (see `request::sort_value`).
-///
-/// Every fragment ends with `songs.id ASC` so equal keys keep a stable,
-/// import-ordered tie-break, and the date sorts push rows with a missing or
-/// zero date to the end instead of pretending they leaked in 1970.
-fn sort_order_by(sort: &str) -> String {
+/// How long a search waits for one of the `SEARCH_CONCURRENCY` slots before
+/// answering 503.
+const SEARCH_SLOT_WAIT: Duration = Duration::from_secs(10);
+
+/// Pages longer than this take a search slot like text searches do; smaller
+/// pages and filter-only requests are cheap and never wait for one.
+const HEAVY_PAGE: i64 = 100;
+
+/// The folded text a global search matches: the song's own text plus its
+/// era's name and subtitle.
+const SEARCH_TEXT: &str = "s.search_text";
+/// The folded text an era's song list matches: the song's own text only, so a
+/// token from the era's name doesn't match every song of the era (rows written
+/// before the column existed fall back to the full text).
+const OWN_SEARCH_TEXT: &str = "coalesce(s.song_search_text, s.search_text)";
+
+/// Columns of a full song payload over `songs s LEFT JOIN files f`, in the
+/// order [`SongRow::read`] expects.
+const SONG_COLUMNS: &str = "s.id, s.era, s.era_position, s.catalog_id, s.name, s.title, \
+     s.sub_era, s.notes, s.notes_links, s.file_date, s.file_date_precision, s.leak_date, \
+     s.leak_date_precision, s.available_length, s.track_length, s.track_length_approx, \
+     s.quality, s.url, s.links, f.status, f.filename, f.duration";
+const SONG_SOURCE: &str = "songs s LEFT JOIN files f ON f.url = s.url";
+
+/// `ORDER BY` for a sort key; every order ends in catalog position, and the
+/// date sorts put songs without a date last.
+fn order_by(sort: SongSort) -> &'static str {
     match sort {
-        "leak-newest" => {
-            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date DESC, songs.id ASC".to_string()
-        }
-        "leak-oldest" => {
-            "songs.leak_date IS NULL OR songs.leak_date = 0, songs.leak_date ASC, songs.id ASC".to_string()
-        }
-        "file-newest" => {
-            "songs.file_date IS NULL OR songs.file_date = 0, songs.file_date DESC, songs.id ASC".to_string()
-        }
-        "name" => "songs.name COLLATE NOCASE ASC, songs.id ASC".to_string(),
-        "category" => format!("{}, songs.id ASC", category_rank_sql()),
-        _ => "songs.id ASC".to_string(),
+        SongSort::Catalog => "s.position, s.id",
+        SongSort::Category => "s.category_rank, s.position, s.id",
+        SongSort::LeakNewest => "s.leak_date IS NULL, s.leak_date DESC, s.position, s.id",
+        SongSort::LeakOldest => "s.leak_date IS NULL, s.leak_date, s.position, s.id",
+        SongSort::FileNewest => "s.file_date IS NULL, s.file_date DESC, s.position, s.id",
+        // Titles without letters or digits (`???`) fold to an empty key; they
+        // go last instead of first.
+        SongSort::Name => "coalesce(s.sort_title, '') = '', s.sort_title, s.position, s.id",
     }
 }
 
-fn enum_filter(
-    value: Option<&str>,
-    allowed: &[&str],
-    label: &str,
-) -> Result<Option<String>, ApiError> {
-    let Some(value) = value.filter(|value| !value.is_empty()) else {
+/// `category`: the marker of a category id; `None` → no filter, unknown →
+/// 400 `Invalid category filter`.
+fn category_marker(value: Option<&str>) -> Result<Option<&'static str>, ApiError> {
+    let Some(id) = value else {
         return Ok(None);
     };
-    if !allowed.contains(&value) {
-        return Err(ApiError::bad_request(format!("Invalid {label} filter")));
+    SONG_CATEGORIES
+        .iter()
+        .find(|category| category.id == id)
+        .map(|category| Some(category.marker))
+        .ok_or_else(|| ApiError::bad_request("Invalid category filter"))
+}
+
+/// What this server downloads, as far as `downloadState` is concerned.
+#[derive(Debug, Clone, Copy)]
+struct DownloadPolicy {
+    /// `YOUTUBE_DOWNLOAD`: YouTube links are fetched with yt-dlp.
+    youtube: bool,
+}
+
+impl DownloadPolicy {
+    fn of(config: &Config) -> Self {
+        Self {
+            youtube: config.youtube_download,
+        }
     }
-    Ok(Some(value.to_string()))
+
+    /// Whether the downloader would ever fetch `url`.
+    fn downloads(self, url: &str) -> bool {
+        if !is_downloadable_url(url) {
+            return false;
+        }
+        self.youtube
+            || !matches!(
+                Url::parse(url).ok().and_then(|url| source_of(&url)),
+                Some(Source::YouTube)
+            )
+    }
 }
 
-fn is_ascii_digits(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+/// A `WHERE` clause over `songs s` with its parameters.
+struct Filter {
+    sql: String,
+    values: Vec<SqlValue>,
 }
 
-struct PlainSong {
+impl Filter {
+    fn catalog() -> Self {
+        Self {
+            sql: "s.catalog_id = 'unreleased'".to_string(),
+            values: Vec::new(),
+        }
+    }
+
+    fn and(&mut self, clause: &str, values: impl IntoIterator<Item = SqlValue>) {
+        self.sql.push_str(" AND ");
+        self.sql.push_str(clause);
+        self.values.extend(values);
+    }
+
+    /// Songs whose folded `text` ([`SEARCH_TEXT`] or [`OWN_SEARCH_TEXT`])
+    /// contains every token (fold/substring semantics; the tokens are folded
+    /// already).
+    fn matching(&mut self, text: &str, tokens: &[String]) {
+        let clause = format!("instr({text}, ?) > 0");
+        for token in tokens {
+            self.and(&clause, [SqlValue::Text(token.clone())]);
+        }
+    }
+
+    /// Songs carrying every one of `markers`. Markers only ever lead the
+    /// title, and a song can carry several (`🗑️🤖`), so a song is in each
+    /// category whose marker it has.
+    fn categories(&mut self, markers: &[&str]) {
+        for marker in markers {
+            self.and(
+                "instr(s.title, ?) > 0",
+                [SqlValue::Text((*marker).to_string())],
+            );
+        }
+    }
+
+    fn count(&self, conn: &Connection) -> Result<i64, ApiError> {
+        let sql = format!("SELECT count(*) FROM songs s WHERE {}", self.sql);
+        Ok(conn
+            .prepare_cached(&sql)?
+            .query_row(params_from_iter(&self.values), |row| row.get(0))?)
+    }
+
+    /// One page in `sort` order. The ids are sorted on `songs` alone and the
+    /// full rows (with their `files` row) fetched for the page only.
+    fn page(
+        &self,
+        conn: &Connection,
+        sort: SongSort,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<SongRow>, ApiError> {
+        let sql = format!(
+            "SELECT s.id FROM songs s WHERE {} ORDER BY {} LIMIT ? OFFSET ?",
+            self.sql,
+            order_by(sort)
+        );
+        let values = self
+            .values
+            .iter()
+            .cloned()
+            .chain([SqlValue::Integer(limit), SqlValue::Integer(offset)]);
+        let mut statement = conn.prepare_cached(&sql)?;
+        let ids = statement
+            .query_map(params_from_iter(values), |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows_by_id(conn, &ids)
+    }
+}
+
+/// A `songs` row joined with its `files` row, as selected by [`SONG_COLUMNS`].
+struct SongRow {
     id: i64,
-    era: Option<i64>,
+    era_id: Option<i64>,
+    era_position: Option<i64>,
     catalog_id: Option<String>,
     name: Option<String>,
+    title: Option<String>,
+    sub_era: Option<String>,
     notes: Option<String>,
+    notes_links: Option<String>,
     file_date: Option<i64>,
+    file_date_precision: Option<String>,
     leak_date: Option<i64>,
+    leak_date_precision: Option<String>,
     available_length: Option<String>,
     track_length: Option<i64>,
+    track_length_approx: Option<i64>,
     quality: Option<String>,
     url: Option<String>,
+    links: Option<String>,
+    file_status: Option<String>,
+    filename: Option<String>,
+    duration: Option<f64>,
 }
 
-fn plain_song_json(song: &PlainSong) -> JsonValue {
-    json!({
-        "id": song.id,
-        "eraId": song.era,
-        "catalogId": song.catalog_id,
-        "name": song.name,
-        "notes": song.notes,
-        "fileDate": song.file_date,
-        "leakDate": song.leak_date,
-        "availableLength": song.available_length,
-        "trackLength": song.track_length,
-        "quality": song.quality,
-        "url": song.url,
-    })
-}
-
-#[derive(Clone)]
-pub struct SearchSong {
-    pub id: i64,
-    pub era_id: Option<i64>,
-    pub name: Option<String>,
-    pub notes: Option<String>,
-    pub quality: Option<String>,
-    pub available_length: Option<String>,
-    pub era_name: Option<String>,
-    pub dominant_color: Option<String>,
-    pub era_position: Option<i64>,
-    pub leak_date: Option<i64>,
-    pub filename: Option<String>,
-    pub playable: bool,
-}
-
-impl Searchable for SearchSong {
-    fn id(&self) -> i64 {
-        self.id
-    }
-    fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-    fn notes(&self) -> Option<&str> {
-        self.notes.as_deref()
-    }
-    fn quality(&self) -> Option<&str> {
-        self.quality.as_deref()
-    }
-    fn available_length(&self) -> Option<&str> {
-        self.available_length.as_deref()
-    }
-    fn era_name(&self) -> Option<&str> {
-        self.era_name.as_deref()
-    }
-    fn playable(&self) -> bool {
-        self.playable
-    }
-}
-
-impl SearchSong {
-    fn to_json(&self) -> JsonValue {
-        json!({
-            "id": self.id,
-            "eraId": self.era_id,
-            "name": self.name,
-            "notes": self.notes,
-            "quality": self.quality,
-            "availableLength": self.available_length,
-            "eraName": self.era_name,
-            "dominantColor": self.dominant_color,
-            "eraPosition": self.era_position.unwrap_or(1),
-            "leakDate": self.leak_date,
-            "playable": self.playable,
+impl SongRow {
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            era_id: row.get(1)?,
+            era_position: row.get(2)?,
+            catalog_id: row.get(3)?,
+            name: row.get(4)?,
+            title: row.get(5)?,
+            sub_era: row.get(6)?,
+            notes: row.get(7)?,
+            notes_links: row.get(8)?,
+            file_date: row.get(9)?,
+            file_date_precision: row.get(10)?,
+            leak_date: row.get(11)?,
+            leak_date_precision: row.get(12)?,
+            available_length: row.get(13)?,
+            track_length: row.get(14)?,
+            track_length_approx: row.get(15)?,
+            quality: row.get(16)?,
+            url: row.get(17)?,
+            links: row.get(18)?,
+            file_status: row.get(19)?,
+            filename: row.get(20)?,
+            duration: row.get(21)?,
         })
     }
-}
 
-pub async fn list_songs(
-    State(state): State<SharedState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Response, ApiError> {
-    let query = params.get("q").map(|value| normalize_query(value));
-    if let Some(query) = &query {
-        if !query.is_empty() && text::utf16_len(query) > 100 {
-            return Err(ApiError::bad_request("Search query is too long"));
-        }
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref().filter(|url| !url.is_empty())
     }
 
-    let era_id = match params.get("era").filter(|value| !value.is_empty()) {
-        Some(value) => Some(positive_integer(Some(value), "era filter")?),
-        None => None,
-    };
-    let era_from_id = match params.get("eraFrom").filter(|value| !value.is_empty()) {
-        Some(value) => Some(positive_integer(Some(value), "starting era filter")?),
-        None => None,
-    };
-    let era_to_id = match params.get("eraTo").filter(|value| !value.is_empty()) {
-        Some(value) => Some(positive_integer(Some(value), "ending era filter")?),
-        None => None,
-    };
-    if let (Some(from), Some(to)) = (era_from_id, era_to_id) {
-        if from > to {
-            return Err(ApiError::bad_request(
-                "Starting era must not be after ending era",
-            ));
-        }
-    }
-
-    let quality_filter = enum_filter(
-        params.get("quality").map(String::as_str),
-        &QUALITY_FILTERS,
-        "quality",
-    )?;
-    let availability_filter = enum_filter(
-        params.get("availability").map(String::as_str),
-        &AVAILABILITY_FILTERS,
-        "availability",
-    )?;
-    let playable_raw = params
-        .get("playable")
-        .map(String::as_str)
-        .filter(|value| !value.is_empty());
-    if let Some(value) = playable_raw {
-        if value != "true" && value != "false" {
-            return Err(ApiError::bad_request("Invalid playable filter"));
-        }
-    }
-    let playable_filter = playable_raw.map(|value| value == "true");
-
-    let has_filters = era_id.is_some()
-        || era_from_id.is_some()
-        || era_to_id.is_some()
-        || quality_filter.is_some()
-        || availability_filter.is_some()
-        || playable_filter.is_some();
-
-    let is_search = query
-        .as_deref()
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
-        || has_filters;
-    if is_search {
-        return search_songs(
-            &state,
-            query.as_deref().unwrap_or(""),
-            era_id,
-            era_from_id,
-            era_to_id,
-            quality_filter,
-            availability_filter,
-            playable_filter,
-            &params,
-        )
-        .await;
-    }
-
-    let requested_limit =
-        pagination_value(params.get("limit").map(String::as_str), 100, 500, "limit")?;
-    let requested_offset = pagination_value(
-        params.get("offset").map(String::as_str),
-        0,
-        10_000,
-        "offset",
-    )?;
-    let order_by = sort_order_by(sort_value(params.get("sort").map(String::as_str))?);
-
-    let songs = db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare(&format!(
-            "SELECT id, era, catalog_id, name, notes, file_date, leak_date, available_length, track_length, quality, url \
-             FROM songs WHERE catalog_id = 'unreleased' ORDER BY {order_by} LIMIT ?1 OFFSET ?2",
-        ))?;
-        let rows = statement.query_map([requested_limit, requested_offset], |row| {
-            Ok(PlainSong {
-                id: row.get(0)?,
-                era: row.get(1)?,
-                catalog_id: row.get(2)?,
-                name: row.get(3)?,
-                notes: row.get(4)?,
-                file_date: row.get(5)?,
-                leak_date: row.get(6)?,
-                available_length: row.get(7)?,
-                track_length: row.get(8)?,
-                quality: row.get(9)?,
-                url: row.get(10)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(ApiError::from)
-    })
-    .await?;
-
-    let body: Vec<JsonValue> = songs.iter().map(plain_song_json).collect();
-    let mut response = json_cached(JsonValue::Array(body));
-    set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);
-    Ok(response)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn search_songs(
-    state: &AppState,
-    query: &str,
-    era_id: Option<i64>,
-    era_from_id: Option<i64>,
-    era_to_id: Option<i64>,
-    quality_filter: Option<String>,
-    availability_filter: Option<String>,
-    playable_filter: Option<bool>,
-    params: &HashMap<String, String>,
-) -> Result<Response, ApiError> {
-    let requested_limit =
-        pagination_value(params.get("limit").map(String::as_str), 50, 50, "limit")?;
-    let order_by = sort_order_by(sort_value(params.get("sort").map(String::as_str))?);
-
-    // `eraPosition` must be the song's index inside its *unfiltered* era: the web
-    // client turns it into a page number for `/eras/{id}?page=N#song-{id}`. A
-    // window function in the outer query numbers only the filtered rows, which
-    // sent deep links to the wrong page whenever a query or filter was set.
-    //
-    // Expressing it as a window function over the whole catalog and joining that
-    // back in is correct but quadratic: SQLite materialises the CTE without an
-    // index and rescans it for every candidate row (`SCAN era_positions
-    // LEFT-JOIN`), which cost ~3s on a 9.5k-song catalog — on the query the home
-    // page runs on every render. Counting the era rows up to this song's id is
-    // the same number, and `songs_catalog_era_id_index` answers it as an index
-    // range scan, so the whole statement is linear instead.
-    let mut sql = String::from(
-        "SELECT songs.id, songs.era, songs.name, songs.notes, songs.quality, songs.available_length, \
-         eras.name, eras.dominant_color, files.filename, \
-         (SELECT count(*) FROM songs era_positions WHERE era_positions.era = songs.era \
-          AND era_positions.catalog_id = 'unreleased' AND era_positions.id <= songs.id) AS position, \
-         songs.leak_date \
-         FROM songs LEFT JOIN eras ON songs.era = eras.id LEFT JOIN files ON songs.url = files.url \
-         WHERE songs.catalog_id = 'unreleased'",
-    );
-    let mut values: Vec<Value> = Vec::new();
-    if !query.is_empty() {
-        sql.push_str(
-            " AND instr(lower(replace(replace(coalesce(songs.name,'') || ' ' || coalesce(songs.notes,'') || ' ' || \
-             coalesce(eras.name,'') || ' ' || coalesce(songs.quality,'') || ' ' || coalesce(songs.available_length,''), \
-             char(13), ' '), char(10), ' ')), ?) > 0",
-        );
-        values.push(Value::Text(query.to_string()));
-    }
-    if let Some(era_id) = era_id {
-        sql.push_str(" AND songs.era = ?");
-        values.push(Value::Integer(era_id));
-    }
-    if let Some(era_from_id) = era_from_id {
-        sql.push_str(" AND songs.era >= ?");
-        values.push(Value::Integer(era_from_id));
-    }
-    if let Some(era_to_id) = era_to_id {
-        sql.push_str(" AND songs.era <= ?");
-        values.push(Value::Integer(era_to_id));
-    }
-    if let Some(quality) = &quality_filter {
-        sql.push_str(" AND songs.quality = ?");
-        values.push(Value::Text(quality.clone()));
-    }
-    if let Some(availability) = &availability_filter {
-        sql.push_str(" AND songs.available_length = ?");
-        values.push(Value::Text(availability.clone()));
-    }
-    // Shapes the candidate window; the relevance ranking below still decides the
-    // final order whenever a query is present.
-    sql.push_str(" ORDER BY ");
-    sql.push_str(&order_by);
-    sql.push_str(" LIMIT 1000");
-
-    let rows = db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare(&sql)?;
-        let mapped = statement.query_map(params_from_iter(values), |row| {
-            let filename: Option<String> = row.get(8)?;
-            Ok(SearchSong {
-                id: row.get(0)?,
-                era_id: row.get(1)?,
-                name: row.get(2)?,
-                notes: row.get(3)?,
-                quality: row.get(4)?,
-                available_length: row.get(5)?,
-                era_name: row.get(6)?,
-                dominant_color: row.get(7)?,
-                era_position: row.get(9)?,
-                leak_date: row.get(10)?,
-                playable: false,
-                filename,
-            })
-        })?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ApiError::from)
-    })
-    .await?;
-
-    let mut matches: Vec<SearchSong> = Vec::with_capacity(rows.len());
-    for mut song in rows {
-        song.playable = state
+    /// Whether `/songs/{id}/stream` can serve the song: its file was
+    /// downloaded and is still on disk.
+    fn playable(&self, state: &AppState) -> bool {
+        state
             .playable
-            .resolve_playable(&state.config.songs_path, song.filename.as_deref())
-            .await;
-        if playable_filter
-            .map(|wanted| song.playable == wanted)
-            .unwrap_or(true)
-        {
-            matches.push(song);
+            .resolve_playable_blocking(&state.config.songs_path, self.filename.as_deref())
+    }
+
+    /// Where the song's audio stands (see the `DownloadState` type). A link
+    /// this server doesn't download — an unsupported host, a host disabled by
+    /// the configuration (`YOUTUBE_DOWNLOAD=false`), or a song without audio
+    /// anywhere — is `unsupported` rather than waiting forever as `pending`.
+    fn download_state(&self, playable: bool, policy: DownloadPolicy) -> &'static str {
+        if playable {
+            return "downloaded";
+        }
+        let Some(url) = self.url() else {
+            return "none";
+        };
+        if self.quality.as_deref() == Some(NOT_AVAILABLE) || !policy.downloads(url) {
+            return "unsupported";
+        }
+        match self.file_status.as_deref() {
+            Some("failed") => "failed",
+            _ => "pending",
         }
     }
 
-    let total = matches.len();
-    let ranked = if query.is_empty() {
-        matches.truncate(requested_limit as usize);
-        matches
-    } else {
-        rank_song_search(matches, query, requested_limit as usize, &state.rank_cache)
-    };
+    /// The contract's `Song` object, as `state` sees it.
+    fn json(&self, state: &AppState) -> Map<String, Value> {
+        self.to_json(self.playable(state), DownloadPolicy::of(&state.config))
+    }
 
-    let songs: Vec<JsonValue> = ranked.iter().map(SearchSong::to_json).collect();
-    let mut response = json_cached(json!({ "songs": songs, "total": total }));
-    set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);
-    Ok(response)
+    /// The contract's `Song` object.
+    fn to_json(&self, playable: bool, policy: DownloadPolicy) -> Map<String, Value> {
+        let name = self.name.clone().unwrap_or_default();
+        let title = self
+            .title
+            .clone()
+            .unwrap_or_else(|| text::first_line(&name).to_string());
+        let links = json_array(self.links.as_deref())
+            .unwrap_or_else(|| self.url().map(|url| json!([url])).unwrap_or(json!([])));
+        let (file_date, file_date_precision) =
+            dated(self.file_date, self.file_date_precision.as_deref());
+        let (leak_date, leak_date_precision) =
+            dated(self.leak_date, self.leak_date_precision.as_deref());
+        let duration = self
+            .duration
+            .filter(|duration| playable && duration.is_finite() && *duration > 0.0)
+            .map_or(Value::Null, js_float);
+
+        let mut song = Map::new();
+        song.insert("id".into(), json!(self.id));
+        song.insert("eraId".into(), json!(self.era_id));
+        song.insert("eraPosition".into(), json!(self.era_position.unwrap_or(1)));
+        song.insert("catalogId".into(), json!(self.catalog_id));
+        song.insert("name".into(), json!(name));
+        song.insert("title".into(), json!(title));
+        song.insert("subEra".into(), json!(self.sub_era));
+        song.insert(
+            "notes".into(),
+            json!(self.notes.as_deref().unwrap_or_default()),
+        );
+        song.insert(
+            "notesLinks".into(),
+            json_array(self.notes_links.as_deref()).unwrap_or(json!([])),
+        );
+        song.insert("fileDate".into(), file_date);
+        song.insert("fileDatePrecision".into(), file_date_precision);
+        song.insert("leakDate".into(), leak_date);
+        song.insert("leakDatePrecision".into(), leak_date_precision);
+        song.insert("availableLength".into(), json!(self.available_length));
+        song.insert("trackLength".into(), json!(self.track_length));
+        song.insert(
+            "trackLengthApprox".into(),
+            json!(self.track_length_approx.unwrap_or(0) != 0),
+        );
+        song.insert("quality".into(), json!(self.quality));
+        song.insert("url".into(), json!(self.url()));
+        song.insert("links".into(), links);
+        song.insert(
+            "downloadState".into(),
+            json!(self.download_state(playable, policy)),
+        );
+        song.insert("playable".into(), json!(playable));
+        song.insert("duration".into(), duration);
+        song
+    }
+}
+
+/// A stored JSON array (`links`, `notes_links`); `None` when missing or not
+/// an array.
+fn json_array(text: Option<&str>) -> Option<Value> {
+    serde_json::from_str::<Value>(text?)
+        .ok()
+        .filter(Value::is_array)
+}
+
+/// A date and its precision; the precision is null exactly when the date is.
+fn dated(date: Option<i64>, precision: Option<&str>) -> (Value, Value) {
+    match date {
+        None => (Value::Null, Value::Null),
+        Some(date) => {
+            let precision = precision
+                .filter(|precision| matches!(*precision, "day" | "month" | "year"))
+                .unwrap_or("day");
+            (json!(date), json!(precision))
+        }
+    }
+}
+
+/// `eras.dominant_color` if it is six hex digits, else [`DEFAULT_COLOR`].
+pub(super) fn dominant_color(value: Option<&str>) -> String {
+    value
+        .filter(|color| color.len() == 6 && color.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or(DEFAULT_COLOR)
+        .to_string()
+}
+
+/// A full-row query → the song payloads, in row order.
+fn songs_json(state: &AppState, rows: &[SongRow]) -> Vec<Value> {
+    rows.iter()
+        .map(|row| Value::Object(row.json(state)))
+        .collect()
 }
 
 pub async fn get_song(
     State(state): State<SharedState>,
-    Path(id): Path<String>,
+    SongId(id): SongId,
 ) -> Result<Response, ApiError> {
-    let id = positive_integer(Some(&id), "song id")?;
-
+    let shared = state.clone();
     let song = db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare(
-            "SELECT id, era, catalog_id, name, notes, file_date, leak_date, available_length, track_length, quality, url \
-             FROM songs WHERE id = ?1 LIMIT 1",
-        )?;
-        let mut rows = statement.query_map([id], |row| {
-            Ok(PlainSong {
-                id: row.get(0)?,
-                era: row.get(1)?,
-                catalog_id: row.get(2)?,
-                name: row.get(3)?,
-                notes: row.get(4)?,
-                file_date: row.get(5)?,
-                leak_date: row.get(6)?,
-                available_length: row.get(7)?,
-                track_length: row.get(8)?,
-                quality: row.get(9)?,
-                url: row.get(10)?,
-            })
-        })?;
+        let sql = format!("SELECT {SONG_COLUMNS} FROM {SONG_SOURCE} WHERE s.id = ?1");
+        let mut statement = conn.prepare_cached(&sql)?;
+        let mut rows = statement.query_map([id], SongRow::read)?;
         match rows.next() {
-            Some(row) => row.map(Some).map_err(ApiError::from),
+            Some(row) => Ok(Some(row?.json(&shared))),
             None => Ok(None),
         }
     })
     .await?;
-
-    let Some(song) = song else {
-        return Err(ApiError::not_found("Song not found"));
-    };
-    let mut response = json_cached(plain_song_json(&song));
-    set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);
-    Ok(response)
+    match song {
+        Some(song) => Ok(json_cached(Value::Object(song))),
+        None => Err(ApiError::not_found("Song not found")),
+    }
 }
 
-/// A song row for a paginated era listing.
-struct ScopedSong {
-    id: i64,
-    era: Option<i64>,
-    catalog_id: Option<String>,
-    name: Option<String>,
-    notes: Option<String>,
-    file_date: Option<i64>,
-    leak_date: Option<i64>,
-    available_length: Option<String>,
-    track_length: Option<i64>,
-    quality: Option<String>,
-    url: Option<String>,
-    downloaded: Option<i64>,
-    filename: Option<String>,
-    file_duration: Option<f64>,
-    total: i64,
+/// What `q` asks for: the folded text to match, and the category markers it
+/// contains (`⭐`, `🗑️`, with or without a variation selector), which filter
+/// like `category` does. A `q` with neither (`???`) is treated as blank.
+#[derive(Debug, Default)]
+struct SearchInput {
+    /// `None` when nothing searchable is left after folding.
+    text: Option<SearchQuery>,
+    markers: Vec<&'static str>,
 }
 
-pub async fn paginated_songs(
-    state: &AppState,
-    era_id: i64,
-    params: &HashMap<String, String>,
-) -> Result<Response, ApiError> {
-    let normalized_query = params
-        .get("q")
-        .map(|value| text::collapse_whitespace(value))
-        .unwrap_or_default();
-    if !normalized_query.is_empty() && text::utf16_len(&normalized_query) > 100 {
-        return Err(ApiError::bad_request("Search query is too long"));
-    }
-    let requested_limit =
-        pagination_value(params.get("limit").map(String::as_str), 100, 500, "limit")?;
-    let requested_offset = pagination_value(
-        params.get("offset").map(String::as_str),
-        0,
-        10_000,
-        "offset",
-    )?;
-    let order_by = sort_order_by(sort_value(params.get("sort").map(String::as_str))?);
-    let category_filter = params.get("category").map(|value| value.trim()).filter(|value| !value.is_empty());
-    let category_emoji_value = match category_filter {
-        Some(id) => match category_emoji(id) {
-            Some(emoji) => Some(emoji),
-            None => return Err(ApiError::bad_request("Invalid category filter")),
-        },
-        None => None,
-    };
-
-    let mut sql = String::from(
-        "SELECT songs.id, songs.era, songs.catalog_id, songs.name, songs.notes, songs.file_date, songs.leak_date, \
-         songs.available_length, songs.track_length, songs.quality, songs.url, \
-         files.downloaded, files.filename, files.duration, count(*) OVER() AS total \
-         FROM songs LEFT JOIN files ON songs.url = files.url WHERE ",
-    );
-    let mut values: Vec<Value> = Vec::new();
-    sql.push_str("songs.era = ? AND songs.catalog_id = 'unreleased'");
-    values.push(Value::Integer(era_id));
-    if !normalized_query.is_empty() {
-        let pattern = format!(
-            "%{}%",
-            escape_like_pattern(&normalized_query.to_lowercase())
-        );
-        sql.push_str(
-            " AND (lower(coalesce(songs.name,'')) LIKE ? ESCAPE '\\' \
-             OR lower(coalesce(songs.notes,'')) LIKE ? ESCAPE '\\' \
-             OR lower(coalesce(songs.quality,'')) LIKE ? ESCAPE '\\' \
-             OR lower(coalesce(songs.available_length,'')) LIKE ? ESCAPE '\\')",
-        );
-        for _ in 0..4 {
-            values.push(Value::Text(pattern.clone()));
-        }
-    }
-    if let Some(emoji) = category_emoji_value {
-        sql.push_str(" AND instr(coalesce(songs.name, ''), ?) > 0");
-        values.push(Value::Text(emoji.to_string()));
-    }
-    sql.push_str(" ORDER BY ");
-    sql.push_str(&order_by);
-    sql.push_str(" LIMIT ? OFFSET ?");
-    values.push(Value::Integer(requested_limit));
-    values.push(Value::Integer(requested_offset));
-
-    let songs = db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare(&sql)?;
-        let mapped = statement.query_map(params_from_iter(values), |row| {
-            Ok(ScopedSong {
-                id: row.get(0)?,
-                era: row.get(1)?,
-                catalog_id: row.get(2)?,
-                name: row.get(3)?,
-                notes: row.get(4)?,
-                file_date: row.get(5)?,
-                leak_date: row.get(6)?,
-                available_length: row.get(7)?,
-                track_length: row.get(8)?,
-                quality: row.get(9)?,
-                url: row.get(10)?,
-                downloaded: row.get(11)?,
-                filename: row.get(12)?,
-                file_duration: row.get(13)?,
-                total: row.get(14)?,
-            })
-        })?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ApiError::from)
-    })
-    .await?;
-
-    let total = songs.first().map(|song| song.total).unwrap_or(0);
-    let mut body: Vec<JsonValue> = Vec::with_capacity(songs.len());
-    for song in &songs {
-        let playable = state
-            .playable
-            .resolve_playable(&state.config.songs_path, song.filename.as_deref())
-            .await;
-        let duration = if playable {
-            song.file_duration.map(js_float).unwrap_or(JsonValue::Null)
-        } else {
-            JsonValue::Null
+impl SearchInput {
+    fn parse(params: &Params) -> Result<Self, ApiError> {
+        let Some(query) = search_query(params.get("q"))? else {
+            return Ok(Self::default());
         };
-        body.push(json!({
-            "id": song.id,
-            "eraId": song.era,
-            "catalogId": song.catalog_id,
-            "name": song.name,
-            "notes": song.notes,
-            "fileDate": song.file_date,
-            "leakDate": song.leak_date,
-            "availableLength": song.available_length,
-            "trackLength": song.track_length,
-            "quality": song.quality,
-            "url": song.url,
-            "downloaded": song.downloaded,
-            "playable": playable,
-            "duration": duration,
-        }));
-    }
-
-    let mut response = json_cached(JsonValue::Array(body));
-    set_header(&mut response, header::CACHE_CONTROL, JSON_CACHE);
-    set_header(
-        &mut response,
-        header::HeaderName::from_static("x-total-count"),
-        &total.to_string(),
-    );
-    Ok(response)
-}
-
-struct SongFile {
-    name: Option<String>,
-    filename: Option<String>,
-    url: Option<String>,
-    duration: Option<f64>,
-}
-
-async fn lookup_song_file(state: &AppState, song_id: i64) -> Result<Option<SongFile>, ApiError> {
-    db::call(&state.pool, move |conn| {
-        let mut statement = conn.prepare(
-            "SELECT songs.name, files.filename, files.url, files.duration FROM songs \
-             LEFT JOIN files ON songs.url = files.url WHERE songs.id = ?1 LIMIT 1",
-        )?;
-        let mut rows = statement.query_map([song_id], |row| {
-            Ok(SongFile {
-                name: row.get(0)?,
-                filename: row.get(1)?,
-                url: row.get(2)?,
-                duration: row.get(3)?,
-            })
-        })?;
-        match rows.next() {
-            Some(row) => row.map(Some).map_err(ApiError::from),
-            None => Ok(None),
-        }
-    })
-    .await
-}
-
-/// Resolves size/mtime for `filename`, replicating the empty/missing cleanup.
-async fn resolve_file_meta(
-    state: &AppState,
-    path: &std::path::Path,
-    filename: &str,
-    url: Option<&str>,
-) -> Result<(u64, i64), ApiError> {
-    if let Some(meta) = state.playable.get_meta(filename) {
-        if meta.size == 0 {
-            delete_invalid_file(state, filename, url, InvalidReason::Empty).await;
-            return Err(ApiError::not_found("Song file not found"));
-        }
-        return Ok((meta.size, meta.mtime_ms));
-    }
-
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) => {
-            if !metadata.is_file() || metadata.len() == 0 {
-                delete_invalid_file(state, filename, url, InvalidReason::Empty).await;
-                return Err(ApiError::not_found("Song file not found"));
-            }
-            Ok((metadata.len(), mtime_ms_of(&metadata)))
-        }
-        Err(error) => {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                delete_invalid_file(state, filename, url, InvalidReason::Missing).await;
-            }
-            Err(ApiError::not_found("Song file not found"))
-        }
-    }
-}
-
-fn file_etag(size: u64, mtime_ms: i64) -> String {
-    format!("\"{size:x}-{mtime_ms:x}\"")
-}
-
-fn mime_for(filename: &str) -> &'static str {
-    let extension = std::path::Path::new(filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default();
-    match extension.as_str() {
-        "mp3" => "audio/mpeg",
-        "opus" => "audio/opus",
-        "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        "aif" | "aiff" => "audio/aiff",
-        "m4a" => "audio/mp4",
-        "aac" => "audio/aac",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        _ => "application/octet-stream",
-    }
-}
-
-pub async fn stream_song(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let quality = params
-        .get("quality")
-        .map(String::as_str)
-        .filter(|value| !value.is_empty());
-    let song_id = positive_integer(Some(&id), "song id")?;
-
-    let song = lookup_song_file(&state, song_id).await?;
-    let Some(song) = song else {
-        return Err(ApiError::not_found("Song not found"));
-    };
-    let Some(filename) = song.filename.clone() else {
-        return Err(ApiError::internal("Could not find file for song"));
-    };
-
-    let path = stored_song_path(&state.config.songs_path, &filename)?;
-    if song.duration == Some(0.0) {
-        delete_invalid_file(
-            &state,
-            &filename,
-            song.url.as_deref(),
-            InvalidReason::NoDuration,
-        )
-        .await;
-        return Err(ApiError::not_found("Song file not found"));
-    }
-
-    let (file_size, mtime_ms) =
-        resolve_file_meta(&state, &path, &filename, song.url.as_deref()).await?;
-    let etag = file_etag(file_size, mtime_ms);
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        == Some(etag.as_str())
-        && quality.is_none()
-    {
-        return Ok(super::empty(StatusCode::NOT_MODIFIED));
-    }
-
-    if let Some(quality) = quality {
-        return stream_transcoded(state, path, quality, filename, song.url);
-    }
-
-    let mut response = super::empty(StatusCode::OK);
-    set_header(&mut response, header::CONTENT_TYPE, mime_for(&filename));
-    set_header(&mut response, header::ETAG, &etag);
-    set_header(&mut response, header::CACHE_CONTROL, MEDIA_CACHE);
-    set_header(&mut response, header::ACCEPT_RANGES, "bytes");
-
-    if let Some(range_header) = headers
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-    {
-        let if_range = headers
-            .get(header::IF_RANGE)
-            .and_then(|value| value.to_str().ok());
-        if let Some(if_range) = if_range {
-            if if_range != etag {
-                return full_file_response(&path, file_size, response).await;
-            }
-        }
-        return range_file_response(&path, file_size, range_header, response).await;
-    }
-
-    full_file_response(&path, file_size, response).await
-}
-
-async fn full_file_response(
-    path: &std::path::Path,
-    file_size: u64,
-    mut response: Response,
-) -> Result<Response, ApiError> {
-    set_header(
-        &mut response,
-        header::CONTENT_LENGTH,
-        &file_size.to_string(),
-    );
-    let body = file_body(path, None).await.map_err(|error| {
-        eprintln!("failed to stream song {error}");
-        ApiError::internal("Could not stream song")
-    })?;
-    *response.body_mut() = body;
-    Ok(response)
-}
-
-async fn range_file_response(
-    path: &std::path::Path,
-    file_size: u64,
-    range_header: &str,
-    mut response: Response,
-) -> Result<Response, ApiError> {
-    let Some(range) = parse_range(range_header, file_size) else {
-        set_header(
-            &mut response,
-            header::CONTENT_RANGE,
-            &format!("bytes */{file_size}"),
-        );
-        *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
-        // An unknown-length (chunked) empty body matches Hono, whose 416 has no
-        // `Content-Length`; a known empty body would gain `content-length: 0`.
-        *response.body_mut() =
-            Body::from_stream(futures_util::stream::empty::<Result<Bytes, std::io::Error>>());
-        return Ok(response);
-    };
-
-    set_header(
-        &mut response,
-        header::CONTENT_RANGE,
-        &format!("bytes {}-{}/{file_size}", range.start, range.end),
-    );
-    set_header(
-        &mut response,
-        header::CONTENT_LENGTH,
-        &(range.end - range.start + 1).to_string(),
-    );
-    *response.status_mut() = StatusCode::PARTIAL_CONTENT;
-    let body = file_body(path, Some(range)).await.map_err(|error| {
-        eprintln!("failed to stream song {error}");
-        ApiError::internal("Could not stream song")
-    })?;
-    *response.body_mut() = body;
-    Ok(response)
-}
-
-fn stream_transcoded(
-    state: SharedState,
-    path: PathBuf,
-    quality: &str,
-    filename: String,
-    url: Option<String>,
-) -> Result<Response, ApiError> {
-    if !is_ascii_digits(quality) {
-        return Err(ApiError::bad_request("Invalid quality for file"));
-    }
-    let parsed: i64 = quality
-        .parse()
-        .map_err(|_| ApiError::bad_request("Invalid quality for file"))?;
-    if !(8..=320).contains(&parsed) {
-        return Err(ApiError::bad_request("Invalid quality for file"));
-    }
-
-    let permit = match state.transcode_slots.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            let mut response = (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Transcoding capacity reached; try again shortly",
-            )
-                .into_response();
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static("text/plain;charset=UTF-8"),
-            );
-            set_header(&mut response, header::RETRY_AFTER, "5");
-            return Ok(response);
-        }
-    };
-
-    let body = transcode_body(state, permit, path, format!("{parsed}k"), filename, url);
-
-    let mut response = super::empty(StatusCode::OK);
-    set_header(&mut response, header::CONTENT_TYPE, "audio/opus");
-    set_header(&mut response, header::ACCEPT_RANGES, "none");
-    set_header(&mut response, header::CACHE_CONTROL, "no-store");
-    *response.body_mut() = body;
-    Ok(response)
-}
-
-fn transcode_body(
-    state: SharedState,
-    permit: OwnedSemaphorePermit,
-    path: PathBuf,
-    quality: String,
-    filename: String,
-    url: Option<String>,
-) -> Body {
-    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
-
-    tokio::spawn(async move {
-        let _permit = permit;
-        let mut command = tokio::process::Command::new("ffmpeg");
-        command
-            .arg("-i")
-            .arg(&path)
-            .args(["-map_metadata", "0", "-f", "ogg", "-c:a", "libopus", "-b:a"])
-            .arg(&quality)
-            .arg("pipe:1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                eprintln!("failed to transcode song {error}");
-                let _ = sender
-                    .send(Err(std::io::Error::other(error.to_string())))
-                    .await;
-                return;
-            }
-        };
-
-        let mut stdout = child.stdout.take().expect("ffmpeg stdout is piped");
-        let mut buffer = vec![0u8; 64 * 1024];
-        let mut client_gone = false;
-        let mut errored = false;
-        loop {
-            match stdout.read(&mut buffer).await {
-                Ok(0) => break,
-                Ok(read) => {
-                    if sender
-                        .send(Ok(Bytes::copy_from_slice(&buffer[..read])))
-                        .await
-                        .is_err()
-                    {
-                        client_gone = true;
-                        let _ = child.kill().await;
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(error)).await;
-                    errored = true;
-                    break;
-                }
-            }
-        }
-
-        if let Ok(status) = child.wait().await {
-            if !status.success() && !client_gone {
-                // Surface a failed transcode as a broken body (Hono destroys the
-                // converter output with the error) instead of a clean truncated 200.
-                if !errored {
-                    let _ = sender
-                        .send(Err(std::io::Error::other("transcode failed")))
-                        .await;
-                }
-                let probe = probe_audio_file(&state, &filename).await;
-                if !probe.valid {
-                    delete_invalid_file(
-                        &state,
-                        &filename,
-                        url.as_deref(),
-                        probe.reason.unwrap_or(InvalidReason::Unreadable),
-                    )
-                    .await;
-                }
-            }
-        }
-    });
-
-    let body_stream = stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|item| (item, receiver))
-    });
-    Body::from_stream(body_stream)
-}
-
-fn download_name(name: Option<&str>, id: i64, extension: &str) -> String {
-    let fallback = format!("song-{id}");
-    let source = name.unwrap_or(&fallback);
-
-    let mut replaced = String::with_capacity(source.len());
-    for character in source.chars() {
-        if character.is_control()
-            || matches!(
-                character,
-                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-            )
-        {
-            replaced.push(' ');
-        } else {
-            replaced.push(character);
-        }
-    }
-    let collapsed = text::collapse_whitespace(&replaced);
-    let truncated: String = collapsed.chars().take(120).collect();
-    let safe_name = if truncated.is_empty() {
-        fallback
-    } else {
-        truncated
-    };
-    format!("{safe_name}{extension}")
-}
-
-fn encode_header_filename(filename: &str) -> String {
-    let mut encoded = String::with_capacity(filename.len());
-    for character in filename.chars() {
-        let unreserved = character.is_ascii_alphanumeric()
-            || matches!(
-                character,
-                '-' | '_' | '.' | '~' | '!' | '*' | '\'' | '(' | ')'
-            );
-        if unreserved {
-            encoded.push(character);
-        } else {
-            let mut buffer = [0u8; 4];
-            for byte in character.encode_utf8(&mut buffer).bytes() {
-                encoded.push_str(&format!("%{byte:02X}"));
-            }
-        }
-    }
-    encoded
-        .replace('!', "%21")
-        .replace('\'', "%27")
-        .replace('(', "%28")
-        .replace(')', "%29")
-        .replace('*', "%2A")
-}
-
-pub async fn download_song(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let song_id = positive_integer(Some(&id), "song id")?;
-
-    let song = lookup_song_file(&state, song_id).await?;
-    let Some(song) = song else {
-        return Err(ApiError::not_found("Song not found"));
-    };
-    let Some(filename) = song.filename.clone() else {
-        return Err(ApiError::not_found("Song file not found"));
-    };
-
-    let path = stored_song_path(&state.config.songs_path, &filename)?;
-    if song.duration == Some(0.0) {
-        delete_invalid_file(
-            &state,
-            &filename,
-            song.url.as_deref(),
-            InvalidReason::NoDuration,
-        )
-        .await;
-        return Err(ApiError::not_found("Song file not found"));
-    }
-
-    let (file_size, mtime_ms) =
-        resolve_file_meta(&state, &path, &filename, song.url.as_deref()).await?;
-    let etag = file_etag(file_size, mtime_ms);
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        == Some(etag.as_str())
-    {
-        return Ok(super::empty(StatusCode::NOT_MODIFIED));
-    }
-
-    let extension = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| format!(".{value}"))
-        .unwrap_or_default();
-    let name = download_name(song.name.as_deref(), song_id, &extension);
-
-    let disposition = format!(
-        "attachment; filename=\"song-{song_id}{extension}\"; filename*=UTF-8''{}",
-        encode_header_filename(&name)
-    );
-
-    let mut response = super::empty(StatusCode::OK);
-    set_header(
-        &mut response,
-        header::CONTENT_TYPE,
-        "application/octet-stream",
-    );
-    set_header(&mut response, header::ETAG, &etag);
-    set_header(&mut response, header::ACCEPT_RANGES, "bytes");
-    set_header(&mut response, header::CACHE_CONTROL, MEDIA_CACHE);
-    set_header(&mut response, header::CONTENT_DISPOSITION, &disposition);
-
-    if let Some(range_header) = headers
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-    {
-        let if_range = headers
-            .get(header::IF_RANGE)
-            .and_then(|value| value.to_str().ok());
-        if if_range.is_none() || if_range == Some(etag.as_str()) {
-            if let Some(range) = parse_range(range_header, file_size) {
-                set_header(
-                    &mut response,
-                    header::CONTENT_RANGE,
-                    &format!("bytes {}-{}/{file_size}", range.start, range.end),
-                );
-                set_header(
-                    &mut response,
-                    header::CONTENT_LENGTH,
-                    &(range.end - range.start + 1).to_string(),
-                );
-                *response.status_mut() = StatusCode::PARTIAL_CONTENT;
-                let body = file_body(&path, Some(range)).await.map_err(|error| {
-                    eprintln!("failed to stream song {error}");
-                    ApiError::internal("Could not stream song")
-                })?;
-                *response.body_mut() = body;
-                return Ok(response);
-            }
-        }
-    }
-
-    full_file_response(&path, file_size, response).await
-}
-
-pub async fn get_song_duration(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Result<Response, ApiError> {
-    let song_id = positive_integer(Some(&id), "song id")?;
-
-    let song = lookup_song_file(&state, song_id).await?;
-    let Some(song) = song else {
-        return Err(ApiError::not_found("Song not found"));
-    };
-    let Some(filename) = song.filename.clone() else {
-        return Err(ApiError::not_found("Could not find file for song"));
-    };
-
-    if let Some(duration) = song.duration {
-        if duration == 0.0 {
-            delete_invalid_file(
-                &state,
-                &filename,
-                song.url.as_deref(),
-                InvalidReason::NoDuration,
-            )
-            .await;
-            return Err(ApiError::unprocessable("Could not determine file duration"));
-        }
-        let mut response = json_cached(json!({ "duration": js_float(duration) }));
-        set_header(&mut response, header::CACHE_CONTROL, DURATION_CACHE);
-        return Ok(response);
-    }
-
-    let path = stored_song_path(&state.config.songs_path, &filename)?;
-    let mtime_ms = match tokio::fs::metadata(&path).await {
-        Ok(metadata) => {
-            if !metadata.is_file() {
-                return Err(ApiError::not_found("Song file not found"));
-            }
-            mtime_ms_of(&metadata)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::not_found("Song file not found"));
-        }
-        Err(error) => {
-            eprintln!("failed to read song duration {error}");
-            return Err(ApiError::internal("Could not determine file duration"));
-        }
-    };
-
-    let duration = match get_duration(&state, &path, Some(mtime_ms)).await {
-        Ok(Some(duration)) => duration,
-        Ok(None) => {
-            delete_invalid_file(
-                &state,
-                &filename,
-                song.url.as_deref(),
-                InvalidReason::NoDuration,
-            )
-            .await;
-            return Err(ApiError::unprocessable("Could not determine file duration"));
-        }
-        Err(ProbeError::BinaryMissing) => {
-            return Err(ApiError::not_found("Song file not found"));
-        }
-        Err(ProbeError::Exit(_)) => {
-            if song.url.is_some() {
-                delete_invalid_file(
-                    &state,
-                    &filename,
-                    song.url.as_deref(),
-                    InvalidReason::Unreadable,
-                )
-                .await;
-                return Err(ApiError::unprocessable("Could not determine file duration"));
-            }
-            eprintln!("failed to read song duration ffprobe exited non-zero");
-            return Err(ApiError::internal("Could not determine file duration"));
-        }
-        Err(error) => {
-            eprintln!("failed to read song duration {error:?}");
-            return Err(ApiError::internal("Could not determine file duration"));
-        }
-    };
-
-    if let Some(url) = song.url.clone() {
-        db::call(&state.pool, move |conn| {
-            conn.execute(
-                "UPDATE files SET duration = ?1 WHERE url = ?2",
-                rusqlite::params![duration, url],
-            )?;
-            Ok(())
+        let markers = SONG_CATEGORIES
+            .iter()
+            .filter(|category| query.contains(category.marker))
+            .map(|category| category.marker)
+            .collect();
+        Ok(Self {
+            text: SearchQuery::new(&query),
+            markers,
         })
-        .await?;
     }
 
-    let mut response = json_cached(json!({ "duration": js_float(duration) }));
-    set_header(&mut response, header::CACHE_CONTROL, DURATION_CACHE);
-    Ok(response)
+    fn is_blank(&self) -> bool {
+        self.text.is_none() && self.markers.is_empty()
+    }
+
+    fn tokens(&self) -> &[String] {
+        self.text.as_ref().map_or(&[], SearchQuery::tokens)
+    }
+
+    /// `markers` (of the `category` filter) plus those of `q`, each once.
+    fn with_markers(&self, mut markers: Vec<&'static str>) -> Vec<&'static str> {
+        for marker in &self.markers {
+            if !markers.contains(marker) {
+                markers.push(marker);
+            }
+        }
+        markers
+    }
+}
+
+/// Whether a request needs a search slot: text searches and pages longer
+/// than [`HEAVY_PAGE`] do; filter-only requests and ordinary pages are cheap.
+fn takes_search_slot(text_search: bool, limit: i64) -> bool {
+    text_search || limit > HEAVY_PAGE
+}
+
+/// One of the `SEARCH_CONCURRENCY` slots, when [`takes_search_slot`]. Waits
+/// at most [`SEARCH_SLOT_WAIT`], then answers 503.
+async fn search_slot(
+    state: &AppState,
+    text_search: bool,
+    limit: i64,
+) -> Result<Option<OwnedSemaphorePermit>, ApiError> {
+    if !takes_search_slot(text_search, limit) {
+        return Ok(None);
+    }
+    match tokio::time::timeout(SEARCH_SLOT_WAIT, state.search_slots.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(Some(permit)),
+        _ => Err(ApiError::busy("Too many searches right now, try again", 2)),
+    }
+}
+
+/// `/eras/{id}/songs`: one page of an era in `sort` order (catalog order by
+/// default), optionally narrowed by `q` (every folded token must occur in the
+/// song's own text; category markers in `q` filter like `category`) and
+/// `category`. `X-Total-Count` is the number of matching songs.
+pub async fn era_songs(
+    state: SharedState,
+    EraId(era_id): EraId,
+    params: &Params,
+) -> Result<Response, ApiError> {
+    let input = SearchInput::parse(params)?;
+    let (default_limit, max_limit) = ERA_PAGE_LIMIT;
+    let limit = limit_value(params.get("limit"), default_limit, max_limit)?;
+    let offset = offset_value(params.get("offset"))?;
+    let sort = sort_value(params.get("sort"))?;
+    let markers = input.with_markers(
+        category_marker(params.get("category"))?
+            .into_iter()
+            .collect(),
+    );
+    let tokens = input.tokens().to_vec();
+
+    let permit = search_slot(&state, !tokens.is_empty(), limit).await?;
+    let shared = state.clone();
+    let (total, songs) = db::call(&state.pool, move |conn| {
+        // Held until the query is done, even if the client goes away.
+        let _permit = permit;
+        let exists = conn
+            .prepare_cached("SELECT 1 FROM eras WHERE id = ?1")?
+            .exists([era_id])?;
+        if !exists {
+            return Err(ApiError::not_found("Era does not exist"));
+        }
+        let mut filter = Filter::catalog();
+        filter.and("s.era = ?", [SqlValue::Integer(era_id)]);
+        filter.matching(OWN_SEARCH_TEXT, &tokens);
+        filter.categories(&markers);
+        let total = filter.count(conn)?;
+        let rows = filter.page(conn, sort, limit, offset)?;
+        Ok((total, songs_json(&shared, &rows)))
+    })
+    .await?;
+    Ok(json_list(Value::Array(songs), total))
+}
+
+/// Search/filter parameters of `/songs`.
+#[derive(Debug, Clone, Default)]
+struct SearchFilters {
+    era: Option<i64>,
+    era_from: Option<i64>,
+    era_to: Option<i64>,
+    quality: Option<String>,
+    available_length: Option<String>,
+    playable: Option<bool>,
+    /// Category markers a song must all carry (`category`, and those in `q`).
+    categories: Vec<&'static str>,
+}
+
+impl SearchFilters {
+    /// Blank values count as absent, like for every other parameter.
+    fn parse(params: &Params) -> Result<Self, ApiError> {
+        let id = |name: &str, label: &str| {
+            params
+                .get(name)
+                .map(|value| positive_integer(Some(value), label))
+                .transpose()
+        };
+        let choice = |name: &str, allowed: &[&str], label: &str| {
+            params
+                .get(name)
+                .map(|value| {
+                    allowed
+                        .contains(&value)
+                        .then(|| value.to_string())
+                        .ok_or_else(|| ApiError::bad_request(format!("Invalid {label} filter")))
+                })
+                .transpose()
+        };
+        let playable = match params.get("playable") {
+            None => None,
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            Some(_) => return Err(ApiError::bad_request("Invalid playable filter")),
+        };
+        Ok(Self {
+            era: id("era", "era filter")?,
+            era_from: id("eraFrom", "starting era filter")?,
+            era_to: id("eraTo", "ending era filter")?,
+            quality: choice("quality", &QUALITY_FILTERS, "quality")?,
+            available_length: choice("availability", &AVAILABILITY_FILTERS, "availability")?,
+            playable,
+            categories: category_marker(params.get("category"))?
+                .into_iter()
+                .collect(),
+        })
+    }
+
+    fn any(&self) -> bool {
+        self.era.is_some()
+            || self.era_from.is_some()
+            || self.era_to.is_some()
+            || self.quality.is_some()
+            || self.available_length.is_some()
+            || self.playable.is_some()
+            || !self.categories.is_empty()
+    }
+}
+
+/// `/songs`: the plain catalog list, or search/filter mode when `q` is not
+/// blank (it has text to match or category markers) or any filter is
+/// present.
+pub async fn list_songs(
+    State(state): State<SharedState>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    let params = Params::parse(query.as_deref(), SONG_LIST_PARAMS)?;
+    let input = SearchInput::parse(&params)?;
+    let filters = SearchFilters::parse(&params)?;
+    if input.is_blank() && !filters.any() {
+        return plain_list(state, &params).await;
+    }
+    search_songs(state, input, filters, &params).await
+}
+
+/// Plain mode: a bare array of songs in `sort` order, with `X-Total-Count`.
+async fn plain_list(state: SharedState, params: &Params) -> Result<Response, ApiError> {
+    let (default_limit, max_limit) = ERA_PAGE_LIMIT;
+    let limit = limit_value(params.get("limit"), default_limit, max_limit)?;
+    let offset = offset_value(params.get("offset"))?;
+    let sort = sort_value(params.get("sort"))?;
+    let permit = search_slot(&state, false, limit).await?;
+    let shared = state.clone();
+    let (total, songs) = db::call(&state.pool, move |conn| {
+        let _permit = permit;
+        let filter = Filter::catalog();
+        let total = filter.count(conn)?;
+        let rows = filter.page(conn, sort, limit, offset)?;
+        Ok((total, songs_json(&shared, &rows)))
+    })
+    .await?;
+    Ok(json_list(Value::Array(songs), total))
+}
+
+/// An era as search results show it.
+struct EraInfo {
+    position: i64,
+    name: String,
+    dominant_color: String,
+    cover_version: Option<String>,
+}
+
+fn load_eras(conn: &Connection) -> Result<HashMap<i64, EraInfo>, ApiError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id, coalesce(position, id), coalesce(name, ''), dominant_color, cover_version \
+         FROM eras",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            EraInfo {
+                position: row.get(1)?,
+                name: row.get(2)?,
+                dominant_color: dominant_color(row.get::<_, Option<String>>(3)?.as_deref()),
+                cover_version: row
+                    .get::<_, Option<String>>(4)?
+                    .filter(|version| !version.is_empty()),
+            },
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// A song matching a search, and its downloaded file if it has one.
+struct Match {
+    id: i64,
+    filename: Option<String>,
+}
+
+/// Search/filter mode: `{songs, total, offset, limit}`. With query tokens
+/// the matches are ranked by relevance (see `rank.rs`), otherwise ordered by
+/// `sort`. `total` counts every match after all filters.
+async fn search_songs(
+    state: SharedState,
+    input: SearchInput,
+    mut filters: SearchFilters,
+    params: &Params,
+) -> Result<Response, ApiError> {
+    let (default_limit, max_limit) = SEARCH_PAGE_LIMIT;
+    let limit = limit_value(params.get("limit"), default_limit, max_limit)?;
+    let offset = offset_value(params.get("offset"))?;
+    let sort = sort_value(params.get("sort"))?;
+    filters.categories = input.with_markers(std::mem::take(&mut filters.categories));
+    let search = input.text;
+
+    let permit = search_slot(&state, search.is_some(), limit).await?;
+    let shared = state.clone();
+    let (total, songs) = db::call(&state.pool, move |conn| {
+        // Held until the query is done, even if the client goes away.
+        let _permit = permit;
+        // One read transaction: the ranking index, the matches and the page
+        // all see the same catalog, even while an import commits.
+        let snapshot = conn.unchecked_transaction()?;
+        let found = run_search(
+            &shared,
+            &snapshot,
+            search.as_ref(),
+            &filters,
+            sort,
+            limit,
+            offset,
+        );
+        snapshot.finish()?;
+        found
+    })
+    .await?;
+    let body = json!({ "songs": songs, "total": total, "offset": offset, "limit": limit });
+    Ok(json_list(body, total))
+}
+
+fn run_search(
+    state: &AppState,
+    conn: &Connection,
+    search: Option<&SearchQuery>,
+    filters: &SearchFilters,
+    sort: SongSort,
+    limit: i64,
+    offset: i64,
+) -> Result<(i64, Vec<Value>), ApiError> {
+    let eras = load_eras(conn)?;
+    let era_position = |id: Option<i64>, label: &str| -> Result<Option<i64>, ApiError> {
+        id.map(|id| {
+            eras.get(&id)
+                .map(|era| era.position)
+                .ok_or_else(|| ApiError::bad_request(format!("Invalid {label}")))
+        })
+        .transpose()
+    };
+    let from = era_position(filters.era_from, "starting era filter")?;
+    let to = era_position(filters.era_to, "ending era filter")?;
+    if let (Some(from), Some(to)) = (from, to)
+        && from > to
+    {
+        return Err(ApiError::bad_request(
+            "Starting era must not be after ending era",
+        ));
+    }
+
+    let mut filter = Filter::catalog();
+    if let Some(tokens) = search.map(SearchQuery::tokens) {
+        filter.matching(SEARCH_TEXT, tokens);
+    }
+    if let Some(era) = filters.era {
+        filter.and("s.era = ?", [SqlValue::Integer(era)]);
+    }
+    if from.is_some() || to.is_some() {
+        filter.and(
+            "s.era IN (SELECT id FROM eras WHERE coalesce(position, id) BETWEEN ? AND ?)",
+            [
+                SqlValue::Integer(from.unwrap_or(i64::MIN)),
+                SqlValue::Integer(to.unwrap_or(i64::MAX)),
+            ],
+        );
+    }
+    if let Some(quality) = &filters.quality {
+        filter.and("s.quality = ?", [SqlValue::Text(quality.clone())]);
+    }
+    if let Some(available_length) = &filters.available_length {
+        filter.and(
+            "s.available_length = ?",
+            [SqlValue::Text(available_length.clone())],
+        );
+    }
+    filter.categories(&filters.categories);
+    if filters.playable == Some(true) {
+        // Only downloaded files can be playable; the disk check follows.
+        filter.and(DOWNLOADED, []);
+    }
+
+    let (total, rows) = if search.is_none() && filters.playable.is_none() {
+        // Plain SQL paging: nothing to rank and nothing to check on disk.
+        (filter.count(conn)?, filter.page(conn, sort, limit, offset)?)
+    } else {
+        let mut matches: Vec<(i64, bool)> =
+            find_matches(conn, &filter, search.is_none().then_some(sort))?
+                .into_iter()
+                .map(|found| {
+                    let playable = state.playable.resolve_playable_blocking(
+                        &state.config.songs_path,
+                        found.filename.as_deref(),
+                    );
+                    (found.id, playable)
+                })
+                .collect();
+        if let Some(wanted) = filters.playable {
+            matches.retain(|(_, playable)| *playable == wanted);
+        }
+        let total = matches.len() as i64;
+        let wanted = usize::try_from(offset + limit).unwrap_or(usize::MAX);
+        let order: Vec<usize> = match search {
+            Some(search) => catalog_index(state, conn)?.rank(search, &matches, wanted),
+            None => (0..matches.len().min(wanted)).collect(),
+        };
+        let page: Vec<i64> = order
+            .into_iter()
+            .skip(offset as usize)
+            .map(|index| matches[index].0)
+            .collect();
+        (total, rows_by_id(conn, &page)?)
+    };
+
+    let songs = rows
+        .iter()
+        .map(|row| {
+            let mut song = row.json(state);
+            let era = row.era_id.and_then(|id| eras.get(&id));
+            song.insert(
+                "eraName".into(),
+                json!(era.map(|era| era.name.as_str()).unwrap_or_default()),
+            );
+            song.insert(
+                "dominantColor".into(),
+                json!(era.map_or(DEFAULT_COLOR, |era| era.dominant_color.as_str())),
+            );
+            let cover_version = era.and_then(|era| era.cover_version.as_deref());
+            song.insert("eraHasCover".into(), json!(cover_version.is_some()));
+            song.insert("eraCoverVersion".into(), json!(cover_version));
+            Value::Object(song)
+        })
+        .collect();
+    Ok((total, songs))
+}
+
+/// Songs whose link has a downloaded file (a membership test against the
+/// few downloaded links is much cheaper than joining `files` for every row).
+pub(super) const DOWNLOADED: &str = "s.url IN (SELECT url FROM files WHERE filename IS NOT NULL)";
+
+/// Every song passing `filter` with its downloaded file, in `sort` order
+/// when given.
+fn find_matches(
+    conn: &Connection,
+    filter: &Filter,
+    sort: Option<SongSort>,
+) -> Result<Vec<Match>, ApiError> {
+    let mut sql = format!(
+        "SELECT s.id, CASE WHEN {DOWNLOADED} THEN (SELECT filename FROM files WHERE url = s.url) END \
+         FROM songs s WHERE {}",
+        filter.sql
+    );
+    if let Some(sort) = sort {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(order_by(sort));
+    }
+    let mut statement = conn.prepare_cached(&sql)?;
+    let rows = statement.query_map(params_from_iter(&filter.values), |row| {
+        Ok(Match {
+            id: row.get(0)?,
+            filename: row.get(1)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The ranking index of the current catalog, rebuilt after an import changed
+/// it (the catalog fingerprint in `meta` is its version).
+fn catalog_index(state: &AppState, conn: &Connection) -> Result<Arc<CatalogIndex>, ApiError> {
+    let version = db::meta_get(conn, meta_keys::LAST_SHEET_SHA256)?;
+    state.rank_cache.index(version.as_deref(), || {
+        let mut index = CatalogIndex::new(version.clone());
+        let mut eras = conn.prepare_cached("SELECT id, coalesce(name, ''), subtitle FROM eras")?;
+        let mut rows = eras.query([])?;
+        while let Some(row) = rows.next()? {
+            index.add_era(
+                row.get(0)?,
+                row.get_ref(1)?.as_str().map_err(rusqlite::Error::from)?,
+                row.get_ref(2)?
+                    .as_str_or_null()
+                    .map_err(rusqlite::Error::from)?,
+            );
+        }
+        let mut songs = conn.prepare_cached(
+            "SELECT id, coalesce(position, id), era, coalesce(name, ''), \
+             coalesce(search_text, ''), sub_era, quality, available_length, \
+             coalesce(category_rank, 4) FROM songs WHERE catalog_id = 'unreleased'",
+        )?;
+        let mut rows = songs.query([])?;
+        while let Some(row) = rows.next()? {
+            let text = |column: usize| -> rusqlite::Result<Option<&str>> {
+                Ok(row.get_ref(column)?.as_str_or_null()?)
+            };
+            index.add_song(
+                row.get(0)?,
+                &SongTexts {
+                    position: row.get(1)?,
+                    era: row.get(2)?,
+                    name: text(3)?.unwrap_or_default(),
+                    search_text: text(4)?.unwrap_or_default(),
+                    sub_era: text(5)?,
+                    quality: text(6)?,
+                    available_length: text(7)?,
+                    category_rank: row.get(8)?,
+                },
+            );
+        }
+        Ok::<_, ApiError>(index)
+    })
+}
+
+/// Full rows for `ids`, in that order.
+fn rows_by_id(conn: &Connection, ids: &[i64]) -> Result<Vec<SongRow>, ApiError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {SONG_COLUMNS} FROM {SONG_SOURCE} \
+         WHERE s.id IN (SELECT value FROM json_each(?1))"
+    );
+    let ids_json = serde_json::to_string(ids).expect("a list of integers serialises");
+    let mut statement = conn.prepare_cached(&sql)?;
+    let rows = statement.query_map([ids_json], SongRow::read)?;
+    let mut by_id: HashMap<i64, SongRow> = HashMap::with_capacity(ids.len());
+    for row in rows {
+        let row = row?;
+        by_id.insert(row.id, row);
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::Query;
+
+    /// Every supported host is downloaded.
+    const EVERYTHING: DownloadPolicy = DownloadPolicy { youtube: true };
+
+    fn params(query: &str) -> Params {
+        Params(Query::parse(Some(query)))
+    }
 
     #[test]
-    fn category_emoji_resolves_known_ids() {
-        assert_eq!(category_emoji("best-of"), Some("⭐"));
-        assert_eq!(category_emoji("worst-of"), Some("🗑"));
-        assert!(category_emoji("bogus").is_none());
+    fn category_filters_resolve_known_ids() {
+        assert_eq!(category_marker(Some("best-of")).unwrap(), Some("⭐"));
+        assert_eq!(category_marker(Some("grails")).unwrap(), Some("🏆"));
+        assert_eq!(category_marker(Some("worst-of")).unwrap(), Some("🗑"));
+        assert_eq!(category_marker(None).unwrap(), None);
+        assert_eq!(
+            category_marker(Some("bogus")).unwrap_err().to_string(),
+            "400 Invalid category filter"
+        );
+    }
+
+    #[test]
+    fn dates_carry_their_precision_or_neither() {
+        assert_eq!(dated(None, Some("day")), (Value::Null, Value::Null));
+        assert_eq!(
+            dated(Some(86400), Some("month")),
+            (json!(86400), json!("month"))
+        );
+        assert_eq!(dated(Some(86400), None), (json!(86400), json!("day")));
+        assert_eq!(dated(Some(0), Some("bogus")), (json!(0), json!("day")));
+    }
+
+    #[test]
+    fn colors_fall_back_to_gray() {
+        assert_eq!(dominant_color(Some("1a2B3c")), "1a2B3c");
+        assert_eq!(dominant_color(Some("#1a2b3c")), DEFAULT_COLOR);
+        assert_eq!(dominant_color(Some("")), DEFAULT_COLOR);
+        assert_eq!(dominant_color(None), DEFAULT_COLOR);
+    }
+
+    fn row(url: Option<&str>, quality: Option<&str>, status: Option<&str>) -> SongRow {
+        SongRow {
+            id: 1,
+            era_id: Some(2),
+            era_position: Some(3),
+            catalog_id: Some("unreleased".into()),
+            name: Some("⭐ Song [V2]\n(feat. X)".into()),
+            title: None,
+            sub_era: None,
+            notes: None,
+            notes_links: Some(r#"[{"text":"a","url":"https://x.test/a"}]"#.into()),
+            file_date: None,
+            file_date_precision: Some("day".into()),
+            leak_date: Some(1_509_494_400),
+            leak_date_precision: Some("month".into()),
+            available_length: Some("Full".into()),
+            track_length: Some(185),
+            track_length_approx: Some(1),
+            quality: quality.map(Into::into),
+            url: url.map(Into::into),
+            links: None,
+            file_status: status.map(Into::into),
+            filename: None,
+            duration: Some(185.25),
+        }
+    }
+
+    #[test]
+    fn download_state_follows_the_link_and_the_file() {
+        let pillows = Some("https://pillows.su/f/abc");
+        let state = |song: SongRow, playable: bool| song.download_state(playable, EVERYTHING);
+        assert_eq!(state(row(None, None, None), false), "none");
+        assert_eq!(state(row(Some(""), None, None), false), "none");
+        assert_eq!(
+            state(row(Some("https://example.com/x"), None, None), false),
+            "unsupported"
+        );
+        assert_eq!(
+            state(row(pillows, Some(NOT_AVAILABLE), Some("pending")), false),
+            "unsupported"
+        );
+        assert_eq!(state(row(pillows, None, None), false), "pending");
+        assert_eq!(
+            state(row(pillows, None, Some("downloaded")), false),
+            "pending"
+        );
+        assert_eq!(state(row(pillows, None, Some("failed")), false), "failed");
+        assert_eq!(
+            state(row(pillows, Some(NOT_AVAILABLE), Some("downloaded")), true),
+            "downloaded"
+        );
+    }
+
+    /// With `YOUTUBE_DOWNLOAD=false` YouTube links are never fetched, so they
+    /// are `unsupported` instead of `pending` forever; other hosts and files
+    /// already on disk are unaffected.
+    #[test]
+    fn disabled_youtube_downloads_are_unsupported() {
+        let no_youtube = DownloadPolicy { youtube: false };
+        for url in [
+            "https://youtu.be/abc",
+            "https://www.youtube.com/watch?v=abc",
+            "https://music.youtube.com/watch?v=abc",
+        ] {
+            for status in [None, Some("pending"), Some("failed")] {
+                let song = row(Some(url), Some("CD Quality"), status);
+                assert_eq!(
+                    song.download_state(false, no_youtube),
+                    "unsupported",
+                    "{url}"
+                );
+                assert_ne!(
+                    song.download_state(false, EVERYTHING),
+                    "unsupported",
+                    "{url}"
+                );
+            }
+            let song = row(Some(url), None, Some("downloaded"));
+            assert_eq!(song.download_state(true, no_youtube), "downloaded");
+        }
+        let pillows = row(Some("https://pillows.su/f/abc"), None, None);
+        assert_eq!(pillows.download_state(false, no_youtube), "pending");
+        let instagram = row(Some("https://www.instagram.com/p/abc/"), None, None);
+        assert_eq!(instagram.download_state(false, no_youtube), "pending");
+    }
+
+    #[test]
+    fn search_input_splits_text_and_category_markers() {
+        let input = SearchInput::parse(&params("q=%E2%AD%90%EF%B8%8F+glory")).unwrap();
+        assert_eq!(input.tokens(), ["glory"]);
+        assert_eq!(input.markers, ["⭐"]);
+
+        // Markers alone filter, with or without a variation selector.
+        for q in ["🗑️", "🗑", " 🗑 ???", "🗑️🤖"] {
+            let input = SearchInput::parse(&params(&format!("q={q}"))).unwrap();
+            assert!(input.text.is_none(), "{q}");
+            assert!(!input.is_blank(), "{q}");
+            assert!(input.markers.contains(&"🗑"), "{q}");
+        }
+        let both = SearchInput::parse(&params("q=🗑️🤖")).unwrap();
+        assert_eq!(both.markers, ["🗑", "🤖"]);
+
+        // Nothing searchable and no marker: the same as no `q` at all.
+        for q in ["???", "%20%20", "-+.", "★", ""] {
+            let input = SearchInput::parse(&params(&format!("q={q}"))).unwrap();
+            assert!(input.is_blank(), "{q:?}");
+            assert!(input.tokens().is_empty());
+        }
+
+        // The `category` filter and the markers of `q` add up, each once.
+        let input = SearchInput::parse(&params("q=⭐+✨")).unwrap();
+        assert_eq!(input.with_markers(vec!["✨"]), ["✨", "⭐"]);
+        assert_eq!(input.with_markers(Vec::new()), ["⭐", "✨"]);
+
+        let long = format!("q={}", "⭐".repeat(101));
+        assert_eq!(
+            SearchInput::parse(&params(&long)).unwrap_err().to_string(),
+            "400 Search query is too long"
+        );
+    }
+
+    #[test]
+    fn only_text_searches_and_big_pages_take_a_search_slot() {
+        assert!(takes_search_slot(true, 1));
+        assert!(takes_search_slot(true, 50));
+        assert!(!takes_search_slot(false, 50));
+        assert!(!takes_search_slot(false, HEAVY_PAGE));
+        assert!(takes_search_slot(false, HEAVY_PAGE + 1));
+        assert!(takes_search_slot(false, 500));
+    }
+
+    /// An in-memory catalog with the columns [`Filter`] reads: two eras'
+    /// worth of songs whose search text includes the era name.
+    fn catalog() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE songs (id INTEGER PRIMARY KEY, catalog_id TEXT, era INTEGER, \
+               position INTEGER, title TEXT, search_text TEXT, song_search_text TEXT, \
+               category_rank INTEGER, sort_title TEXT, leak_date INTEGER, file_date INTEGER);
+             INSERT INTO songs (id, catalog_id, era, position, title, search_text, song_search_text) VALUES
+               (1, 'unreleased', 7, 1, '⭐ Donda [V1]', 'donda v1 donda', 'donda v1'),
+               (2, 'unreleased', 7, 2, 'Jail [V2]', 'jail v2 donda', 'jail v2'),
+               (3, 'unreleased', 7, 3, '🗑️🤖 Jail [V3]', 'jail v3 donda', 'jail v3'),
+               (4, 'unreleased', 7, 4, 'Old Row', 'old row donda', NULL),
+               (5, 'unreleased', 8, 5, '⭐ Donda Chant', 'donda chant graduation', 'donda chant');",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// The ids `filter` selects, in catalog order.
+    fn ids(conn: &Connection, filter: &Filter) -> Vec<i64> {
+        let sql = format!(
+            "SELECT s.id FROM songs s WHERE {} ORDER BY {}",
+            filter.sql,
+            order_by(SongSort::Catalog)
+        );
+        let mut statement = conn.prepare(&sql).unwrap();
+        statement
+            .query_map(params_from_iter(&filter.values), |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn era_lists_match_the_songs_own_text() {
+        let conn = catalog();
+        let tokens = vec!["donda".to_string()];
+
+        // A global search matches the era name too.
+        let mut global = Filter::catalog();
+        global.matching(SEARCH_TEXT, &tokens);
+        assert_eq!(ids(&conn, &global), [1, 2, 3, 4, 5]);
+        assert_eq!(global.count(&conn).unwrap(), 5);
+
+        // An era's list only matches what the songs themselves say; rows
+        // without the column yet fall back to the full text.
+        let mut scoped = Filter::catalog();
+        scoped.and("s.era = ?", [SqlValue::Integer(7)]);
+        scoped.matching(OWN_SEARCH_TEXT, &tokens);
+        assert_eq!(ids(&conn, &scoped), [1, 4]);
+        assert_eq!(scoped.count(&conn).unwrap(), 2);
+    }
+
+    #[test]
+    fn category_markers_combine_with_and() {
+        let conn = catalog();
+        let mut best = Filter::catalog();
+        best.categories(&["⭐"]);
+        assert_eq!(ids(&conn, &best), [1, 5]);
+
+        let mut both = Filter::catalog();
+        both.categories(&["🗑", "🤖"]);
+        assert_eq!(ids(&conn, &both), [3]);
+
+        let mut none = Filter::catalog();
+        none.categories(&["⭐", "🤖"]);
+        assert!(ids(&conn, &none).is_empty());
+    }
+
+    #[test]
+    fn song_payload_has_every_key() {
+        let song = row(Some("https://pillows.su/f/abc"), Some("CD Quality"), None)
+            .to_json(false, EVERYTHING);
+        let keys: Vec<&str> = song.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "eraId",
+                "eraPosition",
+                "catalogId",
+                "name",
+                "title",
+                "subEra",
+                "notes",
+                "notesLinks",
+                "fileDate",
+                "fileDatePrecision",
+                "leakDate",
+                "leakDatePrecision",
+                "availableLength",
+                "trackLength",
+                "trackLengthApprox",
+                "quality",
+                "url",
+                "links",
+                "downloadState",
+                "playable",
+                "duration",
+            ]
+        );
+        assert_eq!(song["title"], "⭐ Song [V2]");
+        assert_eq!(song["notes"], "");
+        assert_eq!(song["notesLinks"][0]["url"], "https://x.test/a");
+        assert_eq!(song["fileDatePrecision"], Value::Null);
+        assert_eq!(song["leakDatePrecision"], "month");
+        assert_eq!(song["trackLengthApprox"], true);
+        assert_eq!(song["links"], json!(["https://pillows.su/f/abc"]));
+        assert_eq!(song["duration"], Value::Null, "no duration without a file");
+        assert_eq!(
+            row(None, None, None).to_json(true, EVERYTHING)["duration"],
+            json!(185.25)
+        );
     }
 }

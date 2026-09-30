@@ -2,19 +2,25 @@
   "name": "yetracker-viewer",
   "private": true,
   "packageManager": "pnpm@11.5.1+sha512.93f7b57422ea7068257235b4c16eb60762eb68e1dc23723199cc739043ea9be2c4143274a399d8c6defa2b1176226d9ca1c4b63482d6200c1a8fbaa78c1d1485",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "dev": "pnpm --filter web dev",
     "dev:web": "pnpm --filter web dev",
-    "build": "pnpm -r --recursive build",
+    "dev:api": "cargo run --manifest-path apps/api-rs/Cargo.toml",
+    "build": "pnpm -r build",
     "start:api": "cargo run --release --manifest-path apps/api-rs/Cargo.toml",
     "start:web": "pnpm --filter web start",
-    "test:contract": "node --test apps/api-rs/tests/",
-    "typecheck": "pnpm -r --recursive typecheck",
+    "test": "cargo test --manifest-path apps/api-rs/Cargo.toml && pnpm -r test",
+    "test:contract": "node --test 'apps/api-rs/tests/*.test.mjs'",
+    "test:contract:local": "bash scripts/contract-local.sh",
+    "typecheck": "pnpm -r typecheck",
     "lint": "biome check .",
     "format": "biome format --write ."
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.16",
+    "@biomejs/biome": "^2.5.14",
     "typescript": "^6.0.3"
   }
 }

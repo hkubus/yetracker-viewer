@@ -1,109 +1,48 @@
-//! ffmpeg dominant-colour sampling with an mtime-validated LRU cache, ported
-//! from `util/getDominantColor.ts`.
+//! Dominant colour of a cover image: the average colour of its right-hand
+//! 20% strip, sampled with ffmpeg (ported from `util/getDominantColor.ts`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::FutureExt;
-use futures_util::future::{BoxFuture, Shared};
-use lru::LruCache;
 use tokio::process::Command;
 
+use crate::media::{Tool, file_input};
+
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_CACHED_COLORS: usize = 500;
 
-pub type ColorFuture = Shared<BoxFuture<'static, Result<[u8; 3], String>>>;
-
-struct ColorEntry {
-    mtime_ms: i64,
-    future: ColorFuture,
+/// The dominant colour of the image at `path` as 6 lowercase hex digits. The
+/// ffmpeg run happens in its own task, so it completes (or times out) even if
+/// the caller stops waiting.
+pub async fn dominant_color(path: &Path) -> Result<String, String> {
+    let path: PathBuf = path.to_path_buf();
+    let rgb = tokio::spawn(async move { sample_rgb(&path).await })
+        .await
+        .map_err(|error| format!("colour sampling task failed: {error}"))??;
+    Ok(to_hex(rgb))
 }
 
-/// Cache of dominant-colour probes keyed by absolute path.
-pub struct DominantColors {
-    cache: Arc<Mutex<LruCache<String, ColorEntry>>>,
+pub fn to_hex([red, green, blue]: [u8; 3]) -> String {
+    format!("{red:02x}{green:02x}{blue:02x}")
 }
 
-impl DominantColors {
-    pub fn new() -> Self {
-        Self {
-            cache: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(MAX_CACHED_COLORS).expect("non-zero capacity"),
-            ))),
-        }
-    }
-
-    /// Average colour of the right-hand 20% strip of `path`, deduplicated while
-    /// in flight and re-probed when the file's mtime changes.
-    pub fn get(&self, path: &Path) -> ColorFuture {
-        let mtime_ms = std::fs::metadata(path)
-            .ok()
-            .and_then(|metadata| {
-                metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis() as i64)
-            })
-            .unwrap_or(-1);
-        let key = path.to_string_lossy().into_owned();
-
-        {
-            let mut cache = self.cache.lock().expect("dominant color cache poisoned");
-            if let Some(entry) = cache.get(&key) {
-                if entry.mtime_ms == mtime_ms {
-                    return entry.future.clone();
-                }
-            }
-        }
-
-        let cache = self.cache.clone();
-        let path_owned = path.to_path_buf();
-        let key_for_task = key.clone();
-        let future: ColorFuture = async move {
-            let result = sample_color(&path_owned).await;
-            if result.is_err() {
-                // Failed probes are evicted so a later call retries them.
-                cache
-                    .lock()
-                    .expect("dominant color cache poisoned")
-                    .pop(&key_for_task);
-            }
-            result
-        }
-        .boxed()
-        .shared();
-
-        self.cache
-            .lock()
-            .expect("dominant color cache poisoned")
-            .put(
-                key,
-                ColorEntry {
-                    mtime_ms,
-                    future: future.clone(),
-                },
-            );
-        future
-    }
-}
-
-impl Default for DominantColors {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-async fn sample_color(path: &Path) -> Result<[u8; 3], String> {
-    let mut command = Command::new("ffmpeg");
+async fn sample_rgb(path: &Path) -> Result<[u8; 3], String> {
+    let mut command = Command::new(Tool::Ffmpeg.binary());
     command
-        .args(["-v", "error", "-i"])
-        .arg(path)
+        .args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+        ])
+        .arg(file_input(path))
         .args([
             "-vf",
             "crop=iw*0.2:ih:iw*0.8:0,scale=1:1:flags=area",
+            "-frames:v",
+            "1",
             "-pix_fmt",
             "rgb24",
             "-f",
@@ -117,14 +56,25 @@ async fn sample_color(path: &Path) -> Result<[u8; 3], String> {
 
     let output = match tokio::time::timeout(SAMPLE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
-        Ok(Err(error)) => return Err(error.to_string()),
-        Err(_) => return Err("dominant color sampling timed out".to_string()),
+        Ok(Err(error)) => return Err(format!("could not run ffmpeg: {error}")),
+        Err(_) => return Err("colour sampling timed out".to_string()),
     };
     if !output.status.success() {
         return Err(format!("ffmpeg exited with {}", output.status));
     }
-    if output.stdout.len() < 3 {
-        return Err(format!("Could not sample color from {}", path.display()));
+    match output.stdout.as_slice() {
+        [red, green, blue, ..] => Ok([*red, *green, *blue]),
+        _ => Err(format!("could not sample a colour from {}", path.display())),
     }
-    Ok([output.stdout[0], output.stdout[1], output.stdout[2]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_rgb_as_hex() {
+        assert_eq!(to_hex([0x5a, 0x24, 0x0a]), "5a240a");
+        assert_eq!(to_hex([255, 255, 255]), "ffffff");
+    }
 }

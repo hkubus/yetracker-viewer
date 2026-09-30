@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    name: Web (lint, typecheck, unit tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # pnpm comes from `packageManager` in package.json. Node 24: the unit tests rely on TypeScript type stripping
+      # (Node >= 22.18).
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm --filter web test
+      - run: pnpm build
+
+  rust:
+    name: API (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/api-rs
+    steps:
+      - uses: actions/checkout@v7
+      # Installs or updates the channel and components named in rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/api-rs
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  contract:
+    name: API contract suite (fixture catalog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+      - run: pnpm install --frozen-lockfile
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/api-rs
+      - run: cargo build --locked --manifest-path apps/api-rs/Cargo.toml
+      # Fresh storage, catalog imported from apps/api-rs/tests/fixtures/sheet.html, no downloads or network.
+      - run: pnpm test:contract:local

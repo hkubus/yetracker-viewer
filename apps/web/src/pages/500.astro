@@ -1,64 +1,22 @@
 ---
-import Layout from '../layouts/Layout.astro';
+import ErrorPage from '../components/ErrorPage.astro';
+import { ApiServerError, ERROR_STATUS_HEADER, isApiOutage, OUTAGE_RETRY_AFTER_SECONDS } from '../config';
+
+interface Props {
+  /** The error that stopped the page (passed by Astro). */
+  error?: unknown;
+}
+
+const { error } = Astro.props;
+// A page that failed because the API is down or answered with a server error gets the 503 variant, so clients and
+// caches know to come back shortly instead of treating it as a bug of this page.
+const outage = isApiOutage(error);
+if (outage) {
+  const retryAfter = (error instanceof ApiServerError ? error.retryAfter : undefined) ?? OUTAGE_RETRY_AFTER_SECONDS;
+  // Astro sends this route with status 500; the middleware turns it into the 503 requested here.
+  Astro.response.headers.set(ERROR_STATUS_HEADER, '503');
+  Astro.response.headers.set('Retry-After', String(retryAfter));
+}
 ---
 
-<Layout title="Something went wrong | Ye Tracker">
-  <div class="error-page">
-    <p class="error-page__code">500</p>
-    <h1>Something went wrong</h1>
-    <p class="error-page__body">The catalog API did not answer, or returned something this page could not read. Reloading usually fixes it.</p>
-    <p class="error-page__actions">
-      <a class="error-page__action" href="/">Back to all eras</a>
-    </p>
-  </div>
-</Layout>
-
-<style>
-  .error-page {
-    display: grid;
-    place-content: center;
-    justify-items: center;
-    gap: 0.5rem;
-    min-height: 70vh;
-    padding: 2rem 1.25rem;
-    text-align: center;
-  }
-  .error-page__code {
-    margin: 0;
-    color: #6f6f6f;
-    font-size: clamp(3rem, 10vw, 6rem);
-    font-weight: 700;
-    letter-spacing: -0.05em;
-    line-height: 1;
-  }
-  .error-page h1 {
-    margin: 0;
-    font-size: clamp(1.25rem, 3vw, 1.75rem);
-  }
-  .error-page__body {
-    max-width: 34rem;
-    margin: 0;
-    color: #b4b4b4;
-  }
-  .error-page__actions {
-    margin: 1rem 0 0;
-  }
-  .error-page__action {
-    display: inline-block;
-    padding: 0.65rem 1.1rem;
-    border: 2px solid #6f6f6f;
-    border-radius: 0.6rem;
-    color: #f3f3f3;
-    font-weight: 600;
-    text-decoration: none;
-  }
-  .error-page__action:hover,
-  .error-page__action:focus-visible {
-    border-color: #fff;
-    background: #2a2a2a;
-  }
-  .error-page__action:focus-visible {
-    outline: 3px solid #fff;
-    outline-offset: 2px;
-  }
-</style>
+<ErrorPage status={outage ? 503 : 500} />

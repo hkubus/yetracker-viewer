@@ -1,264 +1,430 @@
 ---
-import type { Era } from '@yetracker/types';
-import EraComponent from '../components/Era.astro';
+import EraCard from '../components/Era.astro';
 import GlobalSongSearch from '../components/GlobalSongSearch.astro';
 import RecentLeaks from '../components/RecentLeaks.astro';
-import { ERA_PAGE_SIZE, fetchApi, noStore, publicApiBaseUrl } from '../config';
+import {
+  ApiNotFoundError,
+  ApiServerError,
+  ApiUnreachableError,
+  ERA_PAGE_SIZE,
+  fetchJson,
+  noStore,
+  OUTAGE_RETRY_AFTER_SECONDS,
+  publicApiBaseUrl,
+} from '../config';
 import Layout from '../layouts/Layout.astro';
+import { formatCatalogDate, formatRelativeTime } from '../utils/dates';
+import type { EraDisplayInfo, SearchSongPayload } from '../utils/songDisplay';
+import { countLabel } from '../utils/songRow';
+
+type Failure = 'timeout' | 'unreachable' | 'server' | 'invalid' | 'missing';
+type Loaded<T> = { ok: true; data: T } | { ok: false; failure: Failure; status?: number; retryAfter?: number };
+
+interface HomeEra {
+  id: number;
+  name: string;
+  subtitle: string | null;
+  dominantColor: string;
+  /** `null` when the API doesn't say (older versions): the cover is tried and falls back to a placeholder. */
+  hasCover: boolean | null;
+  coverVersion: string | null;
+  songsCount: number | null;
+}
+
+interface HomeStatus {
+  lastImportAt: number | null;
+  lastImportOk: boolean | null;
+  playableSongs: number | null;
+}
+
+const RECENT_LEAKS_LIMIT = 8;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-/** Loads a list endpoint, reporting failure instead of silently faking an empty catalog. */
-async function loadList<T>(path: string, isItem: (item: unknown) => boolean): Promise<{ items: T[]; failed: boolean }> {
-  let response: Response;
-  try {
-    response = await fetchApi(path);
-  } catch (error) {
-    console.error(`[index] ${path} request failed:`, error);
-    return { items: [], failed: true };
-  }
-  let data: unknown;
-  try {
-    data = await response.json();
-  } catch (error) {
-    console.error(`[index] ${path} returned invalid JSON:`, error);
-    return { items: [], failed: true };
-  }
-  if (!Array.isArray(data)) {
-    console.error(`[index] ${path} returned unexpected shape.`);
-    return { items: [], failed: true };
-  }
-  return { items: data.filter(isItem) as T[], failed: false };
+function failureOf(error: unknown): { failure: Failure; status?: number; retryAfter?: number } {
+  if (error instanceof ApiUnreachableError) return { failure: error.timedOut ? 'timeout' : 'unreachable' };
+  if (error instanceof ApiNotFoundError) return { failure: 'missing', status: error.status };
+  if (error instanceof ApiServerError) return { failure: 'server', status: error.status, retryAfter: error.retryAfter };
+  return { failure: 'server' };
 }
 
-const { items: eras, failed: erasFailed } = await loadList<Era>(
-  '/eras',
-  (item): item is Era => isRecord(item) && typeof item.id === 'number',
-);
-if (erasFailed) noStore(Astro.response);
-const songsCount = eras.reduce((total, era) => total + (era.songsCount ?? 0), 0);
+/** One API request: parsed data, or why it failed (logged). Never throws, so one failure can't take the page down. */
+async function load<T>(path: string, parse: (body: unknown) => T | null): Promise<Loaded<T>> {
+  try {
+    const { data } = await fetchJson<unknown>(path);
+    const parsed = parse(data);
+    if (parsed !== null) return { ok: true, data: parsed };
+    console.error(`[home] ${path} returned an unexpected shape`);
+    return { ok: false, failure: 'invalid' };
+  } catch (error) {
+    const outcome = failureOf(error);
+    // One line per failure (an outage would otherwise log three stack traces per page view). `/status` is missing
+    // on older API versions; that isn't worth a log line on every request.
+    if (!(outcome.failure === 'missing' && path === '/status')) {
+      console.error(`[home] ${path} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return { ok: false, ...outcome };
+  }
+}
+
+function parseEras(body: unknown): HomeEra[] | null {
+  if (!Array.isArray(body)) return null;
+  return body.flatMap((item): HomeEra[] => {
+    if (!isRecord(item) || typeof item.id !== 'number' || typeof item.name !== 'string') return [];
+    return [
+      {
+        id: item.id,
+        name: item.name,
+        subtitle: typeof item.subtitle === 'string' && item.subtitle.trim() ? item.subtitle.trim() : null,
+        dominantColor: typeof item.dominantColor === 'string' ? item.dominantColor : '666666',
+        hasCover: typeof item.hasCover === 'boolean' ? item.hasCover : null,
+        coverVersion: typeof item.coverVersion === 'string' && item.coverVersion ? item.coverVersion : null,
+        songsCount: typeof item.songsCount === 'number' && item.songsCount >= 0 ? item.songsCount : null,
+      },
+    ];
+  });
+}
+
+function parseSongs(body: unknown): SearchSongPayload[] | null {
+  if (!isRecord(body) || !Array.isArray(body.songs)) return null;
+  return body.songs.filter(isRecord) as SearchSongPayload[];
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function parseStatus(body: unknown): HomeStatus | null {
+  if (!isRecord(body)) return null;
+  return {
+    lastImportAt: numberOrNull(body.lastImportAt),
+    lastImportOk: typeof body.lastImportOk === 'boolean' ? body.lastImportOk : null,
+    playableSongs: numberOrNull(body.playableSongs),
+  };
+}
+
+const [erasResult, recentResult, statusResult] = await Promise.all([
+  load('/eras', parseEras),
+  load(`/songs?playable=true&sort=leak-newest&limit=${RECENT_LEAKS_LIMIT}`, parseSongs),
+  load('/status', parseStatus),
+]);
+
+// A page rendered without some of its data must not be cached. A missing `/status` (older API) is not a failure.
+const statusUnsupported = !statusResult.ok && statusResult.failure === 'missing';
+if (!erasResult.ok || !recentResult.ok || (!statusResult.ok && !statusUnsupported)) noStore(Astro.response);
+// Without the era list the page is only an apology: tell crawlers and monitors to come back instead of indexing it.
+if (!erasResult.ok) {
+  Astro.response.status = 503;
+  Astro.response.headers.set('Retry-After', String(erasResult.retryAfter ?? OUTAGE_RETRY_AFTER_SECONDS));
+}
+
+const eras = erasResult.ok ? erasResult.data : [];
+const recentSongs = recentResult.ok ? recentResult.data : [];
+const status = statusResult.ok ? statusResult.data : null;
+const knownCounts = eras.length > 0 && eras.every((era) => era.songsCount !== null);
+const songsCount = knownCounts ? eras.reduce((total, era) => total + (era.songsCount ?? 0), 0) : null;
+const eraInfo = new Map<number, EraDisplayInfo>(eras.map((era) => [era.id, era]));
+
+const stats = erasResult.ok
+  ? [
+      countLabel(eras.length, 'era'),
+      songsCount === null ? null : countLabel(songsCount, 'track'),
+      status?.playableSongs == null ? null : `${status.playableSongs.toLocaleString('en-US')} playable`,
+    ]
+      .filter(Boolean)
+      .join(' · ')
+  : '';
+
+// `lastImportAt` is the last successful import; `lastImportOk` describes the latest attempt.
+const lastImportAt = status?.lastImportAt ?? null;
+const updated =
+  lastImportAt === null
+    ? null
+    : {
+        latestFailed: status?.lastImportOk === false,
+        unix: lastImportAt,
+        iso: new Date(lastImportAt * 1000).toISOString(),
+        relative: formatRelativeTime(lastImportAt),
+        date: formatCatalogDate(lastImportAt, 'day', 'long'),
+      };
+
+const outageCopy: Record<Failure, { title: string; body: string }> = {
+  timeout: {
+    title: 'The catalog is taking too long to answer.',
+    body: 'Eras and recent leaks can’t be shown right now. Try again in a moment.',
+  },
+  unreachable: {
+    title: 'We couldn’t reach the catalog.',
+    body: 'Eras and recent leaks can’t be shown right now, and search may not work either. Try again in a moment.',
+  },
+  server: {
+    title: 'The catalog ran into a problem.',
+    body: 'Eras and recent leaks can’t be shown right now. Try again in a moment.',
+  },
+  invalid: {
+    title: 'The catalog sent a response this page couldn’t read.',
+    body: 'Eras and recent leaks can’t be shown right now. Try again in a moment.',
+  },
+  missing: {
+    title: 'The catalog couldn’t be found.',
+    body: 'Eras and recent leaks can’t be shown right now. Try again in a moment.',
+  },
+};
+const outage = erasResult.ok ? null : outageCopy[erasResult.failure];
+const description =
+  erasResult.ok && songsCount !== null
+    ? `Browse ${countLabel(songsCount, 'unreleased Kanye West track')} across ${countLabel(eras.length, 'era')}, with search and playback.`
+    : undefined;
 ---
 
-<Layout title="Ye Tracker">
+<Layout title="Ye Tracker" description={description}>
+  <div class="home" data-home>
     <header class="site-header">
+      <div class="site-header__intro">
         <h1>Ye Tracker</h1>
-        <p class="site-header__meta">
-            {eras.length.toLocaleString()} eras · {songsCount.toLocaleString()} tracks
-        </p>
+        <p class="site-header__tagline">Unreleased Kanye West music, organized by era.</p>
+      </div>
+      <p class="site-header__meta">
+        {stats ? <span>{stats}</span> : null}
+        {
+          updated ? (
+            <span>
+              Updated{' '}
+              <time datetime={updated.iso} title={updated.date} data-relative-time={updated.unix}>
+                {updated.relative}
+              </time>
+              {updated.latestFailed ? ' (the latest refresh failed)' : null}
+            </span>
+          ) : null
+        }
+        <span>Data from <a href="https://yetracker.net">yetracker.net</a></span>
+      </p>
     </header>
 
     {
-        erasFailed && (
-            <div class="notice" role="alert">
-                <p>
-                    <strong>The catalog could not be loaded.</strong> The API did not answer in time — this page is
-                    served without its data and is not cached.
-                </p>
-                <a href="/">Try again</a>
-            </div>
-        )
+      outage ? (
+        <div class="notice" role="alert">
+          <p>
+            <strong>{outage.title}</strong> {outage.body}
+          </p>
+          <a href={`${Astro.url.pathname}${Astro.url.search}`} data-astro-reload>
+            Try again
+          </a>
+        </div>
+      ) : null
     }
 
-    <GlobalSongSearch
-        songsCount={songsCount}
-        eras={eras}
-        apiBaseUrl={publicApiBaseUrl}
-        eraPageSize={ERA_PAGE_SIZE}
+    <GlobalSongSearch eras={eras} songsCount={songsCount} apiBaseUrl={publicApiBaseUrl} eraPageSize={ERA_PAGE_SIZE} />
+
+    <RecentLeaks
+      songs={recentSongs}
+      failed={!recentResult.ok && erasResult.ok}
+      eras={eraInfo}
+      eraPageSize={ERA_PAGE_SIZE}
     />
 
-    <RecentLeaks eraPageSize={ERA_PAGE_SIZE} />
-
     <section class="eras" aria-labelledby="eras-heading">
-        <div class="eras__head">
-            <h2 id="eras-heading">Eras</h2>
-            {
-                eras.length > 3 && (
-                    <div class="eras__filter">
-                        <label class="sr-only" for="era-filter">Filter eras by name</label>
-                        <input
-                            id="era-filter"
-                            type="search"
-                            placeholder="Filter eras…"
-                            autocomplete="off"
-                            data-era-filter
-                        />
-                        <p class="eras__filter-count" aria-live="polite" data-era-filter-count>
-                            {eras.length} eras
-                        </p>
-                    </div>
-                )
-            }
-        </div>
-        <div class="era-grid" data-era-grid>
-            {
-                eras.map((e, index) => (
-                    <EraComponent
-                        era={e}
-                        apiBaseUrl={publicApiBaseUrl}
-                        priority={index < 3}
-                    />
-                ))
-            }
-        </div>
-        <p class="eras__empty" data-era-filter-empty hidden>No eras match that filter.</p>
+      <div class="eras__head">
+        <h2 id="eras-heading">Eras</h2>
+        {
+          eras.length > 3 ? (
+            <div class="eras__filter">
+              <label class="sr-only" for="era-filter">
+                Filter eras by name
+              </label>
+              <input
+                id="era-filter"
+                type="search"
+                placeholder="Filter eras…"
+                autocomplete="off"
+                spellcheck="false"
+                data-era-filter
+              />
+              <p class="eras__filter-count" data-era-filter-count>
+                {countLabel(eras.length, 'era')}
+              </p>
+              <p class="sr-only" role="status" data-era-filter-status />
+            </div>
+          ) : null
+        }
+      </div>
+      {
+        eras.length > 0 ? (
+          <ul class="era-grid" data-era-grid>
+            {eras.map((era, index) => (
+              <li data-era-filter-text={era.subtitle ? `${era.name} ${era.subtitle}` : era.name}>
+                <EraCard era={era} apiBaseUrl={publicApiBaseUrl} priority={index < 3} />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p class="eras__empty">
+            {erasResult.ok ? 'There are no eras in the catalog yet.' : 'Eras will be back as soon as the catalog is.'}
+          </p>
+        )
+      }
+      {
+        eras.length > 3 ? (
+          <p class="eras__empty" data-era-filter-empty hidden>
+            No eras match that filter.
+          </p>
+        ) : null
+      }
     </section>
+  </div>
 </Layout>
 
-<script is:inline data-astro-rerun>
-    (() => {
-        const grid = document.querySelector("[data-era-grid]");
-        const input = document.querySelector("[data-era-filter]");
-        const count = document.querySelector("[data-era-filter-count]");
-        const empty = document.querySelector("[data-era-filter-empty]");
-        if (!grid || !(input instanceof HTMLInputElement)) return;
-
-        const cards = [...grid.children].filter((node) => node instanceof HTMLElement);
-        const names = cards.map((card) => (card.dataset.eraName ?? card.textContent ?? "").toLocaleLowerCase());
-        const total = cards.length;
-
-        const apply = () => {
-            const query = input.value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
-            let visible = 0;
-            cards.forEach((card, index) => {
-                const matches = !query || names[index].includes(query);
-                card.hidden = !matches;
-                if (matches) visible += 1;
-            });
-            if (count) {
-                count.textContent = query ? `${visible} of ${total} eras` : `${total} eras`;
-            }
-            if (empty instanceof HTMLElement) empty.hidden = visible !== 0;
-        };
-
-        input.addEventListener("input", apply);
-        input.addEventListener("search", apply);
-    })();
+<script>
+  import '../scripts/home';
 </script>
 
 <style>
-    .site-header {
-        display: flex;
-        align-items: baseline;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-        padding: clamp(0.75rem, 1.5vw, 1.5rem) clamp(0.75rem, 1.5vw, 1.5rem) 0;
-    }
-    .site-header h1 {
-        margin: 0;
-        font-size: clamp(1.5rem, 2.4vw, 2rem);
-        letter-spacing: -0.03em;
-    }
-    .site-header__meta {
-        margin: 0;
-        color: #9a9a9a;
-        font-size: 0.85rem;
-    }
-    .notice {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-        margin: clamp(0.75rem, 1.5vw, 1.5rem);
-        margin-bottom: 0;
-        padding: 0.85rem 1rem;
-        border: 1px solid #7c4a3a;
-        border-radius: 0.75rem;
-        background: #2a1d19;
-        color: #ffded4;
-        font-size: 0.9rem;
-    }
-    .notice p {
-        margin: 0;
-    }
-    .notice a {
-        flex: none;
-        padding: 0.45rem 0.8rem;
-        border: 1px solid #ffded4;
-        border-radius: 0.5rem;
-        color: inherit;
-        font-weight: 700;
-        text-decoration: none;
-    }
-    .notice a:focus-visible {
-        outline: 3px solid #fff;
-        outline-offset: 2px;
-    }
-    .eras {
-        margin-top: clamp(1rem, 2vw, 1.75rem);
-    }
-    .eras__head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-        flex-wrap: wrap;
-        padding: 0 clamp(0.75rem, 1.5vw, 1.5rem);
-    }
-    .eras__head h2 {
-        margin: 0;
-        font-size: 1.1rem;
-        letter-spacing: -0.02em;
-    }
+  .site-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    justify-content: space-between;
+    gap: 0.5rem 1.5rem;
+    padding: clamp(0.75rem, 1.5vw, 1.5rem) clamp(0.75rem, 1.5vw, 1.5rem) 0;
+  }
+  .site-header h1 {
+    margin: 0;
+    font-size: clamp(1.5rem, 2.4vw, 2rem);
+    letter-spacing: -0.03em;
+  }
+  .site-header__tagline {
+    margin: 0.2rem 0 0;
+    color: #c2c2c2;
+    font-size: 0.95rem;
+  }
+  .site-header__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    margin: 0;
+    color: #a8a8a8;
+    font-size: 0.8rem;
+  }
+  .site-header__meta a {
+    color: #e2e2e2;
+    text-underline-offset: 0.15em;
+  }
+  .site-header__meta a:hover {
+    color: #fff;
+  }
+  .notice {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem 1rem;
+    margin: clamp(0.75rem, 1.5vw, 1.5rem);
+    margin-bottom: 0;
+    padding: 0.85rem 1rem;
+    border: 1px solid #7c4a3a;
+    border-radius: 0.75rem;
+    color: #ffded4;
+    background: #2a1d19;
+    font-size: 0.9rem;
+  }
+  .notice p {
+    margin: 0;
+  }
+  .notice a {
+    flex: none;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid #ffded4;
+    border-radius: 0.5rem;
+    color: inherit;
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .notice a:hover {
+    background: #3a2821;
+  }
+  .eras {
+    margin-top: clamp(1rem, 2vw, 1.75rem);
+  }
+  .eras__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    padding: 0 clamp(0.75rem, 1.5vw, 1.5rem);
+  }
+  .eras__head h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    letter-spacing: -0.02em;
+  }
+  .eras__filter {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .eras__filter input {
+    box-sizing: border-box;
+    width: min(18rem, 60vw);
+    min-height: 2.5rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid #5c5c5c;
+    border-radius: 0.6rem;
+    color: #f3f3f3;
+    background: #1d1d1d;
+    font: inherit;
+    font-size: 1rem;
+  }
+  .eras__filter input::placeholder {
+    color: #8f8f8f;
+    opacity: 1;
+  }
+  .eras__filter-count {
+    min-width: 5.5rem;
+    margin: 0;
+    color: #a8a8a8;
+    font-size: 0.8rem;
+    text-align: right;
+  }
+  .eras__empty {
+    margin: 1rem;
+    color: #a8a8a8;
+    text-align: center;
+  }
+  .eras__empty[hidden] {
+    display: none;
+  }
+  /* auto-fill keeps empty columns, so a filtered grid keeps its card width instead of stretching the survivors. */
+  .era-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
+    gap: clamp(0.75rem, 1vw, 1rem);
+    margin: 0;
+    padding: clamp(0.75rem, 1.5vw, 1.5rem);
+    list-style: none;
+  }
+  .era-grid > [hidden] {
+    display: none;
+  }
+  @media (max-width: 40rem) {
     .eras__filter {
-        display: flex;
-        align-items: center;
-        gap: 0.6rem;
+      width: 100%;
     }
     .eras__filter input {
-        box-sizing: border-box;
-        width: min(18rem, 60vw);
-        padding: 0.5rem 0.7rem;
-        border: 1px solid #4a4a4a;
-        border-radius: 0.6rem;
-        outline: none;
-        background: #1d1d1d;
-        color: #f3f3f3;
-        font: inherit;
-        font-size: 0.85rem;
-    }
-    .eras__filter input:focus-visible {
-        border-color: #d7d7d7;
-        box-shadow: 0 0 0 3px rgb(255 255 255 / 10%);
+      flex: 1;
+      width: auto;
+      min-width: 0;
     }
     .eras__filter-count {
-        min-width: 5.5rem;
-        margin: 0;
-        color: #9a9a9a;
-        font-size: 0.8rem;
-        text-align: right;
+      min-width: 0;
     }
-    .eras__empty {
-        margin: 1rem;
-        color: #9a9a9a;
-        text-align: center;
-    }
-    .eras__empty[hidden] {
-        display: none;
-    }
+  }
+  @media (max-width: 30rem) {
     .era-grid {
-        display: grid;
-        grid-template-columns: repeat(
-            auto-fit,
-            minmax(min(100%, 240px), 1fr)
-        );
-        align-items: stretch;
-        gap: clamp(0.75rem, 1vw, 1rem);
-        padding: clamp(0.75rem, 1.5vw, 1.5rem);
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+      gap: 0.75rem;
     }
-    .era-grid > :global([hidden]) {
-        display: none;
-    }
-    @media (max-width: 640px) {
-        .eras__filter {
-            width: 100%;
-        }
-        .eras__filter input {
-            width: 100%;
-        }
-        .eras__filter-count {
-            min-width: 0;
-        }
-    }
+  }
 </style>

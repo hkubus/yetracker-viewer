@@ -1,0 +1,22 @@
+---
+/**
+ * Volume on: speaker with two sound waves.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  {...Astro.props}
+>
+  <path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z" fill="currentColor" />
+  <path d="M15.5 8.5a4.5 4.5 0 0 1 0 7M18.5 5.5a8.5 8.5 0 0 1 0 13" />
+</SvgIcon>

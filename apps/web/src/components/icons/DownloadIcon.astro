@@ -1,0 +1,14 @@
+---
+/**
+ * Download: arrow into a tray line.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon fill="currentColor" {...Astro.props}>
+  <path d="M11 3h2v10.17l3.59-3.58L18 11l-6 6l-6-6l1.41-1.41L11 13.17zM5 19h14v2H5z" />
+</SvgIcon>

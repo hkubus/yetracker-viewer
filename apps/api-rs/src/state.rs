@@ -1,48 +1,58 @@
-//! Shared process state: DB pool, caches and the transcode semaphore.
+//! Shared process state: configuration, the DB pool, caches, tool
+//! availability, HTTP clients and the concurrency limits.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use lru::LruCache;
 use tokio::sync::Semaphore;
 
 use crate::config::Config;
-use crate::cover_version::CoverVersions;
 use crate::db::Pool;
-use crate::dominant_color::DominantColors;
-use crate::media::DurationFuture;
+use crate::downloader::HttpClients;
+use crate::media::{Probes, ReverifyQueue, Tools};
 use crate::playable::PlayableFiles;
 use crate::rank::RankCache;
-
-pub struct DurationEntry {
-    pub mtime_ms: i64,
-    pub future: DurationFuture,
-}
+use crate::routes::media::Transcodes;
 
 pub struct AppState {
     pub config: Config,
     pub pool: Pool,
     pub playable: PlayableFiles,
-    pub cover_versions: CoverVersions,
-    pub dominant_colors: DominantColors,
     pub rank_cache: RankCache,
-    pub duration_cache: Arc<Mutex<LruCache<String, DurationEntry>>>,
+    /// Which of ffmpeg, ffprobe and yt-dlp are installed (refreshed by every
+    /// sync).
+    pub tools: Tools,
+    /// ffprobe verdicts per file version.
+    pub probes: Probes,
+    /// Files requests found missing or broken, for the sync to re-check.
+    pub reverify: ReverifyQueue,
+    /// Shared HTTP clients for downloads and covers.
+    pub http: HttpClients,
+    /// `MAX_CONCURRENT_TRANSCODES` slots; a slot is held while ffmpeg runs.
     pub transcode_slots: Arc<Semaphore>,
+    /// Transcodes in progress, joined by concurrent requests.
+    pub transcodes: Transcodes,
+    /// Bounds concurrent search queries (`SEARCH_CONCURRENCY`) so a burst of
+    /// searches cannot occupy every pooled SQLite connection.
+    pub search_slots: Arc<Semaphore>,
 }
 
 impl AppState {
     pub fn new(config: Config, pool: Pool) -> Arc<Self> {
         let transcode_slots = Arc::new(Semaphore::new(config.max_concurrent_transcodes));
+        let search_slots = Arc::new(Semaphore::new(config.search_concurrency));
+        let http = HttpClients::new().expect("the HTTP clients can be built");
         Arc::new(AppState {
             config,
             pool,
             playable: PlayableFiles::new(),
-            cover_versions: CoverVersions::new(),
-            dominant_colors: DominantColors::new(),
             rank_cache: RankCache::new(),
-            duration_cache: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(500).expect("non-zero capacity"),
-            ))),
+            tools: Tools::new(),
+            probes: Probes::new(),
+            reverify: ReverifyQueue::default(),
+            http,
             transcode_slots,
+            transcodes: Transcodes::default(),
+            search_slots,
         })
     }
 }

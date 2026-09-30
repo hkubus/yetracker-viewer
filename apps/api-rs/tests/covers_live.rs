@@ -1,17 +1,18 @@
-//! Live cover smoke test. Ignored by default because it fetches a real image
-//! and runs ffmpeg:
+//! Live cover smoke test. Ignored by default because it renders the real
+//! sheet on Google Sheets, downloads an artwork image and runs ffmpeg:
 //!
 //! `cargo test --test covers_live -- --ignored --nocapture`
 
+use tokio_util::sync::CancellationToken;
 use yetracker_api::config::Config;
 use yetracker_api::db;
 use yetracker_api::downloader;
+use yetracker_api::importer;
+use yetracker_api::media::Tool;
 use yetracker_api::state::AppState;
 
-const IMAGE_URL: &str = "https://picsum.photos/512";
-
 #[tokio::test]
-#[ignore = "fetches a real image and runs ffmpeg"]
+#[ignore = "renders the live sheet, downloads artwork and runs ffmpeg"]
 async fn downloads_and_encodes_a_cover() {
     let dir = std::path::PathBuf::from("/tmp/yt-cover-live");
     let _ = std::fs::remove_dir_all(&dir);
@@ -23,38 +24,47 @@ async fn downloads_and_encodes_a_cover() {
 
     let config = Config::load().expect("config loads");
     let pool = db::create_pool(&config.storage_path.join("db.sqlite3")).expect("pool");
-    db::run_migrations(&pool).expect("migrations");
+    db::run_migrations(&pool, &config).expect("migrations");
     let state = AppState::new(config, pool);
+    let tools = state.tools.detect(&Tool::ALL).await;
 
-    db::call(&state.pool, |conn| {
+    let key = importer::era_key("Late Registration");
+    db::call(&state.pool, move |conn| {
         conn.execute(
-            "INSERT INTO eras (id, name, notes, image_url, description, dominant_color, is_main) \
-             VALUES (1, 'Test Era', '', ?1, '', NULL, 1)",
-            [IMAGE_URL],
+            "INSERT INTO eras (id, key, name, notes, description, dominant_color, is_main, position) \
+             VALUES (1, ?1, 'Late Registration', '', '', '666666', 1, 1)",
+            [key],
         )?;
         Ok(())
     })
     .await
     .unwrap();
 
-    downloader::download_covers(&state)
+    let summary = downloader::sync_covers(&state, &CancellationToken::new(), tools)
         .await
         .expect("covers complete");
+    assert_eq!(summary.written, 1, "{summary:?}");
 
-    let cover_path = state.config.storage_path.join("covers").join("1.avif");
-    let metadata = tokio::fs::metadata(&cover_path)
-        .await
-        .expect("cover written");
+    let covers = downloader::covers_dir(&state.config);
+    let primary = if tools.ffmpeg { "1.avif" } else { "1.jpg" };
+    let metadata = std::fs::metadata(covers.join(primary)).expect("cover written");
     assert!(metadata.len() > 0, "cover non-empty");
 
-    let color: Option<String> = db::call(&state.pool, |conn| {
-        let mut statement = conn.prepare("SELECT dominant_color FROM eras WHERE id = 1")?;
-        let color = statement.query_row([], |row| row.get(0))?;
-        Ok(color)
+    let (version, color): (Option<String>, String) = db::call(&state.pool, |conn| {
+        Ok(conn.query_row(
+            "SELECT cover_version, dominant_color FROM eras WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
     })
     .await
     .unwrap();
-    let color = color.expect("dominant color set");
-    assert_ne!(color, "666666", "extracted color replaces the default");
-    println!("cover {} bytes, dominant color {color}", metadata.len());
+    assert_eq!(version.as_deref().map(str::len), Some(12));
+    if tools.ffmpeg {
+        assert_eq!(color, "5a240a", "Late Registration keeps its fixed colour");
+    }
+    println!(
+        "cover {} bytes, version {version:?}, colour {color}",
+        metadata.len()
+    );
 }

@@ -1,91 +1,110 @@
 ---
+/**
+ * An era card for the home page grid: cover (or a placeholder tile), name as an <h3> under the "Eras" heading,
+ * subtitle and song count, all linking to the era page. Colors come from `themeFor`, so text stays readable for
+ * any era color.
+ */
 import type { Era } from '@yetracker/types';
-import { apiUrl } from '../config';
-import { colorValue } from '../utils/color';
+import { themeStyle } from '../utils/color';
+import { countLabel } from '../utils/songRow';
+import CoverImage from './CoverImage.astro';
 
-const era = Astro.props.era as Era;
-const apiBaseUrl = Astro.props.apiBaseUrl as string;
-const priority = (Astro.props.priority as boolean | undefined) ?? false;
-const dominantColor = colorValue(era.dominantColor);
-const rawCoverVersion = (era.coverVersion ?? '').trim();
-const coverUrl = rawCoverVersion
-  ? `${apiUrl(apiBaseUrl, `/eras/${era.id}/cover`)}?v=${encodeURIComponent(rawCoverVersion)}`
-  : apiUrl(apiBaseUrl, `/eras/${era.id}/cover`);
-const songsCount = typeof era.songsCount === 'number' ? era.songsCount : 0;
+type EraCard = Pick<Era, 'id' | 'name' | 'dominantColor'> & {
+  subtitle?: string | null;
+  hasCover?: boolean | null;
+  coverVersion?: string | null;
+  songsCount?: number | null;
+};
+
+interface Props {
+  era: EraCard;
+  apiBaseUrl?: string;
+  /** Load the cover eagerly with high priority (first cards, likely above the fold). */
+  priority?: boolean;
+}
+
+const { era, apiBaseUrl, priority = false } = Astro.props;
+const songsCount = typeof era.songsCount === 'number' && era.songsCount >= 0 ? era.songsCount : null;
 ---
-<a href={`/eras/${era.id}`} data-era-name={era.name}>
-<div style={`--dominantColor: ${dominantColor};`}>
-    <img
-        src={coverUrl}
-        alt={`${era.name} cover`}
-        width="512"
-        height="512"
-        loading={priority ? 'eager' : 'lazy'}
-        fetchpriority={priority ? 'high' : 'auto'}
-        decoding="async"
-    />
-    <h2>{era.name}</h2>
-    <p>{songsCount.toLocaleString()} {songsCount === 1 ? 'song' : 'songs'}</p>
-</div>
+
+<a class="era-card" href={`/eras/${era.id}`} style={themeStyle(era.dominantColor, '--era')}>
+  <CoverImage
+    class="era-card__cover"
+    eraId={era.id}
+    eraName={era.name}
+    hasCover={era.hasCover}
+    coverVersion={era.coverVersion}
+    dominantColor={era.dominantColor}
+    priority={priority}
+    apiBaseUrl={apiBaseUrl}
+  />
+  <h3 class="era-card__name">{era.name}</h3>
+  {era.subtitle ? <p class="era-card__subtitle">{era.subtitle}</p> : null}
+  {songsCount !== null ? <p class="era-card__count">{countLabel(songsCount, 'song')}</p> : null}
 </a>
+
 <style>
-    a {
-        display: block;
-        min-width: 0;
-        height: 100%;
-        text-decoration: none;
+  .era-card {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    height: 100%;
+    min-width: 0;
+    padding: 0.6rem;
+    border: 2px solid color-mix(in srgb, var(--era-accent) 55%, var(--era-background));
+    border-radius: 0.75rem;
+    container-type: inline-size;
+    color: var(--era-text);
+    background: var(--era-background);
+    text-decoration: none;
+    transition:
+      transform 0.2s,
+      border-color 0.2s,
+      background-color 0.2s;
+  }
+  .era-card:hover {
+    border-color: var(--era-accent);
+    background: var(--era-surface);
+    transform: translateY(-0.2rem);
+  }
+  .era-card:focus-visible {
+    border-color: var(--era-accent);
+    background: var(--era-surface);
+    outline: 2px solid var(--focus-ring-color, #fff);
+    outline-offset: 2px;
+  }
+  .era-card :global(.era-card__cover) {
+    margin-bottom: 0.2rem;
+    border-radius: 0.45rem;
+  }
+  .era-card__name {
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-size: 1.1rem;
+    font-size: clamp(1rem, 9cqi, 1.45rem);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+  .era-card__subtitle {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--era-muted-text);
+    font-size: 0.8rem;
+    line-height: 1.3;
+  }
+  .era-card__count {
+    align-self: flex-end;
+    margin: auto 0 0;
+    padding-top: 0.25rem;
+    color: var(--era-muted-text);
+    font-size: 0.85rem;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .era-card,
+    .era-card:hover {
+      transform: none;
+      transition: none;
     }
-    a:focus-visible {
-        outline: 3px solid #fff;
-        outline-offset: 3px;
-        border-radius: 0.7em;
-    }
-    div:hover {
-        border-color: var(--dominantColor);
-        background-color: color-mix(in srgb, var(--dominantColor) 35%, transparent);
-        color: color-mix(in oklab, var(--dominantColor) 20%, white);
-        transform: translateY(-0.25rem);
-    }
-    div {
-        box-sizing: border-box;
-        display: flex;
-        flex-direction: column;
-        width: 100%;
-        height: 100%;
-        padding: 0.7em;
-        border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
-        border-radius: 0.7em;
-        color: color-mix(in oklab, var(--dominantColor) 30%, white);
-        background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
-        transition:
-            transform 0.2s,
-            border-color 0.2s,
-            background-color 0.2s,
-            color 0.2s;
-    }
-    h2 {
-        margin: 8px 0 0;
-        overflow-wrap: anywhere;
-        font-size: 1.475em;
-    }
-    p {
-        align-self: flex-end;
-        margin: auto 0 0;
-        font-size: 0.9em;
-        font-weight: 300;
-    }
-    img {
-        width: 100%;
-        height: auto;
-        aspect-ratio: 1;
-        border-radius: 0.7em;
-        object-fit: cover;
-    }
-    @media (prefers-reduced-motion: reduce) {
-        div,
-        div:hover {
-            transform: none;
-            transition: none;
-        }
-    }
+  }
 </style>

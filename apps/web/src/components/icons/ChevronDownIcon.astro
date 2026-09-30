@@ -1,0 +1,21 @@
+---
+/**
+ * Disclosure: chevron pointing down (rotate it for other directions).
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  {...Astro.props}
+>
+  <path d="m6 9 6 6 6-6" />
+</SvgIcon>

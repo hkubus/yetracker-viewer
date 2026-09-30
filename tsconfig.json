@@ -1,23 +1,21 @@
 {
+  // Base options for workspace packages (apps/web extends Astro's own preset instead).
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "Nodenext",
-    "allowJs": true,
-    "moduleResolution": "nodenext",
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-
-    "allowImportingTsExtensions": true,
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
     "noEmit": true,
-    // "declaration": true,
-    // "sourceMap": true,
-    "removeComments": true,
-    "outDir": "dist",
+    "skipLibCheck": true,
+    "types": [],
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noImplicitAny": false
-  }
+    "noFallthroughCasesInSwitch": true
+  },
+  "files": []
 }

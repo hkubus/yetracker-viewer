@@ -1,0 +1,14 @@
+---
+/**
+ * Next track: triangle pointing right + bar.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon fill="currentColor" {...Astro.props}>
+  <path d="M18 5.5h-2.2v13H18zM5 6.2v11.6c0 .8.9 1.3 1.6.8l7.8-5.8a1 1 0 0 0 0-1.6L6.6 5.4c-.7-.5-1.6 0-1.6.8" />
+</SvgIcon>

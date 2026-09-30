@@ -1,11 +1,19 @@
 # Rust Port Plan — `apps/api` (Hono → Rust)
 
-> Status: the port is complete and the TypeScript `apps/api` tree has been
-> removed. `apps/api-rs` is now the only API. The `apps/api/src` paths below
-> are the historical port sources; the acceptance suite now lives at
-> `apps/api-rs/tests/api.test.mjs`.
+> **Historical document.** This is the plan the TypeScript → Rust port followed
+> in September 2026. The port is done and `apps/api` (the `apps/api/src` paths
+> below) no longer exists. The API has since moved to contract v2, so most of
+> the behavior described here — v1 payloads, the category catalogs, range and
+> caching rules, query-parameter handling, SHA-1 cover versions, the ranking
+> port, deleting files from request handlers, `eprintln!` logging, the settings
+> and defaults of §2 — is out of date. Current docs: [`README.md`](README.md),
+> [`AGENTS.md`](AGENTS.md), [`API.md`](API.md), every setting in
+> [`.env.example`](.env.example), and the module map and schema in
+> [`apps/api-rs/HANDOFF.md`](apps/api-rs/HANDOFF.md).
+> The acceptance suite `api.test.mjs` named below has been split into
+> `apps/api-rs/tests/{eras,songs,media}.test.mjs`.
 
-Goal: reimplement `apps/api/src` in Rust with **byte-for-byte behavioral parity**, verified by existing black-box contract tests in `apps/api-rs/tests/api.test.mjs`. Web app (`apps/web`) is untouched.
+Goal: reimplement `apps/api/src` in Rust with **byte-for-byte behavioral parity**, verified by the existing black-box contract tests (then `apps/api-rs/tests/api.test.mjs`). Web app (`apps/web`) is untouched.
 
 ## 0. Source inventory (read these first)
 
@@ -38,7 +46,7 @@ packages/types/src/index.d.ts           # Quality / AvailableLength enums
 
 Test harness: `apps/api-rs/tests/api.test.mjs` — adaptive (discovers IDs), runs against `API_BASE_URL`. **This is the acceptance gate.**
 
-> Run as: `SYNC_ON_START=false API_PORT=3100 ./apps/api-rs/target/release/yetracker-api &` then `API_BASE_URL=http://127.0.0.1:3100 node --test apps/api-rs/tests/` (or `pnpm test:contract`). Run against a **copy** of `storage/` — media 404 paths mutate `files` rows.
+> Running the suite today: see "Contract tests need a running server" in `AGENTS.md` (the command that stood here targeted the old single test file).
 
 ## 1. Recommended Rust stack
 
@@ -73,7 +81,7 @@ Storage: `{storage}/db.sqlite3`, `{storage}/covers/{id}.avif`, `{songsPath}/{fil
 * Middleware order: `secure-headers` (at minimum `Cross-Origin-Resource-Policy: cross-origin`), `compress` (threshold 1024), body limit 64KB (even though GET-only, keep for parity), CORS.
 * CORS: `allowMethods=[GET,HEAD,OPTIONS]`, `exposeHeaders=[X-Total-Count]`, `origin = *` if list contains `*` else echo request `Origin` iff in list else no header. `Access-Control-Expose-Headers` must contain `X-Total-Count` (test asserts this).
 * `GET /health` → `200 {"status":"ok"}`.
-* **Error format gotcha:** `API.md` says JSON errors, but Hono `HTTPException` bodies are `text/plain`. Tests assert `text()` matches `/Invalid era id/` etc. Port as: route errors → `status + text/plain` body = message (e.g. `400 Invalid era id`); unknown route → `404 application/json {"error":"Not found"}`; unexpected → `500 {"error":"Internal server error"}` + `eprintln!`.
+* **Error format gotcha:** `API.md` says JSON errors, but Hono `HTTPException` bodies are `text/plain`. Tests assert `text()` matches `/Invalid era id/` etc. Port as: route errors → `status + text/plain` body = message (e.g. `400 Invalid era id`); unknown route → `404 application/json {"error":"Not found"}`; unexpected → `500 {"error":"Internal server error"}` + an error log line (`eprintln!` at the time; logging is `tracing` now).
 * `keepAliveTimeout=61s`, `headersTimeout` equivalent; handle `SIGINT/SIGTERM`: stop accepting, abort background chain, close DB.
 * Startup DDL **must run verbatim** (from `index.ts`): `CREATE TABLE IF NOT EXISTS eras/songs/files`, the 8 `CREATE INDEX IF NOT EXISTS`, `PRAGMA table_info` conditional `ALTER TABLE ADD COLUMN files.duration / eras.is_main / songs.catalog_id`, then `UPDATE eras SET dominant_color='666666' WHERE dominant_color IS NULL OR trim(dominant_color)=''`.
 * PRAGMAs on open (from `db/client.ts`): `journal_mode=WAL, busy_timeout=5000, synchronous=NORMAL, foreign_keys=ON, cache_size=-64000, temp_store=MEMORY, mmap_size=67108864, journal_size_limit=67108864`.
@@ -97,7 +105,7 @@ files(url PK, downloaded DEFAULT 0, filename, duration REAL)
 5. **`coverVersion`**: `sha1(imageUrl ?? "").hex()[0:12]`, LRU 1000. Note: era-cover ETag uses `sha1(String(id))`, not DB `image_url`.
 6. **`rankSongSearch`** (exact port of `util/rankSongSearch.ts`): strip leading `⭐✨🏅🗑️🤖` (priority 0–4, repeat loop), `normalize=same as q`, `splitParentheticalText` (depth-count parens, strip parens), `fieldScore(value,query,base)`: `pos=value.indexOf(query)`; `wordChar=/[\p{L}\p{N}]/u`; `startsAtWord = pos==0 || !wordChar(before)`; scoring `exact→base, pos0→base+10+c, wordWord→base+20+c, wordStart→base+30+c, substr→base+40+c` where `c=min(pos,99)/100 + min(lenDiff,999)/100000`. `relevance`: title-exact=0, outside-parens base 0, inside +1000, full-title +1500, era +2000, notes +3000, quality +4000, availability +4100. Sort: `trunc(score)`, `categoryPriority`, `playable desc`, `score`, `Intl.Collator(base,numeric)` title, `id`. Top-`limit` via max-heap. For collator use `icu_collator` or `human_sort`-style fallback; tests don't assert exact search order, but keep tier logic identical.
 7. **Range/ETag** (`util/serveFile.ts` + stream/download/cover routes): always `Accept-Ranges: bytes` (except transcode: `none`), `ETag="<sizeHex>-<mtimeMsHex>"`, honor `If-None-Match → 304` (empty body). Parse `Range: bytes=N-M | N- | -N`. Stream: malformed/unsatisfiable → `416 + Content-Range: bytes */size`. Download: malformed/invalid → fall through to `200` (no 416); only serve `206` when `If-Range` missing or `==ETag`. Use `tokio::fs::File` + `ReaderStream` + `StreamBody`; kill stream on client abort.
-8. **`probeAudioFile` + `deleteInvalidFile`** (`invalidFiles.ts`): `stat` (missing→`missing`, size 0→`empty`), `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1` 10s (`ENOENT` binary-missing → fail-open `valid`), `null/<=0` → `no-duration`, then `ffprobe -select_streams a:0 -show_entries stream=codec_name` (`ENOENT`→fail-open, empty→`no-audio-stream`). Do **not** use bitrate. `deleteInvalidFile`: `unlink`, `playable.remove`, `UPDATE files SET downloaded=0,duration=NULL WHERE url`, `eprintln!`.
+8. **`probeAudioFile` + `deleteInvalidFile`** (`invalidFiles.ts`): `stat` (missing→`missing`, size 0→`empty`), `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1` 10s (`ENOENT` binary-missing → fail-open `valid`), `null/<=0` → `no-duration`, then `ffprobe -select_streams a:0 -show_entries stream=codec_name` (`ENOENT`→fail-open, empty→`no-audio-stream`). Do **not** use bitrate. `deleteInvalidFile`: `unlink`, `playable.remove`, `UPDATE files SET downloaded=0,duration=NULL WHERE url`, log. (Superseded: request handlers no longer delete files; the background sync quarantines them on a definitive ffprobe verdict only.)
 9. **Duration** (`getDuration.ts`): `tokio::process ffprobe` same args, LRU 500 keyed `(path,mtimeMs)`, in-flight dedup `HashMap<path,SharedFuture>`.
 
 ## 5. Routes (all `GET`)

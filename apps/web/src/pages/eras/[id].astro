@@ -1,284 +1,527 @@
 ---
 import type { Era, Song } from '@yetracker/types';
 import BackButton from '../../components/BackButton.astro';
+import CoverImage from '../../components/CoverImage.astro';
+import ErrorPage from '../../components/ErrorPage.astro';
 import Pagination from '../../components/Pagination.astro';
 import SongList from '../../components/SongList.astro';
-import { apiUrl, ERA_PAGE_SIZE, fetchApi, publicApiBaseUrl } from '../../config';
+import {
+  ApiBadRequestError,
+  ApiNotFoundError,
+  ApiServerError,
+  ApiUnreachableError,
+  absolutePublicApiBaseUrl,
+  ERA_PAGE_SIZE,
+  fetchApi,
+  fetchJson,
+  noStore,
+  OUTAGE_RETRY_AFTER_SECONDS,
+  originDependentCacheControl,
+  PAGE_CACHE_CONTROL,
+  publicApiBaseUrl,
+  publicApiOrigin,
+} from '../../config';
 import Layout from '../../layouts/Layout.astro';
-import { songCategoryIds } from '../../songCategories';
+import { normalizeSongCategory, SONG_CATEGORIES } from '../../songCategories';
 import { DEFAULT_SONG_SORT, normalizeSongSort } from '../../songSorts';
-import { colorValue } from '../../utils/color';
+import { colorValue, themeStyle } from '../../utils/color';
+import { coverUrl } from '../../utils/cover';
+import { type EraSummary, loadEraSummaries } from '../../utils/era-list';
+import {
+  type EraListParams,
+  eraPageHref,
+  eraPageTitle,
+  eraSongsApiPath,
+  maxReachablePage,
+  pageCountFor,
+  parseId,
+  parsePageParam,
+  parseTotalCount,
+  summarize,
+} from '../../utils/era-page';
+import { clampQuery } from '../../utils/search';
 
-const { id } = Astro.params;
-const pageValue = Astro.url.searchParams.get('page') ?? '1';
-const parsedPage = Number(pageValue);
-const currentPage = /^\d+$/.test(pageValue) && Number.isSafeInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
-const rawQuery = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 200);
-const rawCategory = (Astro.url.searchParams.get('category') ?? '').trim();
-const category = songCategoryIds().includes(rawCategory) ? rawCategory : '';
-const sort = normalizeSongSort(Astro.url.searchParams.get('sort'));
-const sortParam = sort === DEFAULT_SONG_SORT ? '' : sort;
-const offset = (currentPage - 1) * ERA_PAGE_SIZE;
-const songsParams = new URLSearchParams({
-  limit: String(ERA_PAGE_SIZE),
-  offset: String(offset),
-});
-if (rawQuery) songsParams.set('q', rawQuery);
-if (category) songsParams.set('category', category);
-if (sortParam) songsParams.set('sort', sortParam);
-const songsPath = `/eras/${encodeURIComponent(id ?? '')}/songs?${songsParams.toString()}`;
-
-/** Era neighbours are nice-to-have: a failure here must not break the page. */
-async function loadEraList(): Promise<Era[]> {
-  try {
-    const response = await fetchApi('/eras');
-    const body: unknown = await response.json();
-    return Array.isArray(body) ? (body as Era[]) : [];
-  } catch (error) {
-    console.error('[era] /eras request failed; era navigation disabled:', error);
-    return [];
-  }
+interface Failure {
+  status: 400 | 404 | 503;
+  heading?: string;
+  message?: string;
+  detail?: string;
+  retryAfter?: number;
+  secondaryAction?: { href: string; label: string };
 }
 
-let data!: Era;
-let songData!: (Song & { url: string; downloaded: number })[];
-let headerTotalRaw: string | null = null;
-let eraList: Era[] = [];
-try {
-  const [req, songsReq, eras] = await Promise.all([fetchApi(`/eras/${id}`), fetchApi(songsPath), loadEraList()]);
-  eraList = eras;
-  [data, songData] = await Promise.all([req.json(), songsReq.json()]);
-  headerTotalRaw = songsReq.headers.get('x-total-count');
-} catch (error) {
-  const status = (error as { status?: number }).status;
-  if (status === 404) {
-    // Render the branded 404 in place, with a real 404 status.
-    Astro.response.status = 404;
-    return Astro.rewrite('/404');
+const eraId = parseId(Astro.params.id);
+const search = Astro.url.searchParams;
+const requestedPage = parsePageParam(search.get('page'));
+const query = clampQuery(search.get('q') ?? '');
+const category = normalizeSongCategory(search.get('category'));
+const sort = normalizeSongSort(search.get('sort'));
+// The default order is never sent explicitly (older APIs only know its `id` alias).
+const listParams: EraListParams = { q: query, category, sort: sort === DEFAULT_SONG_SORT ? '' : sort };
+const maxPage = maxReachablePage(ERA_PAGE_SIZE);
+
+const ERA_NOT_FOUND: Failure = {
+  status: 404,
+  heading: 'Era not found',
+  message: 'There is no era at this address. The link may be mistyped, or the era is no longer in the catalog.',
+};
+
+function outageFailure(error: ApiServerError | ApiUnreachableError): Failure {
+  const detail =
+    error instanceof ApiUnreachableError
+      ? error.timedOut
+        ? 'The catalog service did not answer in time.'
+        : 'The catalog service could not be reached.'
+      : 'The catalog service reported an error.';
+  const retryAfter = (error instanceof ApiServerError ? error.retryAfter : undefined) ?? OUTAGE_RETRY_AFTER_SECONDS;
+  return { status: 503, detail, retryAfter };
+}
+
+/** Maps an API error to the page to show; anything unexpected is re-thrown (500 page). */
+function toFailure(error: unknown, { badRequestIsNotFound }: { badRequestIsNotFound: boolean }): Failure {
+  if (error instanceof ApiNotFoundError) return ERA_NOT_FOUND;
+  if (error instanceof ApiBadRequestError) {
+    if (badRequestIsNotFound) return ERA_NOT_FOUND;
+    return {
+      status: 400,
+      detail: error.message,
+      secondaryAction: eraId === null ? undefined : { href: eraPageHref(eraId), label: 'Show all songs of this era' },
+    };
   }
+  if (error instanceof ApiServerError || error instanceof ApiUnreachableError) return outageFailure(error);
   throw error;
 }
-const headerTotal = Number(headerTotalRaw);
-const totalSongs = Number.isFinite(headerTotal) ? Math.max(0, Math.trunc(headerTotal)) : songData.length;
-const pageCount = Math.max(1, Math.ceil(totalSongs / ERA_PAGE_SIZE));
-const eraIndex = eraList.findIndex((era) => era.id === data.id);
-const previousEra = eraIndex > 0 ? eraList[eraIndex - 1] : null;
-const nextEra = eraIndex >= 0 && eraIndex < eraList.length - 1 ? eraList[eraIndex + 1] : null;
-const queryParams = new URLSearchParams();
-if (rawQuery) queryParams.set('q', rawQuery);
-if (category) queryParams.set('category', category);
-if (sortParam) queryParams.set('sort', sortParam);
-const queryString = queryParams.toString();
-const querySuffix = queryString ? `?${queryString}` : '';
-if (currentPage > pageCount) {
-  const target = `/eras/${id}${pageCount > 1 ? `?page=${pageCount}${queryString ? `&${queryString}` : ''}` : querySuffix}`;
-  return Astro.redirect(target);
+
+function isEra(value: unknown): value is Era {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Era).id === 'number' &&
+    typeof (value as Era).name === 'string'
+  );
 }
-const dominantColor = colorValue(data.dominantColor);
-const coverVersion = data.coverVersion ?? dominantColor.slice(1);
-const coverUrl = `${apiUrl(publicApiBaseUrl, `/eras/${id}/cover`)}?v=${encodeURIComponent(coverVersion)}`;
-const paginationBase = `/eras/${id}${querySuffix}`;
+
+/** The real number of matching songs, asked with the smallest possible page (for out-of-range page numbers). */
+async function countSongs(id: number): Promise<number> {
+  const response = await fetchApi(eraSongsApiPath(id, listParams, 0, 1));
+  void response.body?.cancel().catch(() => {});
+  return parseTotalCount(response.headers.get('x-total-count')) ?? 0;
+}
+
+let failure: Failure | null = null;
+let era: Era | null = null;
+let songs: Song[] = [];
+let totalSongs = 0;
+let eraList: EraSummary[] = [];
+
+if (eraId === null) {
+  failure = ERA_NOT_FOUND;
+} else if (requestedPage === null) {
+  failure = {
+    status: 400,
+    detail: 'The page number in the link must be a positive whole number.',
+    secondaryAction: { href: eraPageHref(eraId, listParams), label: 'Go to the first page' },
+  };
+} else {
+  const pageInRange = requestedPage <= maxPage;
+  const offset = (requestedPage - 1) * ERA_PAGE_SIZE;
+  const [eraResult, songsResult, listResult] = await Promise.allSettled([
+    fetchJson<unknown>(`/eras/${eraId}`),
+    pageInRange ? fetchJson<unknown>(eraSongsApiPath(eraId, listParams, offset, ERA_PAGE_SIZE)) : Promise.resolve(null),
+    loadEraSummaries(),
+  ]);
+
+  if (eraResult.status === 'rejected') {
+    failure = toFailure(eraResult.reason, { badRequestIsNotFound: true });
+  } else if (!isEra(eraResult.value.data)) {
+    failure = outageFailure(new ApiServerError('API returned an invalid era', `/eras/${eraId}`));
+  } else if (songsResult.status === 'rejected') {
+    era = eraResult.value.data;
+    failure = toFailure(songsResult.reason, { badRequestIsNotFound: false });
+  } else {
+    era = eraResult.value.data;
+    const songsData = songsResult.value?.data;
+    if (songsResult.value !== null && !Array.isArray(songsData)) {
+      failure = outageFailure(new ApiServerError('API returned an invalid song list', `/eras/${eraId}/songs`));
+    } else {
+      songs = (songsData ?? []) as Song[];
+      const headerTotal = songsResult.value
+        ? parseTotalCount(songsResult.value.response.headers.get('x-total-count'))
+        : null;
+      totalSongs = headerTotal ?? offset + songs.length;
+      if (!pageInRange || (songs.length === 0 && requestedPage > 1)) {
+        // Past the end. Older API versions report a total of 0 there, so ask for the real total.
+        try {
+          const total = pageInRange && headerTotal ? headerTotal : await countSongs(eraId);
+          const lastPage = Math.min(pageCountFor(total, ERA_PAGE_SIZE), maxPage);
+          if (requestedPage > lastPage) return Astro.redirect(eraPageHref(eraId, listParams, lastPage), 302);
+          totalSongs = total;
+        } catch (error) {
+          failure = toFailure(error, { badRequestIsNotFound: false });
+        }
+      }
+    }
+  }
+
+  if (listResult.status === 'fulfilled') {
+    eraList = listResult.value.eras;
+  } else {
+    // Only the previous/next links are missing: render, but keep the degraded page out of caches.
+    console.error('[era] /eras request failed; era navigation disabled:', listResult.reason);
+    noStore(Astro.response);
+  }
+}
+
+if (failure) {
+  Astro.response.status = failure.status;
+  if (failure.retryAfter) Astro.response.headers.set('Retry-After', String(failure.retryAfter));
+}
+
+const currentPage = requestedPage ?? 1;
+const pageCount = Math.min(pageCountFor(totalSongs, ERA_PAGE_SIZE), maxPage);
+const currentEraId = era?.id;
+const eraIndex = currentEraId === undefined ? -1 : eraList.findIndex((item) => item.id === currentEraId);
+const previousEra = eraIndex > 0 ? eraList[eraIndex - 1] : undefined;
+const nextEra = eraIndex >= 0 ? eraList[eraIndex + 1] : undefined;
+const categoryLabel = SONG_CATEGORIES.find((item) => item.id === category)?.label;
+const subtitle = era?.subtitle?.trim() || null;
+const description = era?.description?.trim() ?? '';
+const notes = era?.notes?.trim() ?? '';
+const pageTitle = era ? eraPageTitle(era.name, { query, categoryLabel, page: currentPage }) : '';
+const metaDescription = era
+  ? summarize(description || notes || `Unreleased songs from the ${era.name} era, as catalogued by Ye Tracker.`)
+  : '';
+const ogImage =
+  era?.hasCover === true && era.coverVersion
+    ? coverUrl(absolutePublicApiBaseUrl(Astro.request), era.id, era.coverVersion, 'jpeg')
+    : null;
+// With a same-origin API the image URL is made absolute from the site's origin, which may come from the request.
+if (!failure && ogImage && !publicApiOrigin && !Astro.response.headers.has('Cache-Control')) {
+  Astro.response.headers.set('Cache-Control', originDependentCacheControl(PAGE_CACHE_CONTROL, 60));
+}
+const paginationBase = era ? eraPageHref(era.id, listParams) : '';
+const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${colorValue(era.dominantColor)}` : '';
 ---
 
-<Layout title={`${data.name} | Ye Tracker`}>
-  <div class="main" style={`--dominantColor: ${dominantColor}`}>
-    <BackButton />
-    <div class="data">
-      <img src={coverUrl} alt="" width="512" height="512" fetchpriority="high" decoding="async" />
-      <div class="text">
-        <h1>{data.name}</h1>
-        {data.description ? <p>{data.description}</p> : null}
+{
+  failure || !era ? (
+    <ErrorPage
+      status={failure?.status ?? 404}
+      heading={failure?.heading}
+      message={failure?.message}
+      detail={failure?.detail}
+      retryHref={`${Astro.url.pathname}${Astro.url.search}`}
+      secondaryAction={failure?.secondaryAction}
+    />
+  ) : (
+    <Layout
+      title={pageTitle}
+      description={metaDescription}
+      canonicalPath={eraPageHref(era.id, listParams, currentPage)}
+      ogImage={ogImage}
+      ogImageAlt={ogImage ? `Cover art of ${era.name}` : undefined}
+    >
+      <div class="era-page" style={pageStyle}>
+        <div class="era-toolbar">
+          <BackButton />
+          {(previousEra || nextEra) && (
+            <nav class="era-nav" aria-label="Other eras">
+              {previousEra && (
+                <a class="era-nav__link" href={`/eras/${previousEra.id}`} rel="prev" title={previousEra.name}>
+                  <span aria-hidden="true">←</span>
+                  <span class="sr-only">Previous era:</span>
+                  <span class="era-nav__name">{previousEra.name}</span>
+                </a>
+              )}
+              {nextEra && (
+                <a
+                  class="era-nav__link era-nav__link--next"
+                  href={`/eras/${nextEra.id}`}
+                  rel="next"
+                  title={nextEra.name}
+                >
+                  <span class="sr-only">Next era:</span>
+                  <span class="era-nav__name">{nextEra.name}</span>
+                  <span aria-hidden="true">→</span>
+                </a>
+              )}
+            </nav>
+          )}
+        </div>
+
+        <header class="era-header">
+          <CoverImage
+            class="era-header__cover"
+            eraId={era.id}
+            eraName={era.name}
+            hasCover={era.hasCover}
+            coverVersion={era.coverVersion}
+            dominantColor={era.dominantColor}
+            priority
+          />
+          <div class="era-header__text">
+            <h1>{era.name}</h1>
+            {subtitle && <p class="era-header__subtitle">{subtitle}</p>}
+          </div>
+          {(description || notes) && (
+            <details class="era-about">
+              <summary>About this era</summary>
+              <div class="era-about__content">
+                {description && <p class="era-about__description">{description}</p>}
+                {notes && (
+                  <div class="era-about__notes">
+                    <h2 class="era-about__heading">Timeline</h2>
+                    <p>{notes}</p>
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
+        </header>
+
+        <div class="era-songs">
+          <Pagination
+            currentPage={currentPage}
+            pageCount={pageCount}
+            totalItems={totalSongs}
+            pageSize={ERA_PAGE_SIZE}
+            basePath={paginationBase}
+            paginationId="song-pagination-top"
+            position="top"
+          />
+          <SongList
+            eraId={era.id}
+            eraName={era.name}
+            eraSubtitle={subtitle}
+            songs={songs}
+            apiBaseUrl={publicApiBaseUrl}
+            dominantColor={era.dominantColor}
+            hasCover={era.hasCover}
+            coverVersion={era.coverVersion ?? null}
+            initialQuery={query}
+            initialCategory={category}
+            sort={sort}
+            total={totalSongs}
+            offset={(currentPage - 1) * ERA_PAGE_SIZE}
+          />
+          <Pagination
+            currentPage={currentPage}
+            pageCount={pageCount}
+            totalItems={totalSongs}
+            pageSize={ERA_PAGE_SIZE}
+            basePath={paginationBase}
+            position="bottom"
+          />
+        </div>
       </div>
-      {data.notes ? <div class="divider"></div> : null}
-      {data.notes ? <p class="notes">{data.notes}</p> : null}
-    </div>
-    {
-      previousEra || nextEra ? (
-        <nav class="era-nav" aria-label="Era navigation">
-          {previousEra ? (
-            <a href={`/eras/${previousEra.id}`} rel="prev">
-              <span aria-hidden="true">←</span> {previousEra.name}
-            </a>
-          ) : (
-            <span class="era-nav__empty" />
-          )}
-          {nextEra ? (
-            <a class="era-nav__next" href={`/eras/${nextEra.id}`} rel="next">
-              {nextEra.name} <span aria-hidden="true">→</span>
-            </a>
-          ) : (
-            <span class="era-nav__empty" />
-          )}
-        </nav>
-      ) : null
-    }
-    <div class="list">
-      <Pagination
-        currentPage={currentPage}
-        pageCount={pageCount}
-        totalItems={totalSongs}
-        pageSize={ERA_PAGE_SIZE}
-        basePath={paginationBase}
-        paginationId="song-pagination-top"
-      />
-      <SongList
-        eraId={id}
-        eraName={data.name}
-        songs={songData}
-        apiBaseUrl={publicApiBaseUrl}
-        coverVersion={coverVersion}
-        initialQuery={rawQuery}
-        initialCategory={category}
-        sort={sort}
-      />
-      <Pagination
-        currentPage={currentPage}
-        pageCount={pageCount}
-        totalItems={totalSongs}
-        pageSize={ERA_PAGE_SIZE}
-        basePath={paginationBase}
-      />
-    </div>
-  </div>
-</Layout>
+    </Layout>
+  )
+}
 
 <style>
-  img {
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: 25vh;
-    aspect-ratio: 1 / 1;
-    object-fit: cover;
-    border-radius: 16px;
-    flex-shrink: 0;
-  }
-  h1 {
-    font-size: 2.5em;
-    margin-bottom: 0;
-  }
-  p {
-    font-size: 1.1em;
-  }
-  .main {
-    padding: 1vh;
-    color: color-mix(in oklab, var(--dominantColor) 10%, white);
-  }
-  .notes {
-    min-width: 15%;
-    max-width: 25%;
-    font-size: 1em;
-    white-space: pre-line;
-    overflow-wrap: anywhere;
-    max-height: 30vh;
-    overflow-y: auto;
-  }
-  .divider {
-    border: 1px solid color-mix(in srgb, var(--dominantColor) 30%, transparent);
-    align-self: stretch;
-    height: auto;
-    margin-right: 0.75vw;
-    margin-top: -1vh;
-    margin-bottom: -1vh;
+  .era-page {
+    box-sizing: border-box;
+    padding: 0.75rem 0.75rem 0;
+    color: var(--theme-text);
   }
 
-  .data {
-    display: flex;
-    color: color-mix(in oklab, var(--dominantColor) 20%, white);
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: wrap;
-    margin-top: 4rem;
-    padding: 1vh;
-    border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
-    background-color: color-mix(in srgb, var(--dominantColor) 25%, transparent);
-    border-radius: 16px;
-  }
-  .era-nav {
+  .era-toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    margin: 1rem 0.25rem 0;
-    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
   }
-  .era-nav a {
+  .era-nav {
+    display: flex;
     min-width: 0;
-    max-width: 46%;
-    overflow: hidden;
-    padding: 0.55rem 0.8rem;
-    border: 2px solid color-mix(in srgb, var(--dominantColor) 45%, transparent);
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+  .era-nav__link {
+    display: inline-flex;
+    box-sizing: border-box;
+    min-width: 2.75rem;
+    max-width: 20rem;
+    min-height: 2.75rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.8rem;
+    border: 2px solid var(--theme-accent);
     border-radius: 0.65rem;
-    color: color-mix(in oklab, var(--dominantColor) 15%, white);
-    background: color-mix(in srgb, var(--dominantColor) 15%, transparent);
+    color: var(--theme-text);
+    background: var(--theme-surface);
+    font-size: 0.9rem;
     text-decoration: none;
+  }
+  .era-nav__name {
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .era-nav a:hover,
-  .era-nav a:focus-visible {
-    border-color: color-mix(in srgb, var(--dominantColor) 80%, white);
-    background: color-mix(in srgb, var(--dominantColor) 28%, transparent);
+  .era-nav__link:hover {
+    border-color: var(--theme-focus-ring);
+    background: var(--theme-background);
   }
-  .era-nav a:focus-visible {
-    outline: 3px solid #fff;
+  .era-nav__link:focus-visible {
+    outline: 2px solid var(--theme-focus-ring);
     outline-offset: 2px;
   }
-  .era-nav__empty {
-    flex: none;
-  }
-  .list {
-    border: 4px solid color-mix(in srgb, var(--dominantColor) 70%, transparent);
-    border-radius: 16px;
-    padding: 1vh;
-    background-color: color-mix(in srgb, var(--dominantColor) 20%, transparent);
-    margin-top: 2vh;
-  }
-  .text {
-    flex: 1 1 16rem;
-    min-width: 0;
-    padding: 1vw;
-    padding-right: 0.25vw;
-  }
 
-  .text p {
+  .era-header {
+    display: grid;
+    grid-template-columns: clamp(9rem, 16vw, 13rem) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      'cover text'
+      'cover about';
+    align-items: start;
+    gap: 0.5rem 1.5rem;
+    padding: 1rem;
+    border: 2px solid var(--theme-accent);
+    border-radius: 16px;
+    background: var(--theme-background);
+  }
+  .era-header :global(.era-header__cover) {
+    grid-area: cover;
+    border-radius: 12px;
+  }
+  .era-header__text {
+    grid-area: text;
+    min-width: 0;
+  }
+  h1 {
+    margin: 0.25rem 0 0;
+    font-size: clamp(1.6rem, 3.5vw, 2.5rem);
+    line-height: 1.15;
     overflow-wrap: anywhere;
   }
+  .era-header__subtitle {
+    margin: 0.35rem 0 0;
+    color: var(--theme-muted-text);
+    font-size: 1.05rem;
+  }
 
-  @media (max-width: 700px) {
-    .data {
-      align-items: stretch;
-      flex-direction: column;
-      margin-top: 0;
+  .era-about {
+    grid-area: about;
+    min-width: 0;
+  }
+  .era-about > summary {
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+    color: var(--theme-accent-text);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .era-about__content {
+    display: grid;
+    gap: 0.5rem 1.5rem;
+    color: var(--theme-text);
+    line-height: 1.55;
+  }
+  .era-about__description,
+  .era-about__notes p {
+    margin: 0;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
+  .era-about__notes {
+    color: var(--theme-muted-text);
+    font-size: 0.9rem;
+  }
+  .era-about__heading {
+    margin: 0 0 0.25rem;
+    color: var(--theme-muted-text);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  /* Wide screens always show the description: the disclosure is only there for phones. Browsers without
+     ::details-content keep the (closed) disclosure. */
+  @media (min-width: 48rem) {
+    @supports selector(::details-content) {
+      .era-about > summary {
+        display: none;
+      }
+      .era-about::details-content {
+        display: block;
+        content-visibility: visible;
+        block-size: auto;
+      }
+    }
+    .era-about__content:has(.era-about__notes) {
+      grid-template-columns: minmax(0, 2fr) minmax(12rem, 1fr);
+    }
+  }
+
+  .era-songs {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    border: 2px solid var(--theme-accent);
+    border-radius: 16px;
+    background: var(--theme-background);
+  }
+
+  /* Phones: one toolbar row (the neighbouring eras become arrows; their names stay available to screen readers and
+     as tooltips), a small cover beside the title, and the description behind a disclosure, so the song list starts
+     near the top of the screen. */
+  @media (max-width: 47.99rem) {
+    .era-page {
+      padding-inline: 0.5rem;
+    }
+    .era-toolbar {
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .era-toolbar :global(.back-link) {
+      min-width: 0;
+    }
+    .era-nav {
+      flex: none;
+    }
+    .era-nav__link {
+      padding-inline: 0.5rem;
+    }
+    .era-nav__name {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    .era-header {
+      grid-template-columns: 4.5rem minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      align-items: center;
+      gap: 0 0.75rem;
       padding: 0.75rem;
     }
-
-    .data img {
-      width: min(100%, 20rem);
-      height: auto;
-      max-height: none;
-      aspect-ratio: 1 / 1;
-      object-fit: cover;
-      align-self: center;
+    .era-header:has(.era-about[open]) {
+      grid-template-areas:
+        'cover text'
+        'about about';
     }
-
-    .text {
-      padding: 0.5rem 0;
+    .era-header :global(.era-header__cover) {
+      align-self: start;
+      border-radius: 8px;
     }
-
     h1 {
-      margin-top: 0.5rem;
-      font-size: 2rem;
+      margin-top: 0;
     }
-
-    .divider {
-      display: none;
+    .era-header__subtitle {
+      font-size: 0.9rem;
     }
-
-    .notes {
-      min-width: 0;
-      max-width: none;
-      margin-bottom: 0;
+    .era-about > summary {
+      min-height: 2.25rem;
+    }
+    .era-songs {
+      margin-top: 0.75rem;
+      padding: 0.5rem;
+      border-width: 1px;
     }
   }
 </style>

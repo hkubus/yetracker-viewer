@@ -1,0 +1,23 @@
+---
+/**
+ * Base for the icon components in this folder (and for one-off icons): a decorative inline <svg>
+ * with aria-hidden="true" and focusable="false". Never rely on an icon for meaning — give the
+ * surrounding button/link an accessible name instead.
+ *
+ * Props:
+ * - size?: string | number — width and height; numbers are px. Default '1em' (follows font-size).
+ * - viewBox?: string — default '0 0 24 24'.
+ * - any other SVG attribute (class, fill, stroke, stroke-width, data-*, …) is forwarded to the <svg>.
+ *   The parent's scoped-style attribute is forwarded too, so `.parent svg { … }` rules keep working.
+ * Slot: the shapes (<path>, <rect>, <circle>, …).
+ */
+import type { HTMLAttributes } from 'astro/types';
+
+type Props = Omit<HTMLAttributes<'svg'>, 'aria-hidden' | 'focusable' | 'width' | 'height'> & {
+  size?: string | number;
+};
+
+const { size = '1em', viewBox = '0 0 24 24', ...attrs } = Astro.props;
+---
+
+<svg {...attrs} width={size} height={size} viewBox={viewBox} aria-hidden="true" focusable="false"><slot /></svg>

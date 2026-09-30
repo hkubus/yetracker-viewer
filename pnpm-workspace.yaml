@@ -1,25 +1,16 @@
-allowBuilds:
-  esbuild: true
-  sharp: true
-minimumReleaseAgeExclude:
-  - astro@7.1.5
-  - '@astrojs/node@11.0.3'
-  - '@astrojs/compiler-binding-darwin-arm64@0.3.2'
-  - '@astrojs/compiler-binding-darwin-x64@0.3.2'
-  - '@astrojs/compiler-binding-linux-arm64-gnu@0.3.2'
-  - '@astrojs/compiler-binding-linux-arm64-musl@0.3.2'
-  - '@astrojs/compiler-binding-linux-x64-gnu@0.3.2'
-  - '@astrojs/compiler-binding-linux-x64-musl@0.3.2'
-  - '@astrojs/compiler-binding-wasm32-wasi@0.3.2'
-  - '@astrojs/compiler-binding-win32-arm64-msvc@0.3.2'
-  - '@astrojs/compiler-binding-win32-x64-msvc@0.3.2'
-  - '@astrojs/compiler-binding@0.3.2'
-  - '@astrojs/compiler-rs@0.3.2'
-onlyBuiltDependencies:
-  - esbuild
-  - sharp
-overrides:
-  postcss: 8.5.24
 packages:
   - "apps/*"
   - "packages/*"
+
+# esbuild's install script links its platform binary; nothing else needs one.
+allowBuilds:
+  esbuild: true
+
+# Astro only uses sharp for its default image service. The web app is configured
+# with the passthrough service, so the optional native dependency is not installed.
+ignoredOptionalDependencies:
+  - sharp
+
+overrides:
+  # Keep every PostCSS consumer on a release that pulls a patched nanoid.
+  postcss: ^8.5.28

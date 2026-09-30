@@ -1,4 +1,23 @@
 ---
+/**
+ * Page links for a paginated song list. Wide screens get previous/next plus numbered pages; phones get
+ * first/previous/"Page n of m"/next/last. Colors come from the `--theme-*` variables of an ancestor (neutral grays
+ * without one).
+ */
+interface Props {
+  currentPage: number;
+  pageCount: number;
+  totalItems: number;
+  pageSize: number;
+  /** The list's URL (with its query string) without `page`. */
+  basePath: string;
+  paginationId?: string;
+  /** Which of the list's navs this is, so the two landmarks get distinct names. Default: from `paginationId`. */
+  position?: 'top' | 'bottom';
+  /** Fragment added to page links so the new page opens at the list (`''` for none). */
+  fragment?: string;
+}
+
 const {
   currentPage,
   pageCount,
@@ -6,68 +25,121 @@ const {
   pageSize,
   basePath,
   paginationId = 'song-pagination',
-} = Astro.props as {
-  currentPage: number;
-  pageCount: number;
-  totalItems: number;
-  pageSize: number;
-  basePath: string;
-  paginationId?: string;
-};
+  position = paginationId.endsWith('-top') ? 'top' : 'bottom',
+  fragment = 'songs',
+} = Astro.props;
 
-const firstItem = totalItems === 0 ? 0 : (currentPage - 1) * pageSize + 1;
-const lastItem = Math.min(currentPage * pageSize, totalItems);
-const visiblePages = Array.from(
-  new Set([1, pageCount, currentPage - 2, currentPage - 1, currentPage, currentPage + 1, currentPage + 2]),
-)
-  .filter((page) => page >= 1 && page <= pageCount)
+const wholeNumber = (value: number, fallback: number) => (Number.isFinite(value) ? Math.trunc(value) : fallback);
+const total = Math.max(0, wholeNumber(totalItems, 0));
+const size = Math.max(1, wholeNumber(pageSize, 1));
+const pages = Math.max(1, wholeNumber(pageCount, 1));
+const current = Math.min(Math.max(1, wholeNumber(currentPage, 1)), pages);
+const first = Math.min((current - 1) * size + 1, total);
+const last = Math.min(current * size, total);
+const format = (value: number) => value.toLocaleString('en-US');
+const noun = total === 1 ? 'song' : 'songs';
+const summary =
+  total === 0
+    ? 'No songs'
+    : first >= last
+      ? `Showing ${format(last)} of ${format(total)} ${noun}`
+      : `Showing ${format(first)}–${format(last)} of ${format(total)} ${noun}`;
+const label = position === 'top' ? 'Song pages' : 'Song pages, end of list';
+
+const numbered = Array.from(new Set([1, pages, current - 2, current - 1, current, current + 1, current + 2]))
+  .filter((page) => page >= 1 && page <= pages)
   .sort((left, right) => left - right);
-const href = (page: number) => {
-  const separator = basePath.includes('?') ? '&' : '?';
-  return page === 1 ? basePath : `${basePath}${separator}page=${page}`;
-};
-const isFirstPage = currentPage <= 1;
-const isLastPage = currentPage >= pageCount;
+
+function pageHref(page: number): string {
+  const url = new URL(basePath || '/', 'http://localhost');
+  if (page > 1) url.searchParams.set('page', String(page));
+  else url.searchParams.delete('page');
+  return `${url.pathname}${url.search}${fragment ? `#${fragment}` : ''}`;
+}
+
+/** Step links; a step that goes nowhere is shown dimmed and hidden from assistive technology, not rendered as a link. */
+const steps = {
+  first: { page: 1, text: 'First page', glyph: '«', enabled: current > 1 },
+  previous: { page: current - 1, text: 'Previous', glyph: '‹', enabled: current > 1 },
+  next: { page: current + 1, text: 'Next', glyph: '›', enabled: current < pages },
+  last: { page: pages, text: 'Last page', glyph: '»', enabled: current < pages },
+} as const;
 ---
 
-<nav id={paginationId} class="pagination" aria-label="Song pages">
-  <p class="pagination__summary">
-    Showing {firstItem.toLocaleString()}–{lastItem.toLocaleString()} of {totalItems.toLocaleString()} songs
-  </p>
-
+<nav id={paginationId} class="pagination" aria-label={label}>
+  <p class="pagination__summary">{summary}</p>
   {
-    pageCount > 1 && (
-      <div class="pagination__links">
-        <a
-          class:list={['pagination__direction', { disabled: isFirstPage }]}
-          href={isFirstPage ? undefined : href(Math.max(1, currentPage - 1))}
-          aria-disabled={isFirstPage ? 'true' : undefined}
-          tabindex={isFirstPage ? '-1' : undefined}
-          rel="prev"
-        >
-          Previous
-        </a>
-        <p class="pagination__mobile">Page {currentPage} of {pageCount}</p>
-        <div class="pagination__pages" data-page-count={pageCount}>
-          {visiblePages.map((page, index) => (
-            <>
-              {index > 0 && page - visiblePages[index - 1] > 1 && <span aria-hidden="true">…</span>}
-              <a href={href(page)} aria-current={page === currentPage ? 'page' : undefined}>
+    pages > 1 && (
+      <ul class="pagination__list">
+        <li class="pagination__item pagination__item--compact" aria-hidden={steps.first.enabled ? undefined : 'true'}>
+          {steps.first.enabled ? (
+            <a class="pagination__link pagination__link--icon" href={pageHref(steps.first.page)}>
+              <span aria-hidden="true">{steps.first.glyph}</span>
+              <span class="sr-only">{steps.first.text}</span>
+            </a>
+          ) : (
+            <span class="pagination__link pagination__link--icon is-disabled">{steps.first.glyph}</span>
+          )}
+        </li>
+        <li class="pagination__item" aria-hidden={steps.previous.enabled ? undefined : 'true'}>
+          {steps.previous.enabled ? (
+            <a class="pagination__link pagination__link--step" href={pageHref(steps.previous.page)} rel="prev">
+              <span aria-hidden="true">{steps.previous.glyph}</span>
+              <span class="pagination__step-text">{steps.previous.text}</span>
+            </a>
+          ) : (
+            <span class="pagination__link pagination__link--step is-disabled">
+              <span>{steps.previous.glyph}</span>
+              <span class="pagination__step-text">{steps.previous.text}</span>
+            </span>
+          )}
+        </li>
+        {numbered.map((page, index) => (
+          <>
+            {index > 0 && page - numbered[index - 1] > 1 && (
+              <li class="pagination__item pagination__item--wide pagination__gap" aria-hidden="true">
+                …
+              </li>
+            )}
+            <li class="pagination__item pagination__item--wide">
+              <a
+                class="pagination__link"
+                href={pageHref(page)}
+                aria-current={page === current ? 'page' : undefined}
+              >
+                <span class="sr-only">Page </span>
                 {page}
               </a>
-            </>
-          ))}
-        </div>
-        <a
-          class:list={['pagination__direction', { disabled: isLastPage }]}
-          href={isLastPage ? undefined : href(Math.min(pageCount, currentPage + 1))}
-          aria-disabled={isLastPage ? 'true' : undefined}
-          tabindex={isLastPage ? '-1' : undefined}
-          rel="next"
-        >
-          Next
-        </a>
-      </div>
+            </li>
+          </>
+        ))}
+        <li class="pagination__item pagination__item--compact pagination__status">
+          Page {current} of {pages}
+        </li>
+        <li class="pagination__item" aria-hidden={steps.next.enabled ? undefined : 'true'}>
+          {steps.next.enabled ? (
+            <a class="pagination__link pagination__link--step" href={pageHref(steps.next.page)} rel="next">
+              <span class="pagination__step-text">{steps.next.text}</span>
+              <span aria-hidden="true">{steps.next.glyph}</span>
+            </a>
+          ) : (
+            <span class="pagination__link pagination__link--step is-disabled">
+              <span class="pagination__step-text">{steps.next.text}</span>
+              <span>{steps.next.glyph}</span>
+            </span>
+          )}
+        </li>
+        <li class="pagination__item pagination__item--compact" aria-hidden={steps.last.enabled ? undefined : 'true'}>
+          {steps.last.enabled ? (
+            <a class="pagination__link pagination__link--icon" href={pageHref(steps.last.page)}>
+              <span aria-hidden="true">{steps.last.glyph}</span>
+              <span class="sr-only">{steps.last.text}</span>
+            </a>
+          ) : (
+            <span class="pagination__link pagination__link--icon is-disabled">{steps.last.glyph}</span>
+          )}
+        </li>
+      </ul>
     )
   }
 </nav>
@@ -75,99 +147,123 @@ const isLastPage = currentPage >= pageCount;
 <style>
   .pagination {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
-    margin: 1rem 0;
-    color: color-mix(in oklab, var(--dominantColor) 15%, white);
+    gap: 0.75rem 1rem;
+    margin: 0.75rem 0;
+    color: var(--theme-text, #f2f2f2);
   }
-
   .pagination__summary {
     margin: 0;
-    color: #b9b9b9;
+    color: var(--theme-muted-text, #b3b3b3);
     font-size: 0.9rem;
   }
-
-  .pagination__links,
-  .pagination__pages {
+  .pagination__list {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem;
-  }
-
-  .pagination__mobile {
-    display: none;
     margin: 0;
-    color: #b9b9b9;
-    font-size: 0.85rem;
+    padding: 0;
+    list-style: none;
   }
-
-  a {
-    display: inline-flex;
-    min-width: 2.25rem;
-    min-height: 2.25rem;
+  .pagination__item {
+    display: flex;
+  }
+  .pagination__item--compact {
+    display: none;
+  }
+  .pagination__gap {
+    padding-inline: 0.15rem;
+    color: var(--theme-muted-text, #b3b3b3);
+  }
+  .pagination__link {
     box-sizing: border-box;
+    display: inline-flex;
+    min-width: 2.5rem;
+    min-height: 2.5rem;
     align-items: center;
     justify-content: center;
-    padding: 0.45rem 0.65rem;
-    border: 2px solid color-mix(in srgb, var(--dominantColor) 55%, #555);
+    gap: 0.35rem;
+    padding: 0.4rem 0.7rem;
+    border: 2px solid var(--theme-accent, #8c8c8c);
     border-radius: 0.55rem;
     color: inherit;
     text-decoration: none;
-    transition:
-      border-color 120ms ease,
-      background-color 120ms ease;
   }
-
-  a:hover,
-  a[aria-current='page'] {
-    border-color: var(--dominantColor);
-    background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
+  a.pagination__link:hover {
+    background: var(--theme-surface, #303030);
   }
-
-  a:focus-visible {
-    border-color: #fff;
-    outline: 3px solid #fff;
-    outline-offset: 2px;
-    background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
-  }
-
-  a[aria-current='page'] {
+  a.pagination__link[aria-current='page'] {
+    color: var(--theme-on-accent, #111111);
+    background: var(--theme-accent, #8c8c8c);
     font-weight: 700;
   }
-
-  a.disabled {
-    pointer-events: none;
-    opacity: 0.4;
+  a.pagination__link:focus-visible {
+    outline: 2px solid var(--theme-focus-ring, #ffffff);
+    outline-offset: 2px;
+  }
+  .pagination__link--step {
+    min-width: 6.25rem;
+  }
+  /* Dimmed through the border only: the label keeps the muted text contrast. */
+  .pagination__link.is-disabled {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--theme-accent, #8c8c8c) 45%, transparent);
+    color: var(--theme-muted-text, #b3b3b3);
   }
 
-  .pagination__direction {
-    min-width: 5.5rem;
-  }
-
-  @media (max-width: 700px) {
+  /* Phones: first / previous / "Page n of m" / next / last. */
+  @media (max-width: 40rem) {
     .pagination {
-      align-items: stretch;
       flex-direction: column;
+      align-items: stretch;
     }
-
-    .pagination__links {
-      justify-content: space-between;
+    .pagination__list {
+      flex-wrap: nowrap;
     }
-
-    /* Numbered pages do not fit a phone; prev/next plus a page indicator do. */
-    .pagination__pages {
+    .pagination__item--wide {
       display: none;
     }
-
-    .pagination__mobile {
-      display: block;
+    .pagination__item--compact {
+      display: flex;
+    }
+    /* Wraps ("Page 5" / "of 10") where the four 44px steps leave too little room, e.g. at 280px. */
+    .pagination__status {
+      flex: 1 1 auto;
+      min-width: 0;
+      justify-content: center;
+      color: var(--theme-muted-text, #b3b3b3);
+      font-size: 0.9rem;
+      line-height: 1.25;
+      text-align: center;
+      text-wrap: balance;
+    }
+    .pagination__link {
+      min-width: 2.75rem;
+      min-height: 2.75rem;
+    }
+    .pagination__link--step {
+      min-width: 2.75rem;
     }
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    a {
-      transition: none;
+  /* The smallest phones keep the step arrows only (the links keep their names). */
+  @media (max-width: 26rem) {
+    .pagination__step-text {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      overflow: hidden;
+      clip-path: inset(50%);
+      border: 0;
+      white-space: nowrap;
+    }
+    .pagination__link {
+      padding-inline: 0.5rem;
     }
   }
 </style>

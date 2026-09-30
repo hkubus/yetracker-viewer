@@ -1,105 +1,108 @@
 ---
-import type { Song } from '@yetracker/types';
-import { Icon } from 'astro-icon/components';
-import { fetchApi, noStore } from '../config';
-import { colorValue } from '../utils/color';
+/**
+ * "Recently leaked": the newest playable songs, each with a play button for the player (see the play-button
+ * attributes in `utils/songDisplay.ts`). The page fetches the songs and passes them in, so a failure can mark the
+ * whole response uncacheable before rendering starts.
+ */
+import { themeStyle } from '../utils/color';
+import { formatCatalogDate, isoDate } from '../utils/dates';
+import {
+  DEFAULT_ERA_PAGE_SIZE,
+  type EraDisplayInfo,
+  playButtonAttributes,
+  positiveInteger,
+  type SearchSongPayload,
+  songHref,
+  songTextLines,
+} from '../utils/songDisplay';
+import PauseIcon from './icons/PauseIcon.astro';
+import PlayIcon from './icons/PlayIcon.astro';
 
-type LeakSong = Song & {
-  eraPosition?: number;
-  dominantColor?: string;
-  eraName?: string;
-  playable?: boolean;
-  leakDate?: number | null;
-};
-
-const LIMIT = 8;
-const eraPageSize = Number(Astro.props.eraPageSize) > 0 ? Number(Astro.props.eraPageSize) : 100;
-
-const leakDateFormatter = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' });
-
-function formatLeakDate(value: number | null | undefined): string {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 'Unknown date';
-  const date = new Date(value * 1000);
-  return Number.isNaN(date.getTime()) ? 'Unknown date' : leakDateFormatter.format(date);
+interface Props {
+  songs: SearchSongPayload[];
+  /** The request failed: say so instead of silently dropping the section. */
+  failed?: boolean;
+  /** Era data by id, for payloads that lack their era's name, color or cover fields. */
+  eras?: ReadonlyMap<number, EraDisplayInfo>;
+  eraPageSize?: number;
 }
 
-function isoDate(value: number | null | undefined): string | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
-  const date = new Date(value * 1000);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10);
-}
+const { songs, failed = false, eras, eraPageSize = DEFAULT_ERA_PAGE_SIZE } = Astro.props;
 
-/** Deep link to the row inside the era, using the same page size as the list. */
-function songHref(song: LeakSong): string {
-  const eraId = Number(song.eraId);
-  const songId = Number(song.id);
-  if (!Number.isFinite(eraId) || !Number.isFinite(songId)) return '/';
-  const position = Number(song.eraPosition);
-  const page = Number.isFinite(position) && position > 0 ? Math.ceil(position / eraPageSize) : 1;
-  const base = `/eras/${Math.trunc(eraId)}`;
-  const anchor = `#song-${Math.trunc(songId)}`;
-  return page > 1 ? `${base}?page=${page}${anchor}` : `${base}${anchor}`;
-}
-
-// Newest leaks first. The strip is decoration for the home page: a failure here
-// must not take the page down, so it renders nothing and opts out of caching.
-let songs: LeakSong[] = [];
-try {
-  const response = await fetchApi(`/songs?playable=true&sort=leak-newest&limit=${LIMIT}`);
-  const body: unknown = await response.json();
-  const list = body && typeof body === 'object' ? (body as { songs?: unknown }).songs : undefined;
-  if (Array.isArray(list)) songs = list as LeakSong[];
-} catch (error) {
-  console.error('[home] recently leaked request failed, hiding strip:', error);
-  noStore(Astro.response);
-}
+const items = songs.flatMap((song) => {
+  const eraId = positiveInteger(song.eraId);
+  const era = eraId === null ? undefined : eras?.get(eraId);
+  const play = playButtonAttributes(song, era);
+  // The strip promises tracks that play right now.
+  if (!play || song.playable === false) return [];
+  const { title, details } = songTextLines(song);
+  const eraName = play['data-era-name'] || 'Unknown era';
+  const leakDate = isoDate(song.leakDate, song.leakDatePrecision);
+  return [
+    {
+      id: play['data-id'],
+      title,
+      details: details.join(' · '),
+      fullName: [title, ...details].join(' · '),
+      href: songHref(song, eraPageSize),
+      eraName,
+      leakDate,
+      leakDateText: leakDate ? formatCatalogDate(song.leakDate, song.leakDatePrecision) : 'Leak date unknown',
+      style: themeStyle(play['data-dominant-color'], '--leak'),
+      play,
+    },
+  ];
+});
 ---
 
 {
-  songs.length > 0 && (
-    <section class="recent" data-play-scope aria-labelledby="recent-heading">
+  failed || items.length > 0 ? (
+    <section class="recent" aria-labelledby="recent-heading">
       <div class="recent__head">
         <h2 id="recent-heading">Recently leaked</h2>
-        <p>Newest tracks that can be played right now.</p>
+        {items.length > 0 ? <p>Newest tracks you can play right now.</p> : null}
       </div>
-      <ul class="recent__list">
-        {songs.map((song) => {
-          const songId = Number(song.id);
-          const eraId = Number(song.eraId);
-          const hasId = Number.isFinite(songId);
-          return (
-            <li class="recent__item" data-play-row style={`--dominantColor: ${colorValue(song.dominantColor)}`}>
+      {items.length > 0 ? (
+        <ul class="recent__list" data-play-scope>
+          {items.map((item) => (
+            <li class="recent__item" data-play-row data-song-id={item.id} style={item.style}>
               <div class="recent__text">
-                <a class="recent__title" href={songHref(song)}>
-                  {song.name ?? 'Untitled'}
-                </a>
+                {item.href ? (
+                  <a class="recent__title" href={item.href} title={item.fullName}>
+                    {item.title}
+                  </a>
+                ) : (
+                  <span class="recent__title" title={item.fullName}>
+                    {item.title}
+                  </span>
+                )}
+                {item.details ? (
+                  <p class="recent__details" title={item.details}>
+                    {item.details}
+                  </p>
+                ) : null}
                 <p class="recent__meta">
-                  <span class="recent__era">{song.eraName ?? 'Unknown era'}</span>
-                  <span aria-hidden="true">•</span>
-                  <time datetime={isoDate(song.leakDate)}>{formatLeakDate(song.leakDate)}</time>
+                  <span class="recent__era" title={item.eraName}>
+                    {item.eraName}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <time class="recent__date" datetime={item.leakDate}>
+                    {item.leakDateText}
+                  </time>
                 </p>
               </div>
-              {hasId ? (
-                <button
-                  class="play-song recent__play"
-                  type="button"
-                  data-play-target
-                  data-id={String(Math.trunc(songId))}
-                  data-title={song.name ?? 'Untitled'}
-                  data-eraId={Number.isFinite(eraId) ? String(Math.trunc(eraId)) : undefined}
-                  data-era-name={song.eraName ?? ''}
-                  aria-label={`Play ${song.name ?? 'Untitled'}`}
-                  title="Play"
-                >
-                  <Icon name="play" />
-                </button>
-              ) : null}
+              <button class="recent__play" type="button" {...item.play} aria-label={`Play ${item.title}`}>
+                <PlayIcon class="play-icon" />
+                <PauseIcon class="pause-icon" />
+              </button>
             </li>
-          );
-        })}
-      </ul>
+          ))}
+        </ul>
+      ) : (
+        <p class="recent__unavailable">Recently leaked tracks couldn’t be loaded right now.</p>
+      )}
     </section>
-  )
+  ) : null
 }
 
 <style>
@@ -110,7 +113,7 @@ try {
   .recent__head {
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
+    gap: 0.25rem 0.75rem;
     flex-wrap: wrap;
     margin-bottom: 0.6rem;
   }
@@ -119,14 +122,15 @@ try {
     font-size: 1.1rem;
     letter-spacing: -0.02em;
   }
-  .recent__head p {
+  .recent__head p,
+  .recent__unavailable {
     margin: 0;
-    color: #9a9a9a;
+    color: #a3a3a3;
     font-size: 0.8rem;
   }
   .recent__list {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
     gap: 0.5rem;
     margin: 0;
     padding: 0;
@@ -139,75 +143,105 @@ try {
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    padding: 0.6rem 0.7rem;
-    border: 1px solid color-mix(in srgb, var(--dominantColor) 55%, #3a3a3a);
-    border-left: 4px solid color-mix(in srgb, var(--dominantColor) 80%, white);
+    padding: 0.55rem 0.6rem 0.55rem 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--leak-accent) 40%, var(--leak-surface));
+    border-left: 4px solid var(--leak-accent);
     border-radius: 0.6rem;
-    background: color-mix(in srgb, var(--dominantColor) 18%, #202020);
+    color: var(--leak-text);
+    background: var(--leak-background);
   }
   .recent__item[data-playing='true'] {
-    border-color: #fff;
-    border-left-color: #fff;
-    background: color-mix(in srgb, var(--dominantColor) 30%, #2a2a2a);
+    border-color: var(--leak-accent);
+    background: var(--leak-surface);
   }
   .recent__text {
     min-width: 0;
   }
   .recent__title {
-    display: block;
+    display: -webkit-box;
     overflow: hidden;
-    color: #f6f6f6;
-    font-weight: 600;
+    color: var(--leak-text);
     font-size: 0.92rem;
+    font-weight: 600;
+    line-height: 1.3;
     text-decoration: none;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  a.recent__title:hover {
+    text-decoration: underline;
+  }
+  a.recent__title:focus-visible {
+    outline: 2px solid var(--focus-ring-color, #fff);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  .recent__details,
+  .recent__meta {
+    margin: 0.15rem 0 0;
+    overflow: hidden;
+    font-size: 0.76rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .recent__title:hover,
-  .recent__title:focus-visible {
-    text-decoration: underline;
-  }
-  .recent__title:focus-visible {
-    outline: 3px solid #fff;
-    outline-offset: 2px;
+  .recent__details {
+    color: var(--leak-muted-text);
   }
   .recent__meta {
     display: flex;
     gap: 0.35rem;
-    margin: 0.2rem 0 0;
-    overflow: hidden;
-    color: color-mix(in oklab, var(--dominantColor) 25%, #c9c9c9);
-    font-size: 0.76rem;
-    white-space: nowrap;
+    color: var(--leak-muted-text);
   }
   .recent__era {
+    min-width: 0;
     overflow: hidden;
+    color: var(--leak-accent-text);
     text-overflow: ellipsis;
+  }
+  .recent__date {
+    flex: none;
   }
   .recent__play {
     display: inline-grid;
     flex: none;
-    width: 2.1rem;
-    height: 2.1rem;
+    width: 2.25rem;
+    height: 2.25rem;
     place-items: center;
+    padding: 0;
     border: 0;
     border-radius: 999px;
-    color: color-mix(in oklab, var(--dominantColor) 10%, white);
-    background: color-mix(in srgb, var(--dominantColor) 30%, transparent);
+    color: var(--leak-on-accent);
+    background: var(--leak-accent);
     cursor: pointer;
   }
-  .recent__play svg {
-    width: 1.15em;
-    height: 1.15em;
+  .recent__play :global(svg) {
+    width: 1.05rem;
+    height: 1.05rem;
   }
-  .recent__play:hover,
-  .recent__play:focus-visible {
-    color: #fff;
-    background: color-mix(in srgb, var(--dominantColor) 55%, transparent);
-    outline: none;
+  /* The player sets aria-pressed="true" on the current song's button while it plays. */
+  .recent__play :global(.play-icon) {
+    margin-left: 0.1rem;
+  }
+  .recent__play :global(.pause-icon),
+  .recent__play[aria-pressed='true'] :global(.play-icon) {
+    display: none;
+  }
+  .recent__play[aria-pressed='true'] :global(.pause-icon) {
+    display: block;
+  }
+  .recent__play:hover {
+    color: var(--leak-background);
+    background: var(--leak-text);
   }
   .recent__play:focus-visible {
-    outline: 3px solid #fff;
+    outline: 2px solid var(--focus-ring-color, #fff);
     outline-offset: 2px;
+  }
+  @media (forced-colors: active) {
+    .recent__play {
+      border: 1px solid ButtonText;
+    }
   }
 </style>

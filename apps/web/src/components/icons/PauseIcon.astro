@@ -1,0 +1,15 @@
+---
+/**
+ * Pause: two rounded bars.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon fill="currentColor" {...Astro.props}>
+  <rect x="6.5" y="5.5" width="4" height="13" rx="1.1" />
+  <rect x="13.5" y="5.5" width="4" height="13" rx="1.1" />
+</SvgIcon>

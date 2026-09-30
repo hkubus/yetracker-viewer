@@ -1,0 +1,133 @@
+---
+/**
+ * A complete error page (layout included) for 400, 404, 500 and 503 responses. The status code itself is set by
+ * the page that renders this (`Astro.response.status`), before rendering starts.
+ */
+import Layout from '../layouts/Layout.astro';
+
+type ErrorStatus = 400 | 404 | 500 | 503;
+
+interface Props {
+  status: ErrorStatus;
+  /** Overrides the default heading of the status. */
+  heading?: string;
+  /** Overrides the default explanation of the status. */
+  message?: string;
+  /** Extra detail shown under the explanation (e.g. which parameter was rejected). */
+  detail?: string;
+  /** Target of the "Try again" action on 500/503 pages. Default: the current URL. */
+  retryHref?: string;
+  /** A more specific way out than the home page, e.g. the first page of an era. */
+  secondaryAction?: { href: string; label: string };
+}
+
+const COPY: Record<ErrorStatus, { heading: string; message: string }> = {
+  400: {
+    heading: 'This link is not valid',
+    message: 'Part of the address could not be understood, so there is nothing to show for it.',
+  },
+  404: {
+    heading: 'Page not found',
+    message: 'There is nothing at this address. The link may be mistyped, or point to something that is gone.',
+  },
+  500: {
+    heading: 'Something went wrong',
+    message: 'The page could not be displayed because of an error on the site. Trying again usually helps.',
+  },
+  503: {
+    heading: 'The catalog is unavailable right now',
+    message: 'The page could not load its data from the catalog service. It should be back in a moment.',
+  },
+};
+
+const { status, heading, message, detail, retryHref = '', secondaryAction } = Astro.props;
+const copy = COPY[status];
+const title = heading ?? copy.heading;
+const canRetry = status >= 500;
+---
+
+<Layout title={`${title} | Ye Tracker`} description={message ?? copy.message} noindex>
+  <div class="error-page">
+    <p class="error-page__code"><span class="sr-only">Error </span>{status}</p>
+    <h1>{title}</h1>
+    <p class="error-page__message">{message ?? copy.message}</p>
+    {detail && <p class="error-page__detail">{detail}</p>}
+    <p class="error-page__actions">
+      {canRetry && <a class="error-page__action error-page__action--primary" href={retryHref}>Try again</a>}
+      {secondaryAction && <a class="error-page__action" href={secondaryAction.href}>{secondaryAction.label}</a>}
+      <a class:list={['error-page__action', { 'error-page__action--primary': !canRetry && !secondaryAction }]} href="/">
+        Back to all eras
+      </a>
+    </p>
+  </div>
+</Layout>
+
+<style>
+  .error-page {
+    display: grid;
+    box-sizing: border-box;
+    min-height: 70vh;
+    place-content: center;
+    justify-items: center;
+    gap: 0.6rem;
+    padding: 2rem 1.25rem;
+    color: #f3f3f3;
+    text-align: center;
+  }
+  .error-page__code {
+    margin: 0;
+    color: #9a9a9a;
+    font-size: clamp(3rem, 10vw, 6rem);
+    font-weight: 700;
+    letter-spacing: -0.05em;
+    line-height: 1;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(1.25rem, 3vw, 1.75rem);
+  }
+  .error-page__message,
+  .error-page__detail {
+    max-width: 34rem;
+    margin: 0;
+    color: #c4c4c4;
+    line-height: 1.5;
+  }
+  .error-page__detail {
+    color: #e6e6e6;
+    font-weight: 600;
+  }
+  .error-page__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem;
+    margin: 1rem 0 0;
+  }
+  .error-page__action {
+    display: inline-flex;
+    min-height: 2.75rem;
+    box-sizing: border-box;
+    align-items: center;
+    padding: 0.5rem 1.1rem;
+    border: 2px solid #8a8a8a;
+    border-radius: 0.6rem;
+    color: #f3f3f3;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .error-page__action--primary {
+    border-color: #f3f3f3;
+    color: #181818;
+    background: #f3f3f3;
+  }
+  .error-page__action:hover {
+    border-color: #ffffff;
+    background: #2a2a2a;
+    color: #ffffff;
+  }
+  .error-page__action--primary:hover {
+    background: #ffffff;
+    color: #181818;
+  }
+</style>

@@ -1,118 +1,194 @@
 ---
+import { Font } from 'astro:assets';
 import { ClientRouter } from 'astro:transitions';
 import Player from '../components/Player.astro';
-import { publicApiBaseUrl } from '../config';
+import SiteFooter from '../components/SiteFooter.astro';
+import { publicApiBaseUrl, publicApiOrigin, siteUrl } from '../config';
+import { API_URL_META_NAME } from '../utils/api-base-url';
 
-const title = (Astro.props.title as string | undefined) ?? 'Ye Tracker';
-const description =
-  (Astro.props.description as string | undefined) ??
-  'Browse Ye Tracker eras — unreleased Kanye West music organized by era.';
+interface Props {
+  /** Full document title. */
+  title?: string;
+  /** Meta and Open Graph description. */
+  description?: string;
+  /**
+   * Path (with the query string that identifies the page, if any) for the canonical and `og:url` URLs. They are
+   * only emitted when `SITE_URL` is configured. Default: the request path without its query.
+   */
+  canonicalPath?: string;
+  /** Absolute URL of the Open Graph / Twitter card image. */
+  ogImage?: string | null;
+  ogImageAlt?: string;
+  /** Adds `<meta name="robots" content="noindex">` (error pages). */
+  noindex?: boolean;
+}
+
+const SITE_NAME = 'Ye Tracker';
+const {
+  title = SITE_NAME,
+  description = 'Browse Ye Tracker eras — unreleased Kanye West music organized by era.',
+  canonicalPath = Astro.url.pathname,
+  ogImage = null,
+  ogImageAlt,
+  noindex = false,
+} = Astro.props;
+
+const canonicalUrl = siteUrl && !noindex ? new URL(canonicalPath, `${siteUrl}/`).href : null;
+// Covers are the first API requests of a page: open the connection early. Same-origin APIs need no hint.
+const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin ? publicApiOrigin : null;
 ---
 
 <!doctype html>
 <html lang="en">
-	<head>
-		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="description" content={description} />
-		<meta name="theme-color" content="#181818" />
-		<meta property="og:title" content={title} />
-		<meta property="og:description" content={description} />
-		<meta property="og:type" content="website" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-	<link rel="preconnect" href="https://fonts.googleapis.com" />
-	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-	<link rel="preconnect" href={publicApiBaseUrl} crossorigin />
-	<link
-		rel="stylesheet"
-		href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap"
-	/>
-		<meta name="generator" content={Astro.generator} />
-		<ClientRouter />
-		<title>{title}</title>
-	</head>
-	<body>
-		<a class="skip-link" href="#main-content">Skip to main content</a>
-		<main id="main-content" class="main"><slot /></main>
-		<Player apiBaseUrl={publicApiBaseUrl} />
-	</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    {canonicalUrl && <link rel="canonical" href={canonicalUrl} />}
+    {noindex && <meta name="robots" content="noindex" />}
+    <meta name="theme-color" content="#181818" />
+    <meta name="color-scheme" content="dark" />
+    <meta property="og:site_name" content={SITE_NAME} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    {canonicalUrl && <meta property="og:url" content={canonicalUrl} />}
+    {ogImage && <meta property="og:image" content={ogImage} />}
+    {ogImage && ogImageAlt && <meta property="og:image:alt" content={ogImageAlt} />}
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    {ogImage && <meta name="twitter:image" content={ogImage} />}
+    {ogImage && ogImageAlt && <meta name="twitter:image:alt" content={ogImageAlt} />}
+    {/* Read by client scripts through utils/api-base-url.ts: the API URL is decided at runtime, not at build time. */}
+    <meta name={API_URL_META_NAME} content={publicApiBaseUrl} />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    {preconnectOrigin && <link rel="preconnect" href={preconnectOrigin} />}
+    <Font cssVariable="--font-body" />
+    <ClientRouter />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content" data-skip-link>Skip to main content</a>
+    <main id="main-content" class="site-main" tabindex="-1"><slot /></main>
+    <SiteFooter />
+    <Player apiBaseUrl={publicApiBaseUrl} />
+  </body>
 </html>
 
+<script>
+  import '../scripts/skip-link';
+</script>
+
 <style>
-	:root {
-		--sidebar-color: #111111;
-		--bg-color: #181818;
-		color-scheme: dark;
-	}
-	html {
-		min-height: 100%;
-		background-color: var(--bg-color);
-	}
-	html,
-	body {
-		display: flex;
-		flex-direction: row;
-		margin: 0;
-		font-family: "Be Vietnam Pro", system-ui, sans-serif;
-		width: 100%;
-		min-height: 100%;
-		background-color: var(--bg-color);
-	}
-	.main {
-		box-sizing: border-box;
-		width: 100%;
-		max-width: 90rem;
-		margin-inline: auto;
-	}
-	/* The player is fixed to the bottom of the viewport: reserve room for it so
-	   it never covers the last rows, and keep anchored rows clear of it. */
-	body:has(.player:not([hidden])) .main {
-		padding-bottom: 11rem;
-	}
-	html {
-		scroll-padding-bottom: 11rem;
-	}
-	.skip-link {
-		position: absolute;
-		z-index: 100;
-		top: -100%;
-		left: 0.75rem;
-		padding: 0.6rem 1rem;
-		border-radius: 0.5rem;
-		color: #181818;
-		background: #fff;
-		font-weight: 700;
-		text-decoration: none;
-	}
-	.skip-link:focus-visible {
-		top: 0.75rem;
-		outline: 3px solid #fff;
-		outline-offset: 2px;
-	}
-	@media (prefers-reduced-motion: reduce) {
-		*,
-		*::before,
-		*::after {
-			animation-duration: 0.01ms;
-			animation-iteration-count: 1;
-			transition-duration: 0.01ms;
-			scroll-behavior: auto;
-		}
-	}
+  .site-main {
+    flex: 1 0 auto;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 90rem;
+    margin-inline: auto;
+    /* viewport-fit=cover lets the page extend under notches: keep content out of the side insets. */
+    padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
+  }
+  /* Focusable only as the skip link's target (tabindex="-1", not in the tab order): outlining the whole page there
+     would only get in the way, and the next Tab continues inside it. */
+  .site-main:focus {
+    outline: none;
+  }
+  .skip-link {
+    position: absolute;
+    z-index: 100;
+    top: -100%;
+    left: 0.75rem;
+    padding: 0.6rem 1rem;
+    border-radius: 0.5rem;
+    color: #181818;
+    background: #fff;
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .skip-link:focus-visible {
+    top: max(0.75rem, env(safe-area-inset-top));
+    outline: 3px solid #fff;
+    outline-offset: 2px;
+  }
 </style>
 
 <style is:global>
-	/* Shared with pages and components, so it cannot live in a scoped block. */
-	.sr-only {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		margin: -1px;
-		padding: 0;
-		overflow: hidden;
-		clip-path: inset(50%);
-		border: 0;
-		white-space: nowrap;
-	}
+  /* Shared by every page and component: kept global on purpose. */
+  /* The fixed audio player publishes its height (bar + bottom gap, safe-area inset included) as --player-height on
+     <html> while it is visible. */
+  :root {
+    --sidebar-color: #111111;
+    --bg-color: #181818;
+    /* Default focus ring: white on the site's dark surfaces (≥ 3:1 on every background the site uses). */
+    --focus-ring-color: #ffffff;
+    color-scheme: dark;
+  }
+  html {
+    min-height: 100%;
+    background-color: var(--bg-color);
+    /* Anchored targets (#song-…) stay clear of the edges and of the fixed player. */
+    scroll-padding-top: 1rem;
+    scroll-padding-bottom: calc(var(--player-height, 0px) + 1rem);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    min-height: 100dvh;
+    margin: 0;
+    background-color: var(--bg-color);
+    font-family: var(--font-body);
+  }
+  /* Reserve room for the fixed player so it never covers the last rows or the footer (11rem until it has measured
+     itself). */
+  body:has(> .player:not([hidden])) {
+    padding-bottom: calc(var(--player-height, 11rem) + 1rem);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    border: 0;
+    white-space: nowrap;
+  }
+
+  /* Visible keyboard focus everywhere; components may replace it with an equally visible ring of their own. */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring-color);
+    outline-offset: 2px;
+  }
+  /* Forced colors (e.g. Windows High Contrast) drop box-shadows and custom colors: keep a system-colored outline. */
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline: 2px solid Highlight !important;
+      outline-offset: 2px !important;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+    ::view-transition-group(*),
+    ::view-transition-old(*),
+    ::view-transition-new(*) {
+      animation: none !important;
+    }
+  }
 </style>

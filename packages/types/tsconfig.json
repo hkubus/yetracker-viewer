@@ -1,4 +1,8 @@
 {
   "extends": "../../tsconfig.json",
-  "include": ["src/**/*"]
+  "compilerOptions": {
+    // The package is a single .d.ts file: skipLibCheck would skip exactly the code under test.
+    "skipLibCheck": false
+  },
+  "include": ["src/**/*", "test/**/*"]
 }

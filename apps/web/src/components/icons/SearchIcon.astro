@@ -1,0 +1,22 @@
+---
+/**
+ * Search: magnifying glass.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  {...Astro.props}
+>
+  <circle cx="11" cy="11" r="6.5" />
+  <path d="m16 16 4 4" />
+</SvgIcon>

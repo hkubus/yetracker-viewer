@@ -1,0 +1,22 @@
+---
+/**
+ * Muted: speaker with a cross.
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  {...Astro.props}
+>
+  <path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z" fill="currentColor" />
+  <path d="m16 9.5 5 5m0-5-5 5" />
+</SvgIcon>
