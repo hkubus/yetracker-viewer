@@ -1,0 +1,19 @@
+// Build settings for every configuration of the YeTracker app target.
+//
+// Personal overrides (signing team, bundle id, your server) belong in
+// Config/Local.xcconfig, which is gitignored and included at the end:
+//
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   PRODUCT_BUNDLE_IDENTIFIER = net.example.yetracker
+//   YT_API_BASE_URL = https:/$()/tracker.example.com/api
+
+PRODUCT_BUNDLE_IDENTIFIER = com.example.yetracker
+MARKETING_VERSION = 1.0
+CURRENT_PROJECT_VERSION = 1
+DEVELOPMENT_TEAM =
+
+// Default API server; users can change it in Settings. `//` starts a comment
+// in xcconfig files, hence the `$()` between the slashes.
+YT_API_BASE_URL = http:/$()/localhost:3000
+
+#include? "Local.xcconfig"

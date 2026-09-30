@@ -1,0 +1,70 @@
+{
+  "songs": [
+    {
+      "id": 2194,
+      "eraId": 14,
+      "name": "✨ Love Lockdown (feat. Caroline Shaw) (prod. Kanye West, Jeff Bhasker & Caroline Shaw)",
+      "notes": "Unofficial stem bounce of the Hollywood Bowl version of the song. Has additional vocals from Caroline Shaw.",
+      "quality": "Lossless",
+      "availableLength": "Stem Bounce",
+      "eraName": "SWISH",
+      "dominantColor": "666666",
+      "eraPosition": 170,
+      "leakDate": 1728864000,
+      "playable": false
+    },
+    {
+      "id": 512,
+      "eraId": 5,
+      "name": "Love Lockdown [V1] (prod. Kanye West & Jeff Bhasker)",
+      "notes": "A complete mumble freestyle, was said to exist by Saul Williams. Described as \"gibberish, where lyrics would go\". This is likely where the alternate mumble hook take comes from on the initial release.",
+      "quality": "Not Available",
+      "availableLength": "Confirmed",
+      "eraName": "808s & Heartbreak",
+      "dominantColor": "666666",
+      "eraPosition": 33,
+      "leakDate": 0,
+      "playable": false
+    },
+    {
+      "id": 513,
+      "eraId": 5,
+      "name": "Love Lockdown [V2] (ref. Saul Williams) (prod. Kanye West & Jeff Bhasker)",
+      "notes": "Saul Williams said that he \"help[ed] [Kanye] interpet [his] gibberish, so it sounds just like [his] gibberish, but [we] found the words in there\". He also said he \"helped write\" the track.",
+      "quality": "Not Available",
+      "availableLength": "Confirmed",
+      "eraName": "808s & Heartbreak",
+      "dominantColor": "666666",
+      "eraPosition": 34,
+      "leakDate": 0,
+      "playable": false
+    },
+    {
+      "id": 514,
+      "eraId": 5,
+      "name": "Love Lockdown [V3] (prod. Kanye West & Jeff Bhasker)",
+      "notes": "According to the filename for the initial release, the second verse was originally quieter.",
+      "quality": "Not Available",
+      "availableLength": "Confirmed",
+      "eraName": "808s & Heartbreak",
+      "dominantColor": "666666",
+      "eraPosition": 35,
+      "leakDate": 0,
+      "playable": false
+    },
+    {
+      "id": 515,
+      "eraId": 5,
+      "name": "Love Lockdown [V4] (prod. Kanye West & Jeff Bhasker)",
+      "notes": "OG Filename: LoveLockdown_V2ADMix-Main_9-15-08 Very close to release ready, but metronome can still be heard. Unmastered.",
+      "quality": "High Quality",
+      "availableLength": "OG File",
+      "eraName": "808s & Heartbreak",
+      "dominantColor": "666666",
+      "eraPosition": 36,
+      "leakDate": 1604534400,
+      "playable": false
+    }
+  ],
+  "total": 8
+}

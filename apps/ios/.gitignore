@@ -1,0 +1,11 @@
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+Config/Local.xcconfig
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved

@@ -1,0 +1,133 @@
+name: iOS
+
+# Builds the unsigned app (SideStore/AltStore sign it on the device) on every change to it. A tag `ios-v<version>`
+# (pushed to the Forgejo origin, which push-mirrors to GitHub) also publishes the IPA as a GitHub release and
+# redeploys the SideStore source to GitHub Pages. Nothing here pushes branches or tags: the mirror would delete them.
+on:
+  push:
+    branches: [main]
+    tags: ['ios-v*']
+    # Not evaluated for tag pushes.
+    paths: ['apps/ios/**', '.github/workflows/ios.yml', 'scripts/sidestore-source.mjs']
+  pull_request:
+    branches: [main]
+    paths: ['apps/ios/**', '.github/workflows/ios.yml', 'scripts/sidestore-source.mjs']
+  # Rebuilds the source (e.g. after editing a release's notes on GitHub).
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (YeTrackerKit tests, unsigned IPA)
+    # Forgejo also runs .github/workflows and has no macOS runner.
+    if: github.server_url == 'https://github.com' && github.event_name != 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: xcodebuild -version && swift --version
+      - name: YeTrackerKit tests
+        run: swift test --package-path apps/ios/YeTrackerKit
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/ios-v* ]]; then
+            version="${GITHUB_REF_NAME#ios-v}"
+            [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || { echo "::error::tag must be ios-v<major>[.<minor>[.<patch>]]"; exit 1; }
+            build="$version"
+          else
+            version="$(sed -n 's/^MARKETING_VERSION = //p' apps/ios/Config/Shared.xcconfig)"
+            build="$GITHUB_RUN_NUMBER"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: |
+          log="$RUNNER_TEMP/xcodebuild.log"
+          if ! xcodebuild build \
+            -project apps/ios/YeTracker.xcodeproj -scheme YeTracker -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/dd" \
+            MARKETING_VERSION='${{ steps.version.outputs.version }}' \
+            CURRENT_PROJECT_VERSION='${{ steps.version.outputs.build }}' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' >"$log" 2>&1; then
+            grep -E 'error:' "$log" | sort -u | head -100 || true
+            tail -40 "$log"
+            exit 1
+          fi
+          grep -E 'warning:' "$log" | sort -u | head -50 || true
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/YeTracker.app" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/YeTracker.ipa" Payload)
+          ls -l YeTracker.ipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: YeTracker-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}
+          path: YeTracker.ipa
+          if-no-files-found: error
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+
+  release:
+    name: GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/ios-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: YeTracker-*
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The tag comes from the mirror (--verify-tag: never create one here).
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" YeTracker.ipa --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" YeTracker.ipa --verify-tag -R "$GITHUB_REPOSITORY" \
+              --title "Ye Tracker ${GITHUB_REF_NAME#ios-v}" --generate-notes
+          fi
+
+  source:
+    name: SideStore source (GitHub Pages)
+    needs: release
+    # Also on workflow_dispatch, when `release` (and `build`) are skipped.
+    if: >-
+      always() && github.server_url == 'https://github.com' &&
+      (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}sidestore.json
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/sidestore-source.mjs _site
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v5
