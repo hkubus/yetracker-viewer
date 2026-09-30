@@ -12,7 +12,7 @@
 |---|---|
 | `src/main.rs` | Binary entry: loads `.env`, starts `tracing` logging (stdout, `RUST_LOG`), raises the soft open-file limit to the hard limit, then config → pool → migrations → state → stale temp-file cleanup → tool detection → playable scan → **bind** → spawn the sync → serve. Startup errors exit 1. |
 | `src/config.rs` | Every environment variable: strict parsing, ranges, defaults (`MAX_CONNECTIONS` from the open-file limit); `.env` loading; workspace-root resolution; storage directories. |
-| `src/http.rs` | Middleware (request span, `Accept-Encoding` normalisation, 30 s non-media timeout, CORS, security headers, `Vary`, 64 KiB body limit, compression, weak JSON ETag/304) and the hyper HTTP/1 server loop (TCP_NODELAY, `MAX_CONNECTIONS` with eviction of the longest-idle connection or else the longest non-reading one, rate-limited limit warnings, header/idle/not-reading/stall watchdog, graceful drain ≤ 10 s). |
+| `src/http.rs` | Middleware (request span, `Accept-Encoding` normalisation, 30 s non-media timeout, CORS, security headers, `Vary`, 64 KiB body limit, compression, weak JSON ETag/304) and the hyper HTTP/1 server loop (TCP_NODELAY, `MAX_CONNECTIONS` with eviction of an idle or non-reading connection (`eviction_victim`), rate-limited limit warnings, header/idle/not-reading/stall watchdog, graceful drain ≤ 10 s). |
 | `src/sync.rs` | The background sync: schedule (`SYNC_ON_START`, `SYNC_INTERVAL_MINUTES`), one run at a time, panic supervision, phases. |
 | `src/routes/mod.rs` | Route table, 404/405 fallbacks, `EraId`/`SongId`/`Params` extractors, JSON helpers. |
 | `src/routes/eras.rs` | `/eras`, `/eras/:id`, `/eras/:id/songs`. |

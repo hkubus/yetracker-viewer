@@ -3,6 +3,7 @@ import YeTrackerKit
 
 /// "Find a track": catalog-wide search with an era range and a playable filter
 /// (`GlobalSongSearch.astro`). Results open their era scrolled to the song.
+/// The query field is the tab bar's search field (`RootView`).
 struct SearchView: View {
   @Environment(AppModel.self) private var app
 
@@ -21,9 +22,8 @@ struct SearchView: View {
             onLowerChange: search.setLowerIndex,
             onUpperChange: search.setUpperIndex)
         }
-        Toggle("Playable only", isOn: $search.playableOnly)
-          .font(.subheadline.weight(.semibold))
-        Button("Clear filters", systemImage: "xmark", role: .destructive) { search.clear() }
+        Toggle("Playable Only", isOn: $search.playableOnly)
+        Button("Clear Filters", role: .destructive) { search.clear() }
           .disabled(!search.hasFilters)
       } header: {
         HStack {
@@ -34,20 +34,12 @@ struct SearchView: View {
             .contentTransition(.numericText())
         }
       }
-      .listRowBackground(Theme.surface)
 
       results(search: search)
     }
     .listStyle(.insetGrouped)
-    .scrollContentBackground(.hidden)
-    .background(Theme.background)
     .scrollDismissesKeyboard(.immediately)
-    .navigationTitle("Find a track")
-    .searchable(
-      text: $search.query,
-      placement: .navigationBarDrawer(displayMode: .always),
-      prompt: "Search songs, artists, notes…"
-    )
+    .navigationTitle("Search")
     .task { await search.directory.load() }
   }
 
@@ -60,7 +52,7 @@ struct SearchView: View {
           "Type to search every song in the catalog. Narrow the era range or keep only playable tracks to refine it."
         )
         .font(.footnote)
-        .foregroundStyle(Theme.secondaryText)
+        .foregroundStyle(.secondary)
       }
       .listRowBackground(Color.clear)
     case .searching, .loaded, .failed:
@@ -75,7 +67,7 @@ struct SearchView: View {
         }
         if let message = search.emptyMessage {
           Text(message)
-            .foregroundStyle(Theme.secondaryText)
+            .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
             .listRowBackground(Color.clear)
         }
@@ -88,52 +80,49 @@ struct SearchView: View {
   }
 }
 
-/// A result card: title, era and a notes preview in the era's colours.
+/// A result: the era's cover, title, era and a notes preview.
 private struct SearchResultRow: View {
   @Environment(AppModel.self) private var app
+  @Environment(\.colorScheme) private var colorScheme
   let song: SearchSong
 
   var body: some View {
-    let palette = EraPalette(song.color)
+    let palette = EraPalette(song.color, colorScheme: colorScheme)
     let route = app.search.route(for: song)
     let isCurrent = app.player.current?.id == song.id
 
     Button {
       if let route { app.router.show(route, in: .search) }
     } label: {
-      VStack(alignment: .leading, spacing: 4) {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-          Text(song.displayTitle)
-            .font(.subheadline.weight(.bold))
-            .foregroundStyle(.white)
-            .multilineTextAlignment(.leading)
-          if isCurrent {
-            NowPlayingGlyph(isPlaying: app.player.isPlaying, color: palette.cardText)
+      HStack(alignment: .top, spacing: 12) {
+        CoverImage(url: app.coverURL(for: song), accent: song.color, cornerRadius: 8)
+          .frame(width: 44, height: 44)
+        VStack(alignment: .leading, spacing: 2) {
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(song.displayTitle)
+              .font(.body)
+              .foregroundStyle(isCurrent ? palette.tint : .primary)
+              .multilineTextAlignment(.leading)
+            if isCurrent {
+              NowPlayingGlyph(isPlaying: app.player.isPlaying, color: palette.tint)
+            }
           }
-          Spacer(minLength: 8)
           Text(song.eraDisplayName)
-            .font(.caption)
-            .foregroundStyle(palette.cardText)
-            .multilineTextAlignment(.trailing)
+            .font(.subheadline)
+            .foregroundStyle(palette.tint)
+          if let notes = song.notesPreview {
+            Text(notes)
+              .font(.footnote)
+              .foregroundStyle(.secondary)
+              .lineLimit(2)
+              .multilineTextAlignment(.leading)
+          }
         }
-        if let notes = song.notesPreview {
-          Text(notes)
-            .font(.footnote)
-            .foregroundStyle(Color(hex: "aaaaaa"))
-            .lineLimit(2)
-            .multilineTextAlignment(.leading)
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
-      .padding(.vertical, 4)
-      .contentShape(Rectangle())
+      .contentShape(.rect)
     }
     .buttonStyle(.plain)
-    .listRowBackground(
-      palette.listCardFill
-        .overlay(alignment: .leading) {
-          Rectangle().fill(palette.listCardEdge).frame(width: 3)
-        }
-    )
     .contextMenu {
       if app.search.track(for: song) != nil {
         Button("Play", systemImage: "play.fill") { app.search.play(song, with: app.player) }

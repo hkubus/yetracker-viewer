@@ -3,7 +3,8 @@ import SwiftUI
 import YeTrackerKit
 
 /// The full player: artwork, state line, era link, scrubber, transport,
-/// volume, quality, AirPlay and errors (`Player.astro`).
+/// volume, quality, AirPlay and errors (`Player.astro`). Always dark, over a
+/// gradient of the era colour, like Music.
 struct NowPlayingView: View {
   @Environment(AppModel.self) private var app
   @Environment(\.dismiss) private var dismiss
@@ -12,30 +13,37 @@ struct NowPlayingView: View {
   /// A touch drag is in progress. VoiceOver and keyboard adjustments change the
   /// value without an editing phase, so those seek immediately.
   @State private var isScrubbing = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     let player = app.player
     if let track = player.current {
-      let palette = EraPalette(track.color)
+      let palette = EraPalette(track.color, colorScheme: .dark)
       ScrollView {
-        VStack(spacing: 22) {
-          CoverImage(url: player.coverURL(for: track), accent: track.color, cornerRadius: 20)
+        VStack(spacing: 24) {
+          CoverImage(url: player.coverURL(for: track), accent: track.color, cornerRadius: 16)
             .aspectRatio(1, contentMode: .fit)
             .frame(maxWidth: 360)
-            .shadow(color: .black.opacity(0.45), radius: 24, y: 12)
-            .padding(.top, 8)
+            .shadow(color: .black.opacity(0.4), radius: 24, y: 12)
+            // Music's artwork recedes while paused.
+            .scaleEffect(player.isPlaying || reduceMotion ? 1 : 0.86)
+            .animation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.25), value: player.isPlaying)
+            .padding(.top, 28)
 
           titleBlock(track: track, palette: palette)
           scrubber(palette: palette)
           transport(palette: palette)
           volume(palette: palette)
 
-          HStack {
-            QualityMenu(palette: palette)
-            Spacer()
-            RoutePicker(tint: UIColor(palette.playerText))
-              .frame(width: 44, height: 44)
-              .accessibilityLabel("AirPlay and audio output")
+          GlassEffectContainer(spacing: 12) {
+            HStack {
+              QualityMenu()
+              Spacer()
+              RoutePicker(tint: UIColor(palette.playerText))
+                .frame(width: 44, height: 44)
+                .glassEffect(.regular.interactive(), in: .circle)
+                .accessibilityLabel("AirPlay and audio output")
+            }
           }
 
           if let message = player.errorMessage {
@@ -47,15 +55,18 @@ struct NowPlayingView: View {
         .frame(maxWidth: 520)
         .frame(maxWidth: .infinity)
       }
+      .scrollBounceBehavior(.basedOnSize)
       .foregroundStyle(palette.playerText)
+      .tint(palette.playerText)
       .background {
         LinearGradient(
-          colors: [palette.playerBackground, Theme.background],
+          colors: [palette.playerBackground, Color(RGBColor.background)],
           startPoint: .top,
           endPoint: .bottom
         )
         .ignoresSafeArea()
       }
+      .environment(\.colorScheme, .dark)
       .presentationDragIndicator(.visible)
     } else {
       ContentUnavailableView("Nothing playing", systemImage: "music.note")
@@ -66,15 +77,15 @@ struct NowPlayingView: View {
 
   private func titleBlock(track: Track, palette: EraPalette) -> some View {
     let player = app.player
-    return VStack(spacing: 6) {
+    return VStack(spacing: 4) {
       Text(player.stateLine)
-        .font(.caption.weight(.bold))
+        .font(.caption.weight(.semibold))
         .textCase(.uppercase)
-        .tracking(1)
-        .foregroundStyle(palette.playerText.opacity(0.65))
+        .tracking(0.8)
+        .foregroundStyle(palette.playerText.opacity(0.6))
         .contentTransition(.opacity)
       Text(track.title)
-        .font(.title3.weight(.bold))
+        .font(.title2.weight(.bold))
         .multilineTextAlignment(.center)
         .fixedSize(horizontal: false, vertical: true)
       if let eraID = track.eraID, let eraName = track.eraName {
@@ -86,10 +97,10 @@ struct NowPlayingView: View {
             Image(systemName: "chevron.right")
               .font(.caption2.weight(.bold))
           }
-          .font(.subheadline)
-          .foregroundStyle(palette.playerText.opacity(0.75))
+          .font(.body)
+          .foregroundStyle(palette.playerText.opacity(0.7))
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .accessibilityLabel("Show \(eraName)")
       }
     }
@@ -132,28 +143,33 @@ struct NowPlayingView: View {
         Spacer()
         Text(duration > 0 ? Formatters.duration(duration) : "—")
       }
-      .font(.caption.monospacedDigit())
-      .foregroundStyle(palette.playerText.opacity(0.75))
+      .font(.caption.monospacedDigit().weight(.medium))
+      .foregroundStyle(palette.playerText.opacity(0.6))
     }
   }
 
   private func transport(palette: EraPalette) -> some View {
     let player = app.player
-    return HStack(spacing: 44) {
+    return HStack(spacing: 48) {
       Button {
         player.previous()
       } label: {
-        Image(systemName: "backward.end.fill")
-          .font(.title)
+        Image(systemName: "backward.fill")
+          .font(.system(size: 34))
+          .frame(width: 64, height: 64)
+          .contentShape(.circle)
       }
       .disabled(!player.canGoPrevious)
+      .opacity(player.canGoPrevious ? 1 : 0.35)
       .accessibilityLabel("Previous track")
 
       Button {
         player.togglePlayPause()
       } label: {
-        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-          .font(.system(size: 72))
+        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+          .font(.system(size: 48))
+          .frame(width: 80, height: 80)
+          .contentShape(.circle)
           .contentTransition(.symbolEffect(.replace))
       }
       .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
@@ -161,13 +177,16 @@ struct NowPlayingView: View {
       Button {
         player.next()
       } label: {
-        Image(systemName: "forward.end.fill")
-          .font(.title)
+        Image(systemName: "forward.fill")
+          .font(.system(size: 34))
+          .frame(width: 64, height: 64)
+          .contentShape(.circle)
       }
       .disabled(!player.canGoNext)
+      .opacity(player.canGoNext ? 1 : 0.35)
       .accessibilityLabel("Next track")
     }
-    .buttonStyle(.borderless)
+    .buttonStyle(.plain)
     .foregroundStyle(palette.playerText)
   }
 
@@ -175,22 +194,21 @@ struct NowPlayingView: View {
     @Bindable var player = app.player
     return HStack(spacing: 12) {
       Image(systemName: "speaker.fill")
-        .font(.caption)
+        .font(.footnote)
       Slider(value: $player.volume, in: 0...1)
         .tint(palette.playerText)
         .accessibilityLabel("Volume")
         .accessibilityValue("\(Int((player.volume * 100).rounded())) percent")
       Image(systemName: "speaker.wave.3.fill")
-        .font(.caption)
+        .font(.footnote)
     }
-    .foregroundStyle(palette.playerText.opacity(0.75))
+    .foregroundStyle(palette.playerText.opacity(0.6))
   }
 }
 
 /// Original / 64–320 kbps, remembered across launches.
 private struct QualityMenu: View {
   @Environment(AppModel.self) private var app
-  let palette: EraPalette
 
   var body: some View {
     let player = app.player
@@ -213,15 +231,11 @@ private struct QualityMenu: View {
         }
         Text(player.quality.label)
       }
-      .font(.footnote.weight(.bold))
-      .padding(.horizontal, 12)
-      .padding(.vertical, 8)
-      .background(palette.playerText.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .strokeBorder(palette.playerText.opacity(0.2))
-      }
+      .font(.footnote.weight(.semibold))
+      .padding(.horizontal, 4)
+      .frame(minHeight: 32)
     }
+    .buttonStyle(.glass)
     .disabled(player.isSwitchingQuality)
     .accessibilityLabel("Playback quality: \(player.quality.label)")
   }
@@ -238,12 +252,11 @@ private struct ErrorBanner: View {
         .font(.footnote)
         .frame(maxWidth: .infinity, alignment: .leading)
       Button("Retry") { retry() }
-        .font(.footnote.weight(.bold))
-        .buttonStyle(.bordered)
+        .font(.footnote.weight(.semibold))
+        .buttonStyle(.glass)
     }
-    .foregroundStyle(Theme.errorText)
     .padding(12)
-    .background(Theme.errorText.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .glassEffect(.regular.tint(Theme.error.opacity(0.35)), in: .rect(cornerRadius: 20))
     .accessibilityElement(children: .combine)
   }
 }

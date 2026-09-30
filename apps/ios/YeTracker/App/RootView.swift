@@ -1,35 +1,42 @@
 import SwiftUI
 import YeTrackerKit
 
-/// Tabs, one navigation stack per browsing tab, the mini player above the tab
-/// bar and the Now Playing sheet.
+/// Tabs with one navigation stack per browsing tab, the search tab in the tab
+/// bar, the mini player as the tab bar's accessory, and the Now Playing sheet
+/// that zooms out of it.
 struct RootView: View {
   @Environment(AppModel.self) private var app
+  @Namespace private var playerTransition
 
   var body: some View {
     @Bindable var router = app.router
+    @Bindable var search = app.search
     TabView(selection: $router.selectedTab) {
-      BrowsingTab(tab: .home, path: $router.homePath) {
-        HomeView()
+      Tab("Eras", systemImage: "square.grid.2x2", value: AppTab.home) {
+        BrowsingTab(tab: .home, path: $router.homePath) {
+          HomeView()
+        }
       }
-      .tabItem { Label("Eras", systemImage: "square.grid.2x2.fill") }
-      .tag(AppTab.home)
 
-      BrowsingTab(tab: .search, path: $router.searchPath) {
-        SearchView()
+      Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
+        NavigationStack {
+          SettingsView()
+        }
+        .downloadBannerInset()
       }
-      .tabItem { Label("Search", systemImage: "magnifyingglass") }
-      .tag(AppTab.search)
 
-      NavigationStack {
-        SettingsView()
+      Tab("Search", systemImage: "magnifyingglass", value: AppTab.search, role: .search) {
+        BrowsingTab(tab: .search, path: $router.searchPath) {
+          SearchView()
+        }
+        .searchable(text: $search.query, prompt: "Songs, artists, notes")
       }
-      .miniPlayerInset()
-      .tabItem { Label("Settings", systemImage: "gearshape.fill") }
-      .tag(AppTab.settings)
     }
+    .tabBarMinimizeBehavior(.onScrollDown)
+    .modifier(MiniPlayerAccessory(isActive: app.player.isActive, transition: playerTransition))
     .sheet(isPresented: $router.isNowPlayingPresented) {
       NowPlayingView()
+        .navigationTransition(.zoom(sourceID: MiniPlayerAccessory.transitionID, in: playerTransition))
     }
     .background {
       if app.player.isActive {
@@ -57,44 +64,46 @@ private struct BrowsingTab<Root: View>: View {
           }
         }
     }
-    .miniPlayerInset()
+    .downloadBannerInset()
+  }
+}
+
+/// The mini player in the tab bar's bottom accessory, like Music; hidden while
+/// nothing plays.
+private struct MiniPlayerAccessory: ViewModifier {
+  static let transitionID = "now-playing"
+  let isActive: Bool
+  let transition: Namespace.ID
+
+  func body(content: Content) -> some View {
+    content.tabViewBottomAccessory(isEnabled: isActive) {
+      MiniPlayerView()
+        .matchedTransitionSource(id: Self.transitionID, in: transition)
+    }
   }
 }
 
 extension View {
-  /// Reserves room for the download banner and the mini player above the tab bar.
-  func miniPlayerInset() -> some View {
-    modifier(MiniPlayerInset())
+  /// Reserves room for the download banner above the tab bar.
+  func downloadBannerInset() -> some View {
+    modifier(DownloadBannerInset())
   }
 }
 
-private struct MiniPlayerInset: ViewModifier {
+private struct DownloadBannerInset: ViewModifier {
   @Environment(AppModel.self) private var app
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   func body(content: Content) -> some View {
     content.safeAreaInset(edge: .bottom, spacing: 0) {
       // Out of the way while typing: the inset would sit on top of the keyboard.
-      if !app.keyboard.isVisible {
-        chrome
-      }
-    }
-  }
-
-  private var chrome: some View {
-    VStack(spacing: 6) {
-      if app.downloads.job != nil {
+      if app.downloads.job != nil, !app.keyboard.isVisible {
         DownloadBanner()
-          .transition(.move(edge: .bottom).combined(with: .opacity))
-      }
-      if app.player.isActive {
-        MiniPlayerView()
+          .padding(.horizontal, 16)
+          .padding(.bottom, 8)
           .transition(.move(edge: .bottom).combined(with: .opacity))
       }
     }
-    .padding(.horizontal, 8)
-    .padding(.bottom, 6)
-    .animation(reduceMotion ? nil : .snappy, value: app.player.isActive)
     .animation(reduceMotion ? nil : .snappy, value: app.downloads.job != nil)
   }
 }

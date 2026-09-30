@@ -7,15 +7,17 @@ and the web → iOS feature map are in [`IOS_APP_PLAN.md`](../../IOS_APP_PLAN.md
 
 ## Requirements
 
-- Xcode 16 or newer (the project uses synchronized folders, object version 77)
-- iOS 17 or newer (device or simulator)
+- Xcode 26.1 or newer (the iOS 26.1 SDK; the project uses synchronized folders, object version 77)
+- iOS 26.1 or newer (device or simulator): the UI uses Liquid Glass, the search
+  tab and the tab bar's bottom accessory (`tabViewBottomAccessory(isEnabled:)`
+  needs 26.1).
 - A running API from this repo, including the `format=aac`/`start` stream
   options (see [Server requirement](#server-requirement))
 
 ## Run it
 
 1. Start the API, e.g. `pnpm start:api` (listens on `127.0.0.1:3000`).
-2. Open `apps/ios/YeTracker.xcodeproj`, pick an iOS 17+ simulator and run the
+2. Open `apps/ios/YeTracker.xcodeproj`, pick an iOS 26.1+ simulator and run the
    **YeTracker** scheme. The simulator shares the Mac's network, so the default
    server `http://localhost:3000` works as is.
 
@@ -115,7 +117,7 @@ Command-line build of the app on a Mac:
 
 ```sh
 xcodebuild -project apps/ios/YeTracker.xcodeproj -scheme YeTracker \
-  -destination 'platform=iOS Simulator,name=iPhone 16' build
+  -destination 'platform=iOS Simulator,name=iPhone 17' build
 ```
 
 ## Manual QA checklist
@@ -123,7 +125,9 @@ xcodebuild -project apps/ios/YeTracker.xcodeproj -scheme YeTracker \
 - [ ] Home: stats header, recently leaked (tap plays, chevron opens the era), era grid, "Filter eras…"
 - [ ] Era: header, previous/next era, search (instant local filter, then the whole era), category and sort menu, filter chips, "Clear all filters", infinite scroll, "Showing X of Y songs"
 - [ ] Search: results deep-link into the era and highlight the song; era range slider, "Playable only", Clear; long-press a playable result to play it
-- [ ] Player: mini player and Now Playing sheet, scrubbing at 128 kbps (restarts with `start=`) and at Original (native seek), quality switch mid-song, auto-advance, previous/next at list ends
+- [ ] Light and dark appearance: era washes, tints and the always-dark Now Playing sheet
+- [ ] Tab bar: minimizes on scroll, the mini player collapses inline, the search tab's field
+- [ ] Player: mini player and Now Playing sheet (zooms out of the mini player), scrubbing at 128 kbps (restarts with `start=`) and at Original (native seek), quality switch mid-song, auto-advance, previous/next at list ends
 - [ ] An Ogg/Opus original at **Original** quality shows "Converting for playback…" and then plays
 - [ ] Lock screen and Control Center: artwork, play/pause, next/previous, scrubbing; a phone call interrupts and playback resumes afterwards
 - [ ] AirPlay route picker, volume slider, background playback

@@ -82,6 +82,12 @@ final class AppModel {
     Presenter.presentSafari(url)
   }
 
+  /// The cover of a search result's era (`nil` until the era list is loaded).
+  func coverURL(for song: SearchSong) -> URL? {
+    guard let era = directory.era(id: song.eraId) else { return nil }
+    return api.coverURL(eraID: era.id, version: era.coverKey)
+  }
+
   func download(songID: Int, title: String) {
     downloads.start(songID: songID, title: title, from: api.downloadURL(songID: songID))
   }

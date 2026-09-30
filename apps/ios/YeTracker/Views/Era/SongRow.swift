@@ -2,15 +2,14 @@ import SwiftUI
 import UIKit
 import YeTrackerKit
 
-/// One song as a card: play/download for stored files, a source link otherwise,
-/// title, expandable notes and the quality/length/date details (the web table's
-/// phone layout).
+/// One song as a list row: play/download for stored files, a source link
+/// otherwise, title, expandable notes and the quality/length/date details (the
+/// web table's phone layout). The era list draws the playing/highlight fill.
 struct SongRow: View {
   let song: EraSong
   let palette: EraPalette
   let isCurrent: Bool
   let isPlaying: Bool
-  let isHighlighted: Bool
   let onPlay: @MainActor () -> Void
   let onDownload: @MainActor () -> Void
   let onOpenSource: @MainActor (URL) -> Void
@@ -22,22 +21,22 @@ struct SongRow: View {
       VStack(alignment: .leading, spacing: 6) {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
           Text(song.displayTitle)
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(palette.bodyText)
+            .font(.body.weight(isCurrent ? .semibold : .regular))
+            .foregroundStyle(isCurrent ? palette.tint : .primary)
             .fixedSize(horizontal: false, vertical: true)
           if isCurrent {
-            NowPlayingGlyph(isPlaying: isPlaying, color: palette.headerText)
+            NowPlayingGlyph(isPlaying: isPlaying, color: palette.tint)
           }
         }
         if let notes = song.trimmedNotes {
-          ExpandableText(text: notes, lineLimit: 3, tint: palette.headerText)
+          ExpandableText(text: notes, lineLimit: 3, tint: palette.tint)
             .font(.footnote)
-            .foregroundStyle(palette.mutedText)
+            .foregroundStyle(.secondary)
         }
         if !details.isEmpty {
           Text(details)
             .font(.caption)
-            .foregroundStyle(palette.mutedText)
+            .foregroundStyle(.tertiary)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -48,20 +47,15 @@ struct SongRow: View {
         } label: {
           Image(systemName: "arrow.down.circle")
             .font(.title3)
-            .foregroundStyle(palette.mutedText)
+            .foregroundStyle(.secondary)
             .frame(width: 32, height: 32)
+            .contentShape(.rect)
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .accessibilityLabel("Download \(song.displayTitle)")
       }
     }
-    .padding(12)
-    .background(background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .strokeBorder(isHighlighted ? palette.accentColor : palette.rowBorder, lineWidth: isHighlighted ? 2 : 1)
-    }
-    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .contentShape(.rect)
     .onTapGesture {
       if song.isPlayable { onPlay() }
     }
@@ -95,26 +89,28 @@ struct SongRow: View {
         onPlay()
       } label: {
         Image(systemName: isCurrent && isPlaying ? "pause.fill" : "play.fill")
-          .font(.subheadline.weight(.bold))
-          .foregroundStyle(palette.bodyText)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(palette.tint)
           .frame(width: 36, height: 36)
-          .background(palette.accentColor.opacity(0.42), in: Circle())
+          .background(palette.controlFill, in: .circle)
+          .contentTransition(.symbolEffect(.replace))
       }
-      .buttonStyle(.borderless)
+      .buttonStyle(.plain)
     } else if let url = song.sourceURL {
       Button {
         onOpenSource(url)
       } label: {
         Image(systemName: "link")
-          .font(.footnote.weight(.bold))
-          .foregroundStyle(palette.bodyText)
+          .font(.footnote.weight(.semibold))
+          .foregroundStyle(palette.tint)
           .frame(width: 36, height: 36)
-          .overlay(Circle().strokeBorder(palette.rowBorder))
+          .overlay(Circle().strokeBorder(palette.controlFill, lineWidth: 1.5))
+          .contentShape(.circle)
       }
-      .buttonStyle(.borderless)
+      .buttonStyle(.plain)
     } else {
       Text("—")
-        .foregroundStyle(palette.mutedText)
+        .foregroundStyle(.tertiary)
         .frame(width: 36, height: 36)
     }
   }
@@ -134,12 +130,6 @@ struct SongRow: View {
     if !song.isPlayable {
       Text(song.unavailableReason)
     }
-  }
-
-  private var background: Color {
-    if isHighlighted { return palette.highlightFill }
-    if isCurrent { return palette.playingFill }
-    return palette.rowFill
   }
 
   /// "CD Quality · Snippet - 1:05 · File 9/30/21 · Leaked 4/22/09".

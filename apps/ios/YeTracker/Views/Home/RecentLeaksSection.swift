@@ -6,38 +6,44 @@ import YeTrackerKit
 struct RecentLeaksSection: View {
   @Environment(AppModel.self) private var app
 
-  private let columns = [GridItem(.adaptive(minimum: 280), spacing: 8)]
-
   var body: some View {
-    let home = app.home
+    let songs = app.home.recentLeaks
     VStack(alignment: .leading, spacing: 10) {
       VStack(alignment: .leading, spacing: 2) {
-        Text("Recently leaked")
-          .font(.title3.weight(.bold))
+        Text("Recently Leaked")
+          .font(.title2.weight(.bold))
+          .accessibilityAddTraits(.isHeader)
         Text("Newest tracks that can be played right now.")
           .font(.footnote)
-          .foregroundStyle(Theme.secondaryText)
+          .foregroundStyle(.secondary)
       }
-      LazyVGrid(columns: columns, spacing: 8) {
-        ForEach(home.recentLeaks) { song in
+      VStack(spacing: 0) {
+        ForEach(songs) { song in
           RecentLeakRow(song: song)
+          if song.id != songs.last?.id {
+            Divider()
+              .padding(.leading, 68)
+          }
         }
       }
+      .padding(.vertical, 4)
+      .background(Color(.secondarySystemBackground), in: .rect(cornerRadius: 22))
     }
   }
 }
 
 private struct RecentLeakRow: View {
   @Environment(AppModel.self) private var app
+  @Environment(\.colorScheme) private var colorScheme
   let song: SearchSong
 
   var body: some View {
-    let palette = EraPalette(song.color)
+    let palette = EraPalette(song.color, colorScheme: colorScheme)
     let player = app.player
     let isCurrent = player.current?.id == song.id
     let route = app.home.route(for: song)
 
-    HStack(spacing: 10) {
+    HStack(spacing: 12) {
       Button {
         if isCurrent {
           player.togglePlayPause()
@@ -45,35 +51,35 @@ private struct RecentLeakRow: View {
           app.home.play(song, with: player)
         }
       } label: {
-        HStack(spacing: 10) {
-          Image(systemName: isCurrent && player.isPlaying ? "pause.fill" : "play.fill")
-            .font(.subheadline)
-            .frame(width: 34, height: 34)
-            .background(palette.accentColor.opacity(0.3), in: Circle())
-          VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-              Text(song.displayTitle)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
+        HStack(spacing: 12) {
+          CoverImage(url: app.coverURL(for: song), accent: song.color, cornerRadius: 8)
+            .frame(width: 44, height: 44)
+            .overlay {
               if isCurrent {
-                NowPlayingGlyph(isPlaying: player.isPlaying, color: palette.cardText)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                  .fill(.black.opacity(0.35))
+                  .overlay { NowPlayingGlyph(isPlaying: player.isPlaying, color: .white) }
               }
             }
-            HStack(spacing: 5) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text(song.displayTitle)
+              .font(.body)
+              .foregroundStyle(isCurrent ? palette.tint : .primary)
+              .lineLimit(1)
+            HStack(spacing: 4) {
               Text(song.eraDisplayName)
                 .lineLimit(1)
-              Text("•")
+              Text("·")
                 .accessibilityHidden(true)
               Text(Formatters.mediumDate(song.leakDate))
                 .fixedSize()
             }
-            .font(.caption)
-            .foregroundStyle(palette.mutedText)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
           }
           Spacer(minLength: 0)
         }
-        .contentShape(Rectangle())
+        .contentShape(.rect)
       }
       .buttonStyle(.plain)
       .accessibilityLabel("Play \(song.displayTitle), \(song.eraDisplayName)")
@@ -82,31 +88,19 @@ private struct RecentLeakRow: View {
         Button {
           app.router.show(route)
         } label: {
-          Image(systemName: "chevron.right")
+          Image(systemName: "chevron.forward")
             .font(.footnote.weight(.semibold))
-            .foregroundStyle(palette.mutedText)
-            .frame(width: 30, height: 34)
-            .contentShape(Rectangle())
+            .foregroundStyle(.tertiary)
+            .frame(width: 32, height: 44)
+            .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Show \(song.displayTitle) in \(song.eraDisplayName)")
       }
     }
-    .padding(.vertical, 8)
-    .padding(.horizontal, 10)
-    .background(
-      isCurrent ? palette.listCardPlayingFill : palette.listCardFill,
-      in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-    )
-    .overlay(alignment: .leading) {
-      UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10, style: .continuous)
-        .fill(isCurrent ? Color.white : palette.listCardEdge)
-        .frame(width: 4)
-    }
-    .overlay {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .strokeBorder(isCurrent ? Color.white : palette.listCardBorder, lineWidth: 1)
-    }
+    .padding(.vertical, 6)
+    .padding(.leading, 12)
+    .padding(.trailing, 6)
     .contextMenu {
       Button("Play", systemImage: "play.fill") { app.home.play(song, with: player) }
       if let route {

@@ -6,19 +6,14 @@ import YeTrackerKit
 struct HomeView: View {
   @Environment(AppModel.self) private var app
 
-  private let columns = [GridItem(.adaptive(minimum: 150, maximum: 260), spacing: 12, alignment: .top)]
+  private let columns = [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 16, alignment: .top)]
 
   var body: some View {
     @Bindable var home = app.home
     let directory = home.directory
 
     ScrollView {
-      VStack(alignment: .leading, spacing: 24) {
-        Text(home.headerSummary)
-          .font(.subheadline)
-          .foregroundStyle(Theme.secondaryText)
-          .opacity(directory.eras.isEmpty ? 0 : 1)
-
+      VStack(alignment: .leading, spacing: 28) {
         if case .failed(let error) = directory.state {
           CatalogNotice(message: error.userMessage) {
             Task { await home.load(force: true) }
@@ -32,13 +27,14 @@ struct HomeView: View {
         erasSection(home: home)
       }
       .padding(.horizontal, 16)
+      .padding(.top, 8)
       .padding(.bottom, 24)
       .frame(maxWidth: 1200)
       .frame(maxWidth: .infinity)
     }
-    .background(Theme.background)
     .navigationTitle("Ye Tracker")
-    .searchable(text: $home.eraFilter, prompt: "Filter eras…")
+    .navigationSubtitle(directory.eras.isEmpty ? "" : home.headerSummary)
+    .searchable(text: $home.eraFilter, prompt: "Filter eras")
     .refreshable { [home] in await home.load(force: true) }
     .task { await home.load() }
   }
@@ -49,12 +45,13 @@ struct HomeView: View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .firstTextBaseline) {
         Text("Eras")
-          .font(.title3.weight(.bold))
+          .font(.title2.weight(.bold))
+          .accessibilityAddTraits(.isHeader)
         Spacer()
         if home.showsEraFilter {
           Text(home.eraCountLabel)
             .font(.footnote)
-            .foregroundStyle(Theme.secondaryText)
+            .foregroundStyle(.secondary)
             .contentTransition(.numericText())
         }
       }
@@ -63,11 +60,11 @@ struct HomeView: View {
         LoadingStateView(label: "Loading eras…")
       } else if let message = home.eraFilterEmptyMessage {
         Text(message)
-          .foregroundStyle(Theme.secondaryText)
+          .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity)
           .padding(.vertical, 24)
       } else {
-        LazyVGrid(columns: columns, spacing: 12) {
+        LazyVGrid(columns: columns, spacing: 20) {
           ForEach(home.filteredEras) { era in
             NavigationLink(value: AppRoute.era(EraRoute(eraID: era.id))) {
               EraCard(era: era, coverURL: app.api.coverURL(eraID: era.id, version: era.coverKey))
@@ -80,33 +77,32 @@ struct HomeView: View {
   }
 }
 
-/// An era tile: cover, name and song count in the era's colours (`Era.astro`).
+/// An era tile: cover, name and song count, like an album in Music (`Era.astro`).
 struct EraCard: View {
   let era: Era
   let coverURL: URL
 
   var body: some View {
-    let palette = EraPalette(era.color)
     VStack(alignment: .leading, spacing: 8) {
-      CoverImage(url: coverURL, accent: era.color, cornerRadius: 10)
+      CoverImage(url: coverURL, accent: era.color, cornerRadius: 12)
         .aspectRatio(1, contentMode: .fit)
-      Text(era.displayName)
-        .font(.headline.weight(.bold))
-        .foregroundStyle(palette.cardText)
-        .lineLimit(2, reservesSpace: true)
-        .multilineTextAlignment(.leading)
-      Text(era.songCountLabel)
-        .font(.footnote.weight(.light))
-        .foregroundStyle(palette.cardText)
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .overlay {
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        }
+      VStack(alignment: .leading, spacing: 2) {
+        Text(era.displayName)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.primary)
+          .lineLimit(2)
+          .multilineTextAlignment(.leading)
+        Text(era.songCountLabel)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
     }
-    .padding(10)
-    .background(palette.cardFill, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 14, style: .continuous)
-        .strokeBorder(palette.border, lineWidth: 3)
-    }
-    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .contentShape(.rect)
+    .hoverEffect(.lift)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("\(era.displayName), \(era.songCountLabel)")
     .accessibilityAddTraits(.isButton)

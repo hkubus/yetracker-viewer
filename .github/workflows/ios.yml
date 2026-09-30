@@ -27,7 +27,8 @@ jobs:
     name: Build (YeTrackerKit tests, unsigned IPA)
     # Forgejo also runs .github/workflows and has no macOS runner.
     if: github.server_url == 'https://github.com' && github.event_name != 'workflow_dispatch'
-    runs-on: macos-15
+    # Xcode 26 (iOS 26 SDK).
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

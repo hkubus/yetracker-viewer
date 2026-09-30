@@ -8,8 +8,6 @@ struct YeTrackerApp: App {
     WindowGroup {
       RootView()
         .environment(app)
-        .preferredColorScheme(.dark)
-        .tint(Theme.accent)
         .onOpenURL { url in app.router.open(url) }
     }
   }

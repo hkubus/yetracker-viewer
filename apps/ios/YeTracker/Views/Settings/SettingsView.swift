@@ -32,7 +32,7 @@ struct SettingsView: View {
         if let serverError {
           Text(serverError)
             .font(.footnote)
-            .foregroundStyle(Theme.errorText)
+            .foregroundStyle(Theme.error)
         }
         Button("Save and Reload") { saveServer() }
           .disabled(normalizedInput == settings.apiBaseURL.absoluteString)
@@ -96,8 +96,6 @@ struct SettingsView: View {
         Link("Ye Tracker", destination: URL(string: "https://yetracker.net")!)
       }
     }
-    .scrollContentBackground(.hidden)
-    .background(Theme.background)
     .navigationTitle("Settings")
     .onAppear {
       if serverText.isEmpty { serverText = settings.apiBaseURL.absoluteString }
@@ -120,7 +118,7 @@ struct SettingsView: View {
     case .failure(let message):
       Label(message, systemImage: "xmark.octagon.fill")
         .font(.footnote)
-        .foregroundStyle(Theme.errorText)
+        .foregroundStyle(Theme.error)
         .lineLimit(3)
     }
   }

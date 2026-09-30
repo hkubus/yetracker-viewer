@@ -6,6 +6,7 @@ import YeTrackerKit
 struct EraDetailView: View {
   @Environment(AppModel.self) private var app
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.colorScheme) private var colorScheme
   @State private var model: EraDetailModel
   let tab: AppTab
 
@@ -18,10 +19,19 @@ struct EraDetailView: View {
 
   var body: some View {
     @Bindable var model = model
-    let palette = EraPalette(model.color)
+    let palette = EraPalette(model.color, colorScheme: colorScheme)
 
     content(palette: palette)
-      .background(palette.pageWash.ignoresSafeArea())
+      .background {
+        // The era colour washes in from the top, under the glass bars.
+        LinearGradient(
+          stops: [.init(color: palette.pageWash, location: 0), .init(color: .clear, location: 0.55)],
+          startPoint: .top,
+          endPoint: .bottom
+        )
+        .background(Color(.systemBackground))
+        .ignoresSafeArea()
+      }
       .navigationTitle(model.title)
       .navigationBarTitleDisplayMode(.inline)
       .searchable(
@@ -61,7 +71,7 @@ struct EraDetailView: View {
           app.router.replaceTop(with: EraRoute(eraID: era.id), in: tab)
         }
         .id(Self.headerID)
-        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 12, trailing: 16))
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 16, trailing: 16))
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
 
@@ -76,7 +86,7 @@ struct EraDetailView: View {
           if let message = model.emptyMessage {
             Text(message)
               .font(.subheadline)
-              .foregroundStyle(palette.mutedText)
+              .foregroundStyle(.secondary)
               .frame(maxWidth: .infinity)
               .padding(.vertical, 24)
               .listRowBackground(Color.clear)
@@ -84,9 +94,8 @@ struct EraDetailView: View {
           }
           ForEach(model.visibleSongs) { song in
             row(for: song, palette: palette)
-              .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
-              .listRowBackground(Color.clear)
-              .listRowSeparator(.hidden)
+              .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 12))
+              .listRowBackground(rowBackground(for: song, palette: palette))
               .onAppear { model.loadMoreIfNeeded(currentSongID: song.id) }
           }
           footer(palette: palette)
@@ -114,7 +123,6 @@ struct EraDetailView: View {
       palette: palette,
       isCurrent: isCurrent,
       isPlaying: isCurrent && player.isPlaying,
-      isHighlighted: model.highlightedSongID == song.id,
       onPlay: {
         if isCurrent {
           player.togglePlayPause()
@@ -126,23 +134,43 @@ struct EraDetailView: View {
       onOpenSource: { url in app.openWebLink(url) })
   }
 
+  /// The playing row and a deep-link target get a rounded fill in the era colour.
+  private func rowBackground(for song: EraSong, palette: EraPalette) -> some View {
+    let fill: Color =
+      if model.highlightedSongID == song.id {
+        palette.highlightFill
+      } else if app.player.current?.id == song.id {
+        palette.playingFill
+      } else {
+        .clear
+      }
+    return RoundedRectangle(cornerRadius: 16, style: .continuous)
+      .fill(fill)
+      .padding(.horizontal, 6)
+      .padding(.vertical, 1)
+  }
+
   /// Pinned under the search field: result count and the active filters.
   private func summaryBar(palette: EraPalette) -> some View {
     HStack(spacing: 8) {
       Text(model.countLabel)
         .font(.footnote)
-        .foregroundStyle(palette.mutedText)
+        .foregroundStyle(.secondary)
         .lineLimit(2)
       if model.isApplyingFilters {
         ProgressView()
           .controlSize(.mini)
       }
       Spacer(minLength: 4)
-      if let category = model.category {
-        FilterChip(title: category.title, palette: palette) { model.category = nil }
-      }
-      if model.sort != .default {
-        FilterChip(title: model.sort.label, palette: palette) { model.sort = .default }
+      GlassEffectContainer(spacing: 6) {
+        HStack(spacing: 6) {
+          if let category = model.category {
+            FilterChip(title: category.title, tint: palette.tint) { model.category = nil }
+          }
+          if model.sort != .default {
+            FilterChip(title: model.sort.label, tint: palette.tint) { model.sort = .default }
+          }
+        }
       }
     }
     .padding(.horizontal, 4)
@@ -159,17 +187,17 @@ struct EraDetailView: View {
       case .failed(let error):
         Text("More songs could not be loaded. \(error.userMessage)")
           .font(.footnote)
-          .foregroundStyle(Theme.errorText)
+          .foregroundStyle(Theme.error)
           .multilineTextAlignment(.center)
         Button("Retry") { model.retryPaging() }
-          .buttonStyle(.bordered)
+          .buttonStyle(.glass)
       case .idle, .complete:
         EmptyView()
       }
       if let label = model.footerLabel {
         Text(label)
           .font(.footnote)
-          .foregroundStyle(palette.mutedText)
+          .foregroundStyle(.secondary)
       }
     }
     .frame(maxWidth: .infinity)
@@ -241,7 +269,7 @@ private struct EraFilterMenu: View {
 /// An active filter with a remove button.
 private struct FilterChip: View {
   let title: String
-  let palette: EraPalette
+  let tint: Color
   let remove: @MainActor () -> Void
 
   var body: some View {
@@ -255,13 +283,13 @@ private struct FilterChip: View {
           .font(.caption2.weight(.bold))
       }
       .font(.caption.weight(.semibold))
-      .foregroundStyle(palette.bodyText)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 4)
-      .background(palette.cardFill, in: Capsule())
-      .overlay(Capsule().strokeBorder(palette.rowBorder))
+      .foregroundStyle(tint)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 5)
+      .contentShape(.capsule)
     }
-    .buttonStyle(.borderless)
+    .buttonStyle(.plain)
+    .glassEffect(.regular.interactive(), in: .capsule)
     .accessibilityLabel("Remove filter \(title)")
   }
 }

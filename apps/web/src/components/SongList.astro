@@ -577,7 +577,9 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
 
   /* ---- Table (wide screens) ---- */
   .song-list .song-table {
-    width: 100%;
+    /* A parent with padding sets --song-list-bleed to it: the table then spans the parent edge to edge. */
+    width: calc(100% + 2 * var(--song-list-bleed, 0px));
+    margin-inline: calc(-1 * var(--song-list-bleed, 0px));
     border-collapse: collapse;
     /* Fixed layout keeps the column widths stable: clamped notes contribute almost no intrinsic width. */
     table-layout: fixed;
@@ -590,6 +592,12 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     text-align: left;
     vertical-align: top;
     overflow-wrap: anywhere;
+  }
+  .song-list .song-table tr > :first-child {
+    border-left: 0;
+  }
+  .song-list .song-table tr > :last-child {
+    border-right: 0;
   }
   .song-list .song-table thead th {
     position: sticky;
@@ -931,6 +939,10 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     .song-list .song-table,
     .song-list .song-table > tbody {
       display: block;
+    }
+    .song-list .song-table {
+      width: auto;
+      margin-inline: 0;
     }
     .song-list .song-table > thead {
       position: absolute;

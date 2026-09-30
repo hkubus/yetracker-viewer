@@ -11,14 +11,15 @@
 //!
 //! Server: HTTP/1.1 with TCP_NODELAY and at most `MAX_CONNECTIONS` open
 //! connections. At the limit a new connection replaces the one that has been
-//! idle (no request in flight) the longest or, failing that, the one whose
-//! client has read nothing of its response for the longest time (at least
-//! 10 s); it is refused only when every connection is busy, and limit events
-//! are logged at most every 10 s with a count. 30 s to send a request's
-//! headers; idle keep-alive connections are closed after 75 s; a response
-//! whose client reads nothing for 60 s is closed (freeing the connection and
-//! the file it streams), any other response that moves no bytes after
-//! 10 min; a graceful shutdown drains for at most 10 s.
+//! idle (no request in flight) the longest or one whose client has read
+//! nothing of its response for 10 s (before connections opened less than a
+//! second ago, see [`eviction_victim`]); it is refused only when every
+//! connection is busy, and limit events are logged at most every 10 s with a
+//! count. 30 s to send a request's headers; idle keep-alive connections are
+//! closed after 75 s; a response whose client reads nothing for 60 s is
+//! closed (freeing the connection and the file it streams), any other
+//! response that moves no bytes after 10 min; a graceful shutdown drains for
+//! at most 10 s.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -71,9 +72,12 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A connection whose client reads nothing for this long (its socket stays
 /// unwritable) is closed, with the file its response streams.
 const NOT_READING_TIMEOUT: Duration = Duration::from_secs(60);
-/// At the connection limit, with no idle connection to close, one whose
-/// client has read nothing for this long makes room for a newcomer.
+/// At the connection limit, one whose client has read nothing for this long
+/// may make room for a newcomer.
 const NOT_READING_EVICTABLE: Duration = Duration::from_secs(10);
+/// A connection idle for less than this may be a client whose request is
+/// still on its way; at the limit, a client that stopped reading goes first.
+const JUST_CONNECTED: Duration = Duration::from_secs(1);
 /// Connection-limit warnings are logged at most this often, with counts.
 const LIMIT_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const WATCHDOG_TICK: Duration = Duration::from_secs(1);
@@ -556,22 +560,27 @@ struct OpenConnection {
     evict: CancellationToken,
 }
 
-/// The connection to close for a newcomer when the limit is reached: the one
-/// idle the longest or, when every connection has a request in flight, the
-/// one whose client has read nothing for the longest time (at least
-/// [`NOT_READING_EVICTABLE`]). A flood of silent sockets or of requests
+/// The connection to close for a newcomer when the limit is reached, in this
+/// order: the one idle (no request in flight) the longest, if that is at
+/// least [`JUST_CONNECTED`]; the one whose client has read nothing for the
+/// longest time, if that is at least [`NOT_READING_EVICTABLE`]; the one idle
+/// the longest, however briefly. A flood of silent sockets or of requests
 /// whose responses are never read can't lock real clients out (they send
-/// their request right away and read the answer), while a client that
-/// keeps reading is never cut off.
+/// their request right away and read the answer), newcomers don't push each
+/// other out while stalled connections are around, and a client that keeps
+/// reading is never cut off.
 fn eviction_victim(open: &HashMap<u64, OpenConnection>, now: Instant) -> Option<u64> {
-    longest_idle(open).or_else(|| longest_not_reading(open, now))
+    let idle = longest_idle(open);
+    match idle {
+        Some((since, id)) if now.saturating_duration_since(since) >= JUST_CONNECTED => Some(id),
+        _ => longest_not_reading(open, now).or(idle.map(|(_, id)| id)),
+    }
 }
 
-fn longest_idle(open: &HashMap<u64, OpenConnection>) -> Option<u64> {
+fn longest_idle(open: &HashMap<u64, OpenConnection>) -> Option<(Instant, u64)> {
     open.iter()
         .filter_map(|(id, connection)| Some((connection.activity.idle_since()?, *id)))
         .min()
-        .map(|(_, id)| id)
 }
 
 fn longest_not_reading(open: &HashMap<u64, OpenConnection>, now: Instant) -> Option<u64> {
@@ -1115,12 +1124,13 @@ mod tests {
             (2, connection(&busy)),
             (3, connection(&kept_alive)),
         ]);
-        assert_eq!(longest_idle(&open), Some(1));
+        let now = Instant::now();
+        assert_eq!(eviction_victim(&open, now), Some(1));
         open.remove(&1);
-        assert_eq!(longest_idle(&open), Some(3));
+        assert_eq!(eviction_victim(&open, now), Some(3));
         open.remove(&3);
         assert_eq!(
-            longest_idle(&open),
+            eviction_victim(&open, now),
             None,
             "a request in flight is never cut off"
         );
@@ -1156,10 +1166,22 @@ mod tests {
             "5 s without reading is not enough, and a reading client is never cut off"
         );
         assert_eq!(eviction_victim(&open, now + NOT_READING_EVICTABLE), Some(3));
-        // An idle connection still goes first.
+        // A client that stopped reading goes before one that connected a
+        // moment ago (its request may be on its way)...
+        let later = now + NOT_READING_EVICTABLE;
+        let fresh = Activity::new();
+        fresh.head_started.store(39_901, Ordering::Relaxed);
+        open.insert(4, connection(&fresh));
+        assert_eq!(eviction_victim(&open, later), Some(3));
+        // ...but after one that has been idle for a while.
         let idle = Activity::new();
-        open.insert(4, connection(&idle));
-        assert_eq!(eviction_victim(&open, now + NOT_READING_EVICTABLE), Some(4));
+        idle.head_started.store(38_001, Ordering::Relaxed);
+        open.insert(5, connection(&idle));
+        assert_eq!(eviction_victim(&open, later), Some(5));
+        // With nothing else left, even a new connection makes room.
+        open.remove(&5);
+        open.remove(&3);
+        assert_eq!(eviction_victim(&open, later), Some(4));
     }
 
     #[test]

@@ -11,65 +11,63 @@ struct EraHeaderView: View {
   @Environment(\.horizontalSizeClass) private var sizeClass
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
+    VStack(alignment: .leading, spacing: 16) {
       if sizeClass == .regular {
-        HStack(alignment: .top, spacing: 18) {
-          cover.frame(width: 220)
-          titleBlock
+        HStack(alignment: .bottom, spacing: 24) {
+          cover.frame(width: 240)
+          titleBlock(alignment: .leading)
         }
       } else {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 16) {
           cover
-            .frame(maxWidth: 320)
-            .frame(maxWidth: .infinity)
-          titleBlock
+            .frame(maxWidth: 260)
+          titleBlock(alignment: .center)
         }
+        .frame(maxWidth: .infinity)
       }
 
       if let notes = model.era?.trimmedNotes {
-        Divider()
-          .overlay(palette.accentColor.opacity(0.3))
-        ExpandableText(text: notes, lineLimit: 4, tint: palette.headerText)
+        ExpandableText(text: notes, lineLimit: 4, tint: palette.tint)
           .font(.subheadline)
-          .foregroundStyle(palette.headerText)
+          .foregroundStyle(.secondary)
       }
 
       if model.previousEra != nil || model.nextEra != nil {
-        HStack(spacing: 10) {
-          if let previous = model.previousEra {
-            neighbourButton(previous, systemImage: "chevron.left", label: "Previous era")
-          }
-          Spacer(minLength: 0)
-          if let next = model.nextEra {
-            neighbourButton(next, systemImage: "chevron.right", label: "Next era", trailing: true)
+        GlassEffectContainer(spacing: 10) {
+          HStack(spacing: 10) {
+            if let previous = model.previousEra {
+              neighbourButton(previous, systemImage: "chevron.backward", label: "Previous era")
+            }
+            Spacer(minLength: 0)
+            if let next = model.nextEra {
+              neighbourButton(next, systemImage: "chevron.forward", label: "Next era", trailing: true)
+            }
           }
         }
       }
-    }
-    .padding(14)
-    .background(palette.cardFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .strokeBorder(palette.border, lineWidth: 3)
     }
   }
 
   private var cover: some View {
-    CoverImage(url: model.coverURL, accent: model.color, cornerRadius: 14)
+    CoverImage(url: model.coverURL, accent: model.color, cornerRadius: 16)
       .aspectRatio(1, contentMode: .fit)
+      .shadow(color: .black.opacity(0.25), radius: 18, y: 10)
   }
 
-  private var titleBlock: some View {
-    VStack(alignment: .leading, spacing: 8) {
+  private func titleBlock(alignment: HorizontalAlignment) -> some View {
+    let textAlignment: TextAlignment = alignment == .center ? .center : .leading
+    return VStack(alignment: alignment, spacing: 6) {
       Text(model.title)
-        .font(.largeTitle.weight(.bold))
-        .foregroundStyle(palette.headerText)
+        .font(.title.weight(.bold))
+        .foregroundStyle(.primary)
+        .multilineTextAlignment(textAlignment)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityAddTraits(.isHeader)
       if let description = model.era?.trimmedDescription {
         Text(description)
           .font(.body)
-          .foregroundStyle(palette.headerText)
+          .foregroundStyle(palette.tint)
+          .multilineTextAlignment(textAlignment)
           .fixedSize(horizontal: false, vertical: true)
       }
     }
@@ -86,16 +84,10 @@ struct EraHeaderView: View {
         if trailing { Image(systemName: systemImage) }
       }
       .font(.footnote.weight(.semibold))
-      .foregroundStyle(palette.bodyText)
-      .padding(.horizontal, 12)
-      .padding(.vertical, 8)
-      .background(palette.cardFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .strokeBorder(palette.accentColor.opacity(0.45), lineWidth: 2)
-      }
+      .foregroundStyle(.primary)
+      .padding(.vertical, 2)
     }
-    .buttonStyle(.borderless)
+    .buttonStyle(.glass)
     .accessibilityLabel("\(label): \(era.displayName)")
   }
 }

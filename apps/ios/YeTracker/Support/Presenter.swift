@@ -10,7 +10,6 @@ enum Presenter {
   static func presentSafari(_ url: URL) {
     guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return }
     let controller = SFSafariViewController(url: url)
-    controller.preferredControlTintColor = .white
     controller.dismissButtonStyle = .close
     present(controller)
   }

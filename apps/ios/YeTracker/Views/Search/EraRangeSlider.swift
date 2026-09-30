@@ -12,7 +12,7 @@ struct EraRangeSlider: View {
   let onLowerChange: @MainActor (Int) -> Void
   let onUpperChange: @MainActor (Int) -> Void
 
-  private let thumbSize: CGFloat = 24
+  private let thumbSize: CGFloat = 28
   private let space = "eraRange"
 
   private var lastIndex: Int { max(eras.count - 1, 0) }
@@ -24,14 +24,10 @@ struct EraRangeSlider: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       HStack {
-        Text("ERA RANGE")
-          .font(.caption2.weight(.bold))
-          .tracking(1)
-          .foregroundStyle(Theme.secondaryText)
+        Text("Era Range")
         Spacer()
         Text(status)
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(Color(hex: "b8b8b8"))
+          .foregroundStyle(.secondary)
       }
 
       GeometryReader { geometry in
@@ -42,12 +38,12 @@ struct EraRangeSlider: View {
 
         ZStack(alignment: .leading) {
           Capsule()
-            .fill(Color(hex: "3f3f3f"))
-            .frame(height: 4)
+            .fill(Color(.systemFill))
+            .frame(height: 6)
             .padding(.horizontal, thumbSize / 2)
           Capsule()
             .fill(LinearGradient(colors: [lowerColor, upperColor], startPoint: .leading, endPoint: .trailing))
-            .frame(width: max(4, upperX - lowerX), height: 4)
+            .frame(width: max(6, upperX - lowerX), height: 6)
             .offset(x: lowerX + thumbSize / 2)
           thumb(color: lowerColor)
             .offset(x: lowerX - (collapsed ? 5 : 0))
@@ -80,8 +76,8 @@ struct EraRangeSlider: View {
           .frame(maxWidth: .infinity, alignment: .trailing)
           .multilineTextAlignment(.trailing)
       }
-      .font(.caption.weight(.semibold))
-      .foregroundStyle(Color(hex: "d5d5d5"))
+      .font(.caption)
+      .foregroundStyle(.secondary)
       .lineLimit(2)
       .accessibilityHidden(true)
     }
@@ -91,11 +87,12 @@ struct EraRangeSlider: View {
   }
 
   private func thumb(color: Color) -> some View {
+    // A glass knob like the system slider's, with the era colour inside.
     Circle()
       .fill(color)
-      .overlay(Circle().strokeBorder(Theme.surface, lineWidth: 3))
-      .overlay(Circle().strokeBorder(Color(hex: "d8d8d8"), lineWidth: 1))
+      .padding(7)
       .frame(width: thumbSize, height: thumbSize)
+      .glassEffect(.regular.interactive(), in: .circle)
       .contentShape(Rectangle().inset(by: -10))
   }
 

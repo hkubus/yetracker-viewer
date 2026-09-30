@@ -379,7 +379,7 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
     align-items: start;
     gap: 0.5rem 1.5rem;
     padding: 1rem;
-    border: 2px solid var(--theme-accent);
+    border: 4px solid var(--theme-accent);
     border-radius: 16px;
     background: var(--theme-background);
   }
@@ -459,9 +459,10 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
   }
 
   .era-songs {
+    --song-list-bleed: 0.75rem;
     margin-top: 1rem;
     padding: 0.75rem;
-    border: 2px solid var(--theme-accent);
+    border: 4px solid var(--theme-accent);
     border-radius: 16px;
     background: var(--theme-background);
   }
@@ -521,7 +522,6 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
     .era-songs {
       margin-top: 0.75rem;
       padding: 0.5rem;
-      border-width: 1px;
     }
   }
 </style>

@@ -153,9 +153,9 @@ Put both processes behind one TLS-terminating reverse proxy and keep them bound 
 - For `/songs/*/stream` and `/songs/*/download`: pass `Range`, `If-Range`, `If-None-Match` and `If-Modified-Since`
   through, turn response buffering off (live transcodes stream while ffmpeg writes them) and allow long reads.
 - Add per-IP request, connection and bandwidth limits at the proxy, especially for the media routes. The API itself
-  only caps total connections (`MAX_CONNECTIONS`: at the cap a new connection replaces the longest-idle one, or else
-  one whose client has read nothing for 10 s; a client that reads nothing for 60 s is dropped), concurrent transcodes
-  and concurrent searches.
+  only caps total connections (`MAX_CONNECTIONS`: at the cap a new connection replaces the longest-idle one or one
+  whose client has read nothing for 10 s; a client that reads nothing for 60 s is dropped), concurrent transcodes and
+  concurrent searches.
 - Caching: HTML is `public, max-age=60, s-maxage=300, stale-while-revalidate=600` (errors, redirects and pages that
   rendered without their data are `no-store`), hashed assets under `/_astro/` are immutable, API JSON uses the same
   short TTLs plus weak ETags, media files and `/songs/:id/duration` are `public, no-cache` with validators, and
