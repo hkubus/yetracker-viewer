@@ -7,13 +7,14 @@ import {
   ApiServerError,
   ApiUnreachableError,
   ERA_PAGE_SIZE,
-  fetchJson,
   noStore,
   OUTAGE_RETRY_AFTER_SECONDS,
   publicApiBaseUrl,
 } from '../config';
 import Layout from '../layouts/Layout.astro';
+import type { Cached } from '../utils/cache';
 import { formatCatalogDate, formatRelativeTime } from '../utils/dates';
+import { loadEras, loadRecentLeaks, loadStatus, RECENT_LEAKS_LIMIT } from '../utils/shared-api';
 import type { EraDisplayInfo, SearchSongPayload } from '../utils/songDisplay';
 import { countLabel } from '../utils/songRow';
 
@@ -37,8 +38,6 @@ interface HomeStatus {
   playableSongs: number | null;
 }
 
-const RECENT_LEAKS_LIMIT = 8;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -50,10 +49,19 @@ function failureOf(error: unknown): { failure: Failure; status?: number; retryAf
   return { failure: 'server' };
 }
 
-/** One API request: parsed data, or why it failed (logged). Never throws, so one failure can't take the page down. */
-async function load<T>(path: string, parse: (body: unknown) => T | null): Promise<Loaded<T>> {
+/**
+ * One API response (cached for every page view, see `utils/shared-api.ts`): parsed data, or why it failed (logged).
+ * Never throws, so one failure can't take the page down. An older copy served because the API failed keeps the page
+ * out of shared caches.
+ */
+async function load<T>(
+  path: string,
+  fetchShared: () => Promise<Cached<unknown>>,
+  parse: (body: unknown) => T | null,
+): Promise<Loaded<T>> {
   try {
-    const { data } = await fetchJson<unknown>(path);
+    const { data, stale } = await fetchShared();
+    if (stale) noStore(Astro.response);
     const parsed = parse(data);
     if (parsed !== null) return { ok: true, data: parsed };
     console.error(`[home] ${path} returned an unexpected shape`);
@@ -106,9 +114,9 @@ function parseStatus(body: unknown): HomeStatus | null {
 }
 
 const [erasResult, recentResult, statusResult] = await Promise.all([
-  load('/eras', parseEras),
-  load(`/songs?playable=true&sort=leak-newest&limit=${RECENT_LEAKS_LIMIT}`, parseSongs),
-  load('/status', parseStatus),
+  load('/eras', loadEras, parseEras),
+  load(`/songs?playable=true&sort=leak-newest&limit=${RECENT_LEAKS_LIMIT}`, loadRecentLeaks, parseSongs),
+  load('/status', loadStatus, parseStatus),
 ]);
 
 // A page rendered without some of its data must not be cached. A missing `/status` (older API) is not a failure.

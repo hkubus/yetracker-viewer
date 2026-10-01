@@ -140,6 +140,11 @@ public struct SearchSong: Codable, Hashable, Identifiable, Sendable {
   public let eraPosition: Int?
   public let leakDate: Int?
   public let playable: Bool?
+  /// Catalog length in seconds.
+  public let trackLength: Double?
+  /// Probed length of the stored file, in seconds.
+  public let duration: Double?
+  public let eraCoverVersion: String?
 
   public init(
     id: Int,
@@ -152,7 +157,10 @@ public struct SearchSong: Codable, Hashable, Identifiable, Sendable {
     dominantColor: String? = nil,
     eraPosition: Int? = nil,
     leakDate: Int? = nil,
-    playable: Bool? = nil
+    playable: Bool? = nil,
+    trackLength: Double? = nil,
+    duration: Double? = nil,
+    eraCoverVersion: String? = nil
   ) {
     self.id = id
     self.eraId = eraId
@@ -165,10 +173,14 @@ public struct SearchSong: Codable, Hashable, Identifiable, Sendable {
     self.eraPosition = eraPosition
     self.leakDate = leakDate
     self.playable = playable
+    self.trackLength = trackLength
+    self.duration = duration
+    self.eraCoverVersion = eraCoverVersion
   }
 
   enum CodingKeys: String, CodingKey {
     case id, eraId, name, notes, quality, availableLength, eraName, dominantColor, eraPosition, leakDate, playable
+    case trackLength, duration, eraCoverVersion
   }
 
   public init(from decoder: Decoder) throws {
@@ -187,10 +199,21 @@ public struct SearchSong: Codable, Hashable, Identifiable, Sendable {
     eraPosition = container.lenientInt(.eraPosition)
     leakDate = container.lenientInt(.leakDate)
     playable = container.lenientBool(.playable)
+    trackLength = container.lenientDouble(.trackLength)
+    duration = container.lenientDouble(.duration)
+    eraCoverVersion = container.lenientString(.eraCoverVersion)
   }
 }
 
 extension SearchSong {
+  /// Probed duration first, then the catalog length (as `EraSong.bestDuration`).
+  public var bestDuration: Double? {
+    for candidate in [duration, trackLength] {
+      if let value = candidate, value.isFinite, value > 0 { return value }
+    }
+    return nil
+  }
+
   /// Web `GlobalSongSearch`'s description limit.
   public static let notesPreviewLimit = 120
 

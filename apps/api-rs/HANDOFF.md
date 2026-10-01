@@ -21,7 +21,7 @@
 | `src/routes/media.rs` | `/songs/:id/stream`, `/download`, `/duration`, `/eras/:id/cover`; transcode jobs and cache. A missing stored file is marked unplayable at once and queued for re-verification. |
 | `src/request.rs` | `Query` (form decoding; last occurrence wins, values trimmed, blank = absent — for every route) and parameter validation. |
 | `src/error.rs` | `ApiError`: text/plain + `no-store`; busy (`Retry-After`); unexpected → logged 500 JSON with an `ErrorDetail` extension. |
-| `src/rank.rs` | Relevance ranking; `CatalogIndex`/`RankCache` (folded catalog, rebuilt per catalog fingerprint). |
+| `src/rank.rs` | Relevance ranking; `CatalogIndex`/`RankCache` (the catalog's texts, rebuilt per catalog fingerprint, warmed at boot and after each import): global search matches its tokens in memory, then ranks (title matches first, the other tiers only when needed). |
 | `src/search_text.rs` | `fold()` (TS twin: `apps/web/src/utils/search.ts`), `search_text` / `song_search_text` builders, `sort_title`, `category_rank`, `SONG_CATEGORIES`. |
 | `src/playable.rs` | Playable-file set (rebuilt every sync), size/mtime cache, 15 s negative cache, `mark_missing`, safe file names. |
 | `src/serve.rs` | Validators (ETag, `If-None-Match`, `If-Modified-Since` — future dates ignored, `If-Range`), single byte ranges (ignored by `HEAD`), file and growing-file bodies (256 KiB chunks). |
@@ -76,7 +76,8 @@ database before its first v2 import.
   change detection, and the version of the ranking index); `last_cover_refresh_at` (last daily cover refresh);
   `cleanup_kept_downloaded` (unseen rows the last cleanup kept for their media; an increase is logged as an error).
 - **Indexes**: `songs (catalog_id, position)`, `songs (catalog_id, era, position)`, `songs (catalog_id, era, id)`,
-  `songs (catalog_id, id)`, `songs_search_scan (catalog_id, search_text, url)` (covers the global search scan),
+  `songs (catalog_id, id)`, `songs (url, catalog_id)` (joins downloaded `files` rows to their songs; global search
+  matches in memory, see `rank.rs`),
   `eras (is_main)`, unique `eras (key)`. v1's single-column song indexes are dropped.
 - **v1 → v2 backfill** (one transaction, only while `schema_version < 2`): merges duplicate eras; sets era keys,
   positions and `cover_version` (from `covers/<id>.avif`); songs get `position = id`, per-era `era_position`, `title`,

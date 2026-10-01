@@ -72,7 +72,8 @@ export default defineConfig({
   image: {
     service: passthroughImageService(),
   },
-  // <ClientRouter /> would otherwise prefetch every link on hover. Links opt in with `data-astro-prefetch`.
+  // <ClientRouter /> would otherwise prefetch every link on hover. Links opt in with `data-astro-prefetch` (era cards,
+  // previous/next page): the page is fetched on hover or focus, so the click doesn't wait for it.
   prefetch: {
     prefetchAll: false,
   },
@@ -84,6 +85,7 @@ export default defineConfig({
   // Rendered by <Font cssVariable="--font-body" /> in the layout, with a metric-adjusted local fallback derived from
   // the font files. Only the weights the styles use (400, 600, 700). `optional`: a face that isn't there for the first
   // render is not swapped in for that page, so a late font never shifts the layout (cached faces render from the start).
+  // The layout preloads the faces, so a first visit gets them in time too.
   fonts: [
     {
       provider: fontProviders.local(),

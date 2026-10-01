@@ -7,7 +7,8 @@ public enum Formatters {
   public static func duration(_ seconds: Double?) -> String {
     guard let seconds, seconds.isFinite, seconds >= 0 else { return "—" }
     let total = Int(seconds.rounded(.down))
-    return "\(total / 60):\(String(format: "%02d", total % 60))"
+    let secondsPart = total % 60
+    return "\(total / 60):\(secondsPart < 10 ? "0" : "")\(secondsPart)"
   }
 
   /// "Snippet - 1:05": availability and a positive duration, either optional.
@@ -51,11 +52,12 @@ public enum Formatters {
 
   private static let utc = TimeZone(identifier: "UTC") ?? TimeZone(secondsFromGMT: 0)!
 
-  private static var utcCalendar: Calendar {
+  /// Built once: rows format their dates on every render.
+  private static let utcCalendar: Calendar = {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = utc
     return calendar
-  }
+  }()
 }
 
 /// Search-text helpers shared with the API's normalisation rules.
@@ -93,9 +95,32 @@ public enum TextNormalization {
   /// "⭐️" (with a variation selector) and "love" not in "love\u{301}"; the API
   /// matches both, and the instant filters must agree with it.
   public static func contains(_ haystack: some StringProtocol, _ needle: some StringProtocol) -> Bool {
-    let needleBytes = Array(needle.utf8)
-    guard !needleBytes.isEmpty else { return true }
-    return Array(haystack.utf8).firstRange(of: needleBytes) != nil
+    containsBytes(Array(haystack.utf8), Array(needle.utf8))
+  }
+
+  /// `contains` on UTF-8 bytes. A plain scan: the generic `firstRange(of:)` is
+  /// many times slower, and the era filter runs it over every loaded row on
+  /// each keystroke.
+  public static func containsBytes(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
+    let length = needle.count
+    guard length > 0 else { return true }
+    guard haystack.count >= length else { return false }
+    return haystack.withUnsafeBufferPointer { hay in
+      needle.withUnsafeBufferPointer { pin in
+        let first = pin[0]
+        let lastStart = hay.count - length
+        var start = 0
+        while start <= lastStart {
+          if hay[start] == first {
+            var matched = 1
+            while matched < length, hay[start + matched] == pin[matched] { matched += 1 }
+            if matched == length { return true }
+          }
+          start += 1
+        }
+        return false
+      }
+    }
   }
 
   /// Plural helper: "1 song", "2 songs".

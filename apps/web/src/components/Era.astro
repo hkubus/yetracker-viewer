@@ -27,7 +27,7 @@ const { era, apiBaseUrl, priority = false } = Astro.props;
 const songsCount = typeof era.songsCount === 'number' && era.songsCount >= 0 ? era.songsCount : null;
 ---
 
-<a class="era-card" href={`/eras/${era.id}`} style={themeStyle(era.dominantColor, '--era')}>
+<a class="era-card" href={`/eras/${era.id}`} style={themeStyle(era.dominantColor, '--era')} data-astro-prefetch>
   <CoverImage
     class="era-card__cover"
     eraId={era.id}

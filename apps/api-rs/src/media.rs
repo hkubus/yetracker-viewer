@@ -300,6 +300,22 @@ pub enum RunError {
     TimedOut,
 }
 
+/// Niceness of the media tools the server runs on its own behalf (transcodes,
+/// cover encodes, yt-dlp): they are CPU-heavy and yield to request handling.
+const TOOL_NICENESS: libc::c_int = 10;
+
+/// Starts `command`'s process at a lower CPU priority ([`TOOL_NICENESS`]).
+pub fn lower_priority(command: &mut Command) {
+    // SAFETY: the hook runs in the forked child before exec and only calls
+    // setpriority, which is async-signal-safe, on that child.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setpriority(libc::PRIO_PROCESS, 0, TOOL_NICENESS);
+            Ok(())
+        });
+    }
+}
+
 /// Kills a process group (SIGKILL) when dropped or asked to.
 struct GroupKiller {
     pgid: Option<libc::pid_t>,

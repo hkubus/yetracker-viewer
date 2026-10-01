@@ -83,7 +83,12 @@ const steps = {
         </li>
         <li class="pagination__item" aria-hidden={steps.previous.enabled ? undefined : 'true'}>
           {steps.previous.enabled ? (
-            <a class="pagination__link pagination__link--step" href={pageHref(steps.previous.page)} rel="prev">
+            <a
+              class="pagination__link pagination__link--step"
+              href={pageHref(steps.previous.page)}
+              rel="prev"
+              data-astro-prefetch
+            >
               <span aria-hidden="true">{steps.previous.glyph}</span>
               <span class="pagination__step-text">{steps.previous.text}</span>
             </a>
@@ -118,7 +123,12 @@ const steps = {
         </li>
         <li class="pagination__item" aria-hidden={steps.next.enabled ? undefined : 'true'}>
           {steps.next.enabled ? (
-            <a class="pagination__link pagination__link--step" href={pageHref(steps.next.page)} rel="next">
+            <a
+              class="pagination__link pagination__link--step"
+              href={pageHref(steps.next.page)}
+              rel="next"
+              data-astro-prefetch
+            >
               <span class="pagination__step-text">{steps.next.text}</span>
               <span aria-hidden="true">{steps.next.glyph}</span>
             </a>

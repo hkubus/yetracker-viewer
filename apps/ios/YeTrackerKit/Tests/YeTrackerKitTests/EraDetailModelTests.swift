@@ -240,6 +240,31 @@ struct EraDetailModelTests {
     #expect(model.paging == .complete)
   }
 
+  @Test func deepLinksBeyondOneChunkLoadOnlyThePagesTheyNeed() async {
+    let model = makeModel(
+      EraRoute(eraID: 2, focus: SongFocus(songID: 597, position: 597)), server: FakeEraServer(count: 956))
+    await model.load()
+    #expect(songRequests() == [["limit": "500", "offset": "0"], ["limit": "100", "offset": "500"]])
+    #expect(model.highlightedSongID == 597)
+    #expect(model.songs.count == 600)
+  }
+
+  @Test func theInstantFilterFollowsNewRowsAndQueries() async {
+    // The route's query is applied already, so typing it again doesn't query.
+    let model = makeModel(EraRoute(eraID: 2, query: "song 1"))
+    await model.load()
+    let firstPage = [1] + Array(10...19) + Array(100...188)
+    #expect(model.visibleSongs.map(\.id) == firstPage)
+    #expect(model.visibleSongs.map(\.id) == firstPage)
+    model.loadNextPage()
+    await model.pageTask?.value
+    #expect(model.visibleSongs.map(\.id) == firstPage + Array(189...199))
+    model.searchText = "song 19"
+    #expect(model.visibleSongs.map(\.id) == [19] + Array(190...199))
+    model.searchText = "SONG  1"
+    #expect(model.visibleSongs.count == 111)
+  }
+
   @Test func pageOnlyLinksRevealThePagesFirstRow() async {
     let model = makeModel(EraRoute(eraID: 2, focus: SongFocus(page: 2, songID: nil)))
     await model.load()

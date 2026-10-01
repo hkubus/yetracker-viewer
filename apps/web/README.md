@@ -14,7 +14,7 @@ Run in this directory (`pnpm <script>`) or from the repo root (`pnpm --filter we
 | `dev` | Astro dev server with HMR on `WEB_HOST:WEB_PORT` (default `127.0.0.1:4321`). Loads the repo-root `.env`. |
 | `build` | Production build into `dist/`. |
 | `start` | `node server.mjs`: the production server over `dist/` (run `build` first). Loads the repo-root `.env`. |
-| `preview` | `astro preview` — the adapter's own server, without `server.mjs`'s compression and caching. |
+| `preview` | `astro preview` — the adapter's own server, without `server.mjs`'s compression and caching (it keeps public pages in memory for 10 s and compressed hashed assets for good). |
 | `typecheck` | `astro check` (strict). |
 | `test` | Unit tests: `node --test 'src/**/*.test.ts'`. |
 | `lint` | `biome check .` |
@@ -93,7 +93,7 @@ dropped, whitespace collapsed, the 100-character limit), `dates.ts` (catalog dat
 UTC; relative times), `duration.ts`, `color.ts` (`themeFor`: contrast-safe colors from an era's dominant color for any
 input), `cover.ts` (cover URLs, initials), `songRow.ts` and `songDisplay.ts` (turning API songs into rows, links,
 play-button attributes), `globalSearchState.ts` (home search URL/API parameters, search terms incl. category markers),
-`era-page.ts` (era page URLs, page math), `era-list.ts` (server-only cached `/eras`), `api-base-url.ts` (client-side API
+`era-page.ts` (era page URLs, page math), `shared-api.ts` + `cache.ts` (server-only cached `/eras`, `/status` and recent leaks), `api-base-url.ts` (client-side API
 URL from the meta tag), `back-navigation.ts` (back links that act like the browser's Back button). `env.test.ts` tests
 `../../env.mjs`.
 

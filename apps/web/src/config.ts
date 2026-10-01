@@ -3,6 +3,7 @@
  * scripts must not import it (they read the API URL from the page, see `utils/api-base-url.ts`).
  */
 import { readRuntimeEnv } from '../env.mjs';
+import { isLocalNetworkHost } from './utils/local-network';
 
 export const ERA_PAGE_SIZE = 100;
 
@@ -201,6 +202,8 @@ async function toApiError(response: Response, path: string): Promise<ApiError> {
 const STATIC_HEADERS = {
   Accept: 'application/json',
   'User-Agent': 'yetracker-viewer/1.0',
+  // Compression only costs CPU on both ends when the API is this close; a remote API still compresses.
+  ...(isLocalNetworkHost(new URL(internalApiBaseUrl).hostname) ? { 'Accept-Encoding': 'identity' } : {}),
 } as const;
 
 /**

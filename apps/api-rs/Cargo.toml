@@ -9,6 +9,9 @@ axum = "0.8.9"
 bytes = "1.12.1"
 chrono = { version = "0.4.42", default-features = false, features = ["std"] }
 dotenvy = "0.15.7"
+# Prefer the zlib-rs backend for every flate2 user (tower-http gzip, reqwest):
+# about twice as fast as the default miniz_oxide, same output size.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 futures-util = "0.3.34"
 hex = "0.4.3"
 http-body = "1"
@@ -17,6 +20,7 @@ hyper = { version = "1.11.1", features = ["server", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "server", "service", "http1"] }
 libc = "0.2"
 lru = "0.18.4"
+memchr = "2.8.3"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.35.0"
 regex = "1.12.2"

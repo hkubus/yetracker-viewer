@@ -43,8 +43,8 @@ public struct Track: Hashable, Identifiable, Sendable {
       durationHint: song.bestDuration)
   }
 
-  /// A search result or recent leak. Search results carry no cover version, so
-  /// callers pass the era's when they know it.
+  /// A search result or recent leak. Its era's cover version comes with it
+  /// from current APIs; `coverVersion` (the era list's) covers older ones.
   public init(song: SearchSong, coverVersion: String?) {
     self.init(
       id: song.id,
@@ -52,8 +52,8 @@ public struct Track: Hashable, Identifiable, Sendable {
       eraID: song.eraId,
       eraName: song.eraName.nonBlank,
       colorHex: song.dominantColor,
-      coverVersion: coverVersion,
-      durationHint: nil)
+      coverVersion: song.eraCoverVersion.nonBlank ?? coverVersion,
+      durationHint: song.bestDuration)
   }
 
   public var color: RGBColor { RGBColor(hex: colorHex) ?? .fallbackAccent }

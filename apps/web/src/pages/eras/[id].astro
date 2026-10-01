@@ -26,7 +26,6 @@ import { normalizeSongCategory, SONG_CATEGORIES } from '../../songCategories';
 import { DEFAULT_SONG_SORT, normalizeSongSort } from '../../songSorts';
 import { colorValue, themeStyle } from '../../utils/color';
 import { coverUrl } from '../../utils/cover';
-import { type EraSummary, loadEraSummaries } from '../../utils/era-list';
 import {
   type EraListParams,
   eraPageHref,
@@ -40,6 +39,7 @@ import {
   summarize,
 } from '../../utils/era-page';
 import { clampQuery } from '../../utils/search';
+import { type EraSummary, loadEraSummaries } from '../../utils/shared-api';
 
 interface Failure {
   status: 400 | 404 | 503;

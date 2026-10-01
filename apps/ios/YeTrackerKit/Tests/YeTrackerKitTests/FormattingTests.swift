@@ -11,6 +11,8 @@ struct FormattingTests {
     #expect(Formatters.duration(0) == "0:00")
     #expect(Formatters.duration(65.9) == "1:05")
     #expect(Formatters.duration(3600) == "60:00")
+    #expect(Formatters.duration(609) == "10:09")
+    #expect(Formatters.duration(59.99) == "0:59")
     #expect(Formatters.duration(nil) == "—")
     #expect(Formatters.duration(-1) == "—")
     #expect(Formatters.duration(.infinity) == "—")
@@ -54,6 +56,13 @@ struct FormattingTests {
     #expect(!("⭐\u{FE0F} love".contains("⭐")), "documents why the helper exists")
     #expect(TextNormalization.contains("anything", ""))
     #expect(!TextNormalization.contains("abc", "abd"))
+    // Partial first-byte matches, the needle at either end, a needle longer than the text.
+    #expect(TextNormalization.contains("aab", "ab"))
+    #expect(TextNormalization.contains("abcabd", "abd"))
+    #expect(TextNormalization.contains("love", "lo"))
+    #expect(TextNormalization.contains("love", "ve"))
+    #expect(!TextNormalization.contains("lo", "love"))
+    #expect(!TextNormalization.contains("", "a"))
   }
 
   @Test func truncation() {

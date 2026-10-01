@@ -21,11 +21,13 @@
 //! 7. catalog position, which makes the order total and stable.
 //!
 //! The folded texts of the whole catalog are kept in a [`CatalogIndex`],
-//! built once per catalog version, so a search only fetches the ids of its
-//! matches from SQLite.
+//! built once per catalog version, so a search matches its tokens in memory
+//! and only reads the file state of its matches from SQLite.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use memchr::memmem;
 
 use crate::search_text::fold;
 use crate::text;
@@ -195,6 +197,8 @@ impl EraProfile {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SongTexts<'a> {
     pub name: &'a str,
+    /// `songs.title`: what the category filters look for markers in.
+    pub title: &'a str,
     /// `songs.search_text`: the folded name, notes, era name, era subtitle,
     /// sub-era, quality and available length, each non-empty part joined by
     /// a space.
@@ -207,9 +211,16 @@ pub struct SongTexts<'a> {
     pub position: i64,
 }
 
-/// One song of a [`CatalogIndex`], every text folded.
+/// One song of a [`CatalogIndex`]: its folded texts for ranking, plus the
+/// stored values the search filters compare.
 #[derive(Debug, Clone)]
 struct IndexedSong {
+    id: i64,
+    /// `songs.search_text`, as stored: what the query's tokens must occur in.
+    search_text: Box<str>,
+    title: Box<str>,
+    raw_quality: Option<Arc<str>>,
+    raw_available_length: Option<Arc<str>>,
     name: NameProfile,
     notes: String,
     era: Option<i64>,
@@ -220,15 +231,30 @@ struct IndexedSong {
     position: i64,
 }
 
-/// The folded texts of the catalog, for ranking search matches. Tagged with
+/// A song of a [`CatalogIndex`] as the search filters see it: stored values,
+/// not folded.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexedFields<'a> {
+    pub id: i64,
+    pub era: Option<i64>,
+    pub title: &'a str,
+    pub quality: Option<&'a str>,
+    pub available_length: Option<&'a str>,
+}
+
+/// The texts of the catalog, for matching and ranking searches. Tagged with
 /// the catalog version it was built from (`meta.last_sheet_sha256`).
 #[derive(Debug, Default)]
 pub struct CatalogIndex {
     version: Option<String>,
     eras: HashMap<i64, EraProfile>,
-    songs: HashMap<i64, IndexedSong>,
+    /// In the order they were added (catalog order).
+    songs: Vec<IndexedSong>,
+    by_id: HashMap<i64, usize>,
     /// Folded short values (sub-eras, qualities, lengths) shared by songs.
     folded: HashMap<String, Arc<str>>,
+    /// Stored short values (qualities, lengths) shared by songs.
+    raw: HashMap<String, Arc<str>>,
 }
 
 impl CatalogIndex {
@@ -258,7 +284,25 @@ impl CatalogIndex {
         folded
     }
 
+    fn share_raw(&mut self, value: Option<&str>) -> Option<Arc<str>> {
+        let value = value?;
+        if let Some(shared) = self.raw.get(value) {
+            return Some(shared.clone());
+        }
+        let shared: Arc<str> = value.into();
+        self.raw.insert(value.to_string(), shared.clone());
+        Some(shared)
+    }
+
+    fn song(&self, id: i64) -> Option<&IndexedSong> {
+        self.by_id.get(&id).map(|&index| &self.songs[index])
+    }
+
+    /// Adds a song (replacing one with the same id); add songs in catalog
+    /// order.
     pub fn add_song(&mut self, id: i64, song: &SongTexts<'_>) {
+        let raw_quality = self.share_raw(song.quality);
+        let raw_available_length = self.share_raw(song.available_length);
         let name = NameProfile::new(song.name);
         let sub_era = self.fold_shared(song.sub_era);
         let quality = self.fold_shared(song.quality);
@@ -279,44 +323,87 @@ impl CatalogIndex {
             ],
         )
         .to_string();
-        self.songs.insert(
+        let indexed = IndexedSong {
             id,
-            IndexedSong {
-                name,
-                notes,
+            search_text: song.search_text.into(),
+            title: song.title.into(),
+            raw_quality,
+            raw_available_length,
+            name,
+            notes,
+            era: song.era,
+            sub_era,
+            quality,
+            available_length,
+            category_rank: song.category_rank,
+            position: song.position,
+        };
+        match self.by_id.get(&id) {
+            Some(&index) => self.songs[index] = indexed,
+            None => {
+                self.by_id.insert(id, self.songs.len());
+                self.songs.push(indexed);
+            }
+        }
+    }
+
+    /// The songs whose `search_text` contains every one of `tokens` (the
+    /// substring semantics of SQLite's `instr`, which on UTF-8 text is a byte
+    /// substring match), in catalog order.
+    pub fn text_matches<'a>(
+        &'a self,
+        tokens: &[String],
+    ) -> impl Iterator<Item = IndexedFields<'a>> + 'a {
+        let mut finders: Vec<memmem::Finder<'static>> = tokens
+            .iter()
+            .map(|token| memmem::Finder::new(token.as_bytes()).into_owned())
+            .collect();
+        // The longest token is usually the rarest: try it first.
+        finders.sort_by_key(|finder| std::cmp::Reverse(finder.needle().len()));
+        self.songs
+            .iter()
+            .filter(move |song| {
+                let text = song.search_text.as_bytes();
+                finders.iter().all(|finder| finder.find(text).is_some())
+            })
+            .map(|song| IndexedFields {
+                id: song.id,
                 era: song.era,
-                sub_era,
-                quality,
-                available_length,
-                category_rank: song.category_rank,
-                position: song.position,
-            },
-        );
+                title: &song.title,
+                quality: song.raw_quality.as_deref(),
+                available_length: song.raw_available_length.as_deref(),
+            })
     }
 
     /// Orders search matches, given as `(song id, playable)`, best first and
     /// returns the indexes of the first `keep` of them. Songs missing from the
     /// index (added by an import after it was built) rank last.
     pub fn rank(&self, query: &SearchQuery, matches: &[(i64, bool)], keep: usize) -> Vec<usize> {
-        let mut keys: Vec<(RankKey, usize)> = matches
-            .iter()
-            .enumerate()
-            .map(|(index, &(id, playable))| {
-                let key = match self.songs.get(&id) {
-                    Some(song) => rank_key(
-                        query,
-                        &Candidate {
-                            name: &song.name,
-                            notes: &song.notes,
-                            era: song.era.and_then(|era| self.eras.get(&era)),
-                            sub_era: &song.sub_era,
-                            quality: &song.quality,
-                            available_length: &song.available_length,
-                            category_rank: song.category_rank,
-                            playable,
-                            position: song.position,
-                        },
-                    ),
+        if keep == 0 {
+            return Vec::new();
+        }
+        // Title matches outrank every other tier, so when there are enough of
+        // them the rest never needs a key.
+        let phrase = query.phrase.as_str();
+        let mut keys: Vec<(RankKey, usize)> = Vec::new();
+        let mut rest: Vec<usize> = Vec::new();
+        for (index, &(id, playable)) in matches.iter().enumerate() {
+            match self
+                .song(id)
+                .map(|song| (song, title_match(&song.name, phrase)))
+            {
+                Some((song, Some(found))) => {
+                    let candidate = self.candidate(song, playable);
+                    keys.push((phrase_key(&candidate, Tier::Title, found), index));
+                }
+                _ => rest.push(index),
+            }
+        }
+        if keys.len() < keep {
+            keys.extend(rest.into_iter().map(|index| {
+                let (id, playable) = matches[index];
+                let key = match self.song(id) {
+                    Some(song) => rank_key_after_title(query, &self.candidate(song, playable)),
                     None => RankKey {
                         tier: Tier::Unknown,
                         kind: 0,
@@ -328,17 +415,28 @@ impl CatalogIndex {
                     },
                 };
                 (key, index)
-            })
-            .collect();
+            }));
+        }
         if keep < keys.len() {
-            if keep == 0 {
-                return Vec::new();
-            }
             keys.select_nth_unstable(keep - 1);
             keys.truncate(keep);
         }
         keys.sort_unstable();
         keys.into_iter().map(|(_, index)| index).collect()
+    }
+
+    fn candidate<'a>(&'a self, song: &'a IndexedSong, playable: bool) -> Candidate<'a> {
+        Candidate {
+            name: &song.name,
+            notes: &song.notes,
+            era: song.era.and_then(|era| self.eras.get(&era)),
+            sub_era: &song.sub_era,
+            quality: &song.quality,
+            available_length: &song.available_length,
+            category_rank: song.category_rank,
+            playable,
+            position: song.position,
+        }
     }
 }
 
@@ -383,8 +481,13 @@ struct Candidate<'a> {
     position: i64,
 }
 
-fn rank_key(query: &SearchQuery, candidate: &Candidate<'_>) -> RankKey {
-    let key = |tier: Tier, (kind, offset, slack): (Kind, u32, u32)| RankKey {
+/// The key of a phrase match in a field of `tier`.
+fn phrase_key(
+    candidate: &Candidate<'_>,
+    tier: Tier,
+    (kind, offset, slack): (Kind, u32, u32),
+) -> RankKey {
+    RankKey {
         tier,
         kind: kind as u8,
         offset,
@@ -392,13 +495,23 @@ fn rank_key(query: &SearchQuery, candidate: &Candidate<'_>) -> RankKey {
         slack,
         unplayable: !candidate.playable,
         position: candidate.position,
-    };
+    }
+}
+
+#[cfg(test)]
+fn rank_key(query: &SearchQuery, candidate: &Candidate<'_>) -> RankKey {
+    match title_match(candidate.name, &query.phrase) {
+        Some(found) => phrase_key(candidate, Tier::Title, found),
+        None => rank_key_after_title(query, candidate),
+    }
+}
+
+/// The key of a song whose title doesn't contain the phrase.
+fn rank_key_after_title(query: &SearchQuery, candidate: &Candidate<'_>) -> RankKey {
+    let key = |tier: Tier, found: (Kind, u32, u32)| phrase_key(candidate, tier, found);
     let phrase = query.phrase.as_str();
     let name = candidate.name;
 
-    if let Some(found) = title_match(name, phrase) {
-        return key(Tier::Title, found);
-    }
     for (tier, field) in [
         (Tier::NameRest, name.rest.as_str()),
         (Tier::TitleLine, name.title_line.as_str()),
@@ -695,6 +808,7 @@ mod tests {
                 song.id,
                 &SongTexts {
                     name: &song.name,
+                    title: song.name.split('\n').next().unwrap_or_default(),
                     search_text: &search_text,
                     era: Some(song.era as i64),
                     sub_era: song.sub_era.as_deref(),
@@ -1007,6 +1121,73 @@ mod tests {
         assert_eq!(index.rank(&query, &matches, 4), [3, 2, 0, 1]);
         assert_eq!(index.rank(&query, &matches, 2), [3, 2]);
         assert!(index.rank(&query, &matches, 0).is_empty());
+    }
+
+    #[test]
+    fn two_phase_ranking_matches_keying_every_song() {
+        let songs = [
+            song(1, "Love Lockdown"),
+            song(2, "Love [V2]").playable(),
+            song(3, "Lovely").era(1),
+            song(4, "Heartless\n(Love Version)"),
+            song(5, "Welcome To Heartbreak").notes("love it"),
+            song(6, "Bad News").sub_era("Love Sessions"),
+            song(7, "Say You Will").quality("Love Quality"),
+            song(8, "Robocop").era(3),
+            song(9, "⭐ Love Me [V4]").era(2),
+            song(10, "Coldest Winter").notes("lo ve"),
+        ];
+        let index = index_of(&songs);
+        for query in ["love", "lo", "o", "e", "pablo", "love me", "ve", "donda"] {
+            let query = SearchQuery::new(query).unwrap();
+            let matches: Vec<(i64, bool)> = index
+                .text_matches(query.tokens())
+                .map(|song| (song.id, songs[song.id as usize - 1].playable))
+                .collect();
+            let mut every: Vec<(RankKey, usize)> = matches
+                .iter()
+                .enumerate()
+                .map(|(at, &(id, playable))| {
+                    let song = index.song(id).unwrap();
+                    (rank_key(&query, &index.candidate(song, playable)), at)
+                })
+                .collect();
+            every.sort_unstable();
+            for keep in 0..=matches.len() + 1 {
+                let expected: Vec<usize> = every.iter().take(keep).map(|(_, at)| *at).collect();
+                assert_eq!(
+                    index.rank(&query, &matches, keep),
+                    expected,
+                    "{query:?} keep {keep}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_matches_need_every_token_in_the_search_text() {
+        let songs = [
+            song(1, "Love Lockdown"),
+            song(2, "Lovely").era(1),
+            song(3, "Robocop"),
+        ];
+        let index = index_of(&songs);
+        let ids = |query: &str| -> Vec<i64> {
+            let query = SearchQuery::new(query).unwrap();
+            index
+                .text_matches(query.tokens())
+                .map(|song| song.id)
+                .collect()
+        };
+        assert_eq!(ids("lov"), [1, 2]);
+        assert_eq!(ids("love jesus"), [2]);
+        assert_eq!(ids("lockdown love"), [1]);
+        assert!(ids("zzz").is_empty());
+        let fields = index.text_matches(&["robocop".to_string()]).next().unwrap();
+        assert_eq!(
+            (fields.id, fields.era, fields.title),
+            (3, Some(0), "Robocop")
+        );
     }
 
     #[test]

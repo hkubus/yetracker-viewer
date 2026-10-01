@@ -41,10 +41,12 @@ use crate::cover_version::cover_version_of;
 use crate::db;
 use crate::downloader::{covers_dir, primary_cover};
 use crate::error::ApiError;
-use crate::media::{Tool, Uncertain, Verdict, file_input, stderr_tail, unique_suffix};
+use crate::media::{
+    Tool, Uncertain, Verdict, file_input, lower_priority, stderr_tail, unique_suffix,
+};
 use crate::playable::stored_song_path;
 use crate::request::Query;
-use crate::serve::{self, FileHeaders, Growth, set_header};
+use crate::serve::{self, ByteRange, FileHeaders, Growth, set_header};
 use crate::state::{AppState, SharedState};
 
 /// Stored files and cached transcodes: cacheable, but revalidated (the
@@ -64,8 +66,13 @@ const SLOT_WAIT: Duration = Duration::from_secs(15);
 const FIRST_OUTPUT_WAIT: Duration = Duration::from_secs(30);
 const TRANSCODE_TIME_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long a transcode keeps running once its last reader is gone (a player
-/// that reconnects or seeks within it joins the running job instead).
+/// that reconnects or seeks within it joins the running job instead). A
+/// client polling it with HEAD (the web player warming up a quality) counts
+/// as a reader.
 const ABANDONED_GRACE: Duration = Duration::from_secs(10);
+/// The same for a transcode starting at an offset (`?start=`): nothing else
+/// ever joins it and a seek replaces it with another one, so it goes sooner.
+const SEEK_ABANDONED_GRACE: Duration = Duration::from_secs(3);
 /// Latest `?start=` a transcode may begin at, in milliseconds (a day).
 const MAX_START_MS: u64 = 86_400_000;
 const BUSY_RETRY_SECS: u32 = 5;
@@ -150,6 +157,15 @@ impl TranscodeRequest {
     /// restarts the stream at an offset would otherwise be its own entry.
     fn cacheable(&self) -> bool {
         self.start_ms.is_none()
+    }
+
+    /// How long the job outlives its last reader.
+    fn abandoned_grace(&self) -> Duration {
+        if self.cacheable() {
+            ABANDONED_GRACE
+        } else {
+            SEEK_ABANDONED_GRACE
+        }
     }
 }
 
@@ -631,6 +647,21 @@ struct TranscodeJob {
     /// The job's own receiver: [`watch::Sender::receiver_count`] minus this
     /// one is the number of requests reading (or waiting for) the output.
     progress: watch::Receiver<JobProgress>,
+    /// When a HEAD request last asked about the job.
+    polled_at: Mutex<Option<Instant>>,
+}
+
+impl TranscodeJob {
+    fn note_poll(&self) {
+        *self.polled_at.lock().expect("transcode poll time poisoned") = Some(Instant::now());
+    }
+
+    fn polled_within(&self, period: Duration) -> bool {
+        self.polled_at
+            .lock()
+            .expect("transcode poll time poisoned")
+            .is_some_and(|polled| polled.elapsed() < period)
+    }
 }
 
 impl Drop for TranscodeJob {
@@ -748,6 +779,130 @@ async fn serve_cached_transcode(
     Ok(Some(response))
 }
 
+/// Sample rates of the ADTS `sampling_frequency_index`.
+const ADTS_SAMPLE_RATES: [u64; 13] = [
+    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
+    7_350,
+];
+
+/// Byte offset of the frame holding the sample at `start_ms` in a complete
+/// ADTS stream of `len` bytes, found by walking its frame headers. `None`
+/// when the stream ends before that, or is not plain ADTS from its first
+/// byte (a leading tag, a damaged header, a changing sample rate).
+fn adts_frame_at<R: io::Read + io::Seek>(
+    reader: &mut io::BufReader<R>,
+    len: u64,
+    start_ms: u64,
+) -> io::Result<Option<u64>> {
+    let mut header = [0u8; 7];
+    let mut offset = 0u64;
+    let mut samples = 0u64;
+    // The first frame's sampling-frequency index, and the target sample.
+    let mut rate: Option<(u8, u64)> = None;
+    while offset + header.len() as u64 <= len {
+        io::Read::read_exact(reader, &mut header)?;
+        // Syncword 0xFFF, layer 0.
+        if header[0] != 0xFF || header[1] & 0xF6 != 0xF0 {
+            return Ok(None);
+        }
+        let header_len = if header[1] & 0x01 == 1 { 7 } else { 9 };
+        let index = (header[2] >> 2) & 0x0F;
+        let frame_len = (u64::from(header[3] & 0x03) << 11)
+            | (u64::from(header[4]) << 3)
+            | u64::from(header[5] >> 5);
+        let frame_samples = (u64::from(header[6] & 0x03) + 1) * 1024;
+        if frame_len < header_len || offset + frame_len > len {
+            return Ok(None);
+        }
+        let target = match rate {
+            None => {
+                let Some(hz) = ADTS_SAMPLE_RATES.get(usize::from(index)) else {
+                    return Ok(None);
+                };
+                let target = start_ms * hz / 1000;
+                rate = Some((index, target));
+                target
+            }
+            Some((first, target)) if first == index => target,
+            Some(_) => return Ok(None),
+        };
+        if samples + frame_samples > target {
+            return Ok(Some(offset));
+        }
+        samples += frame_samples;
+        offset += frame_len;
+        reader.seek_relative(frame_len as i64 - header.len() as i64)?;
+    }
+    Ok(None)
+}
+
+/// Answers `?format=aac&start=` from the cached whole-song AAC transcode
+/// when there is one: its bytes from the frame holding the start (see
+/// [`adts_frame_at`]), with the headers of a live transcode, without ffmpeg
+/// or a transcode slot. `None` sends the request down the ffmpeg path.
+async fn serve_cached_seek(
+    dir: &FsPath,
+    source: &StoredFile,
+    wanted: &TranscodeRequest,
+    head_only: bool,
+) -> Result<Option<Response>, ApiError> {
+    let (TranscodeFormat::Aac, Some(start_ms)) = (wanted.format, wanted.start_ms) else {
+        return Ok(None);
+    };
+    let whole = TranscodeRequest {
+        start_ms: None,
+        ..*wanted
+    };
+    let key = transcode_key(&source.filename, source.size, source.mtime_ms(), &whole);
+    let path = dir.join(format!("{key}.{}", whole.format.extension()));
+    let scanned = path.clone();
+    let found =
+        tokio::task::spawn_blocking(move || -> io::Result<Option<(std::fs::File, u64, u64)>> {
+            let file = match std::fs::File::open(&scanned) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Ok(None);
+            }
+            let len = metadata.len();
+            let mut reader = io::BufReader::with_capacity(64 * 1024, &file);
+            let offset = adts_frame_at(&mut reader, len, start_ms)?;
+            drop(reader);
+            Ok(offset.map(|offset| (file, offset, len)))
+        })
+        .await
+        .map_err(ApiError::unexpected)?;
+    let (file, offset, len) = match found {
+        Ok(Some(found)) => found,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            warn!(path = %path.display(), %error, "could not read a cached transcode");
+            return Ok(None);
+        }
+    };
+    touch_access_time(&path);
+    if head_only {
+        return Ok(Some(live_response(
+            AAC_CONTENT_TYPE,
+            unknown_length_empty_body(),
+        )));
+    }
+    let range = ByteRange {
+        start: offset,
+        end: len - 1,
+    };
+    let body = serve::file_body(tokio::fs::File::from_std(file), Some(range))
+        .await
+        .map_err(|error| {
+            error!(path = %path.display(), %error, "could not stream a cached transcode");
+            ApiError::internal("Could not stream song")
+        })?;
+    Ok(Some(live_response(AAC_CONTENT_TYPE, body)))
+}
+
 /// Records a cache hit for the LRU eviction (the access time; the mtime is
 /// part of the ETag and stays untouched).
 fn touch_access_time(path: &FsPath) {
@@ -776,6 +931,9 @@ async fn transcode(
         && let Some(response) =
             serve_cached_transcode(headers, head_only, &cache_path, content_type).await?
     {
+        return Ok(response);
+    }
+    if let Some(response) = serve_cached_seek(&dir, &source, &wanted, head_only).await? {
         return Ok(response);
     }
     if !state.tools.available(Tool::Ffmpeg) {
@@ -837,6 +995,7 @@ async fn transcode(
         cache_path,
         content_type,
         progress: receiver,
+        polled_at: Mutex::new(None),
     });
     if let Some(existing) = state.transcodes.register(&key, &job) {
         drop(output);
@@ -868,6 +1027,7 @@ async fn attach(
     job: Arc<TranscodeJob>,
 ) -> Result<Response, ApiError> {
     if head_only {
+        job.note_poll();
         return Ok(live_response(job.content_type, unknown_length_empty_body()));
     }
     let mut progress = job.progress.clone();
@@ -929,7 +1089,8 @@ struct TranscodeInput {
 
 enum TranscodeError {
     ToolMissing,
-    /// Every reader left and none came back within [`ABANDONED_GRACE`].
+    /// Every reader left and none came back in time (see
+    /// [`TranscodeRequest::abandoned_grace`]).
     Abandoned,
     Failed(String),
 }
@@ -950,7 +1111,7 @@ async fn run_transcode(
         url,
     } = input;
     let kbps = wanted.kbps;
-    let outcome = run_ffmpeg(&source, &wanted, output, &progress).await;
+    let outcome = run_ffmpeg(&source, &wanted, output, &progress, &job).await;
     // The slot belongs to ffmpeg, not to the clients reading its output.
     drop(permit);
     match outcome {
@@ -1050,8 +1211,11 @@ async fn run_ffmpeg(
     wanted: &TranscodeRequest,
     mut output: tokio::fs::File,
     progress: &watch::Sender<JobProgress>,
+    job: &TranscodeJob,
 ) -> Result<u64, TranscodeError> {
+    let grace = wanted.abandoned_grace();
     let mut command = Command::new(Tool::Ffmpeg.binary());
+    lower_priority(&mut command);
     command
         .args(ffmpeg_args(file_input(source).as_ref(), wanted))
         .stdin(Stdio::null())
@@ -1079,9 +1243,9 @@ async fn run_ffmpeg(
                 read = stdout.read(&mut buffer) => read?,
                 _ = check.tick() => {
                     // The job's own receiver does not count as a reader.
-                    if progress.receiver_count() > 1 {
+                    if progress.receiver_count() > 1 || job.polled_within(grace) {
                         unread_since = None;
-                    } else if unread_since.get_or_insert_with(Instant::now).elapsed() >= ABANDONED_GRACE {
+                    } else if unread_since.get_or_insert_with(Instant::now).elapsed() >= grace {
                         return Ok(None);
                     }
                     continue;
@@ -1298,6 +1462,83 @@ pub async fn get_era_cover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One ADTS frame: `len` bytes in all (7-byte header, no CRC), sample-rate
+    /// index `rate`, `blocks` raw data blocks of 1024 samples each.
+    fn adts_frame(len: usize, rate: u8, blocks: u8) -> Vec<u8> {
+        let mut frame = vec![0u8; len];
+        frame[0] = 0xFF;
+        frame[1] = 0xF1;
+        frame[2] = (1 << 6) | (rate << 2);
+        frame[3] = ((len >> 11) & 0x03) as u8;
+        frame[4] = ((len >> 3) & 0xFF) as u8;
+        frame[5] = (((len & 0x07) << 5) as u8) | 0x1F;
+        frame[6] = 0xFC | (blocks - 1);
+        frame
+    }
+
+    fn frame_at(stream: &[u8], start_ms: u64) -> Option<u64> {
+        let mut reader = io::BufReader::with_capacity(16, io::Cursor::new(stream.to_vec()));
+        adts_frame_at(&mut reader, stream.len() as u64, start_ms).unwrap()
+    }
+
+    #[test]
+    fn adts_seeks_land_on_the_frame_holding_the_start() {
+        // 48 kHz (index 3): 1024 samples = 21.33 ms per frame; frames of
+        // alternating sizes, so offsets are not a multiple of one size.
+        let stream: Vec<u8> = (0..100)
+            .flat_map(|frame| adts_frame(if frame % 2 == 0 { 300 } else { 340 }, 3, 1))
+            .collect();
+        assert_eq!(frame_at(&stream, 1), Some(0));
+        assert_eq!(frame_at(&stream, 21), Some(0));
+        // Sample 1024 is the first of frame 1.
+        assert_eq!(frame_at(&stream, 22), Some(300));
+        // 1 s = sample 48000, in frame 46 (46 × 1024 = 47104).
+        assert_eq!(frame_at(&stream, 1000), Some(23 * 300 + 23 * 340));
+        // Past the end: nothing to serve from.
+        assert_eq!(frame_at(&stream, 2200), None);
+
+        // Two raw data blocks per frame: 2048 samples each.
+        let doubled: Vec<u8> = (0..10).flat_map(|_| adts_frame(500, 3, 2)).collect();
+        assert_eq!(frame_at(&doubled, 50), Some(500));
+    }
+
+    #[test]
+    fn adts_seeks_refuse_streams_they_cannot_walk() {
+        let mut tagged = b"ID3".to_vec();
+        tagged.extend((0..10).flat_map(|_| adts_frame(300, 3, 1)));
+        assert_eq!(frame_at(&tagged, 30), None);
+
+        let mut changing: Vec<u8> = (0..5).flat_map(|_| adts_frame(300, 3, 1)).collect();
+        changing.extend(adts_frame(300, 4, 1));
+        assert_eq!(frame_at(&changing, 10), Some(0));
+        assert_eq!(frame_at(&changing, 200), None);
+
+        // A frame running past the end of the file.
+        let mut cut: Vec<u8> = (0..3).flat_map(|_| adts_frame(300, 3, 1)).collect();
+        cut.truncate(800);
+        assert_eq!(frame_at(&cut, 50), None);
+        // A length shorter than the header.
+        let mut short = adts_frame(300, 3, 1);
+        short[3..6].copy_from_slice(&[0, 0, (5 << 5) | 0x1F]);
+        assert_eq!(frame_at(&short, 0), None);
+        assert_eq!(frame_at(&[], 10), None);
+    }
+
+    #[test]
+    fn seek_jobs_are_abandoned_sooner() {
+        let whole = TranscodeRequest {
+            kbps: 128,
+            format: TranscodeFormat::Aac,
+            start_ms: None,
+        };
+        let seek = TranscodeRequest {
+            start_ms: Some(1000),
+            ..whole
+        };
+        assert_eq!(whole.abandoned_grace(), ABANDONED_GRACE);
+        assert_eq!(seek.abandoned_grace(), SEEK_ABANDONED_GRACE);
+    }
 
     #[test]
     fn validates_transcode_quality() {

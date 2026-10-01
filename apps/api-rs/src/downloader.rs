@@ -51,8 +51,8 @@ use crate::dominant_color;
 use crate::error::ApiError;
 use crate::importer;
 use crate::media::{
-    Quarantine, RunError, Tool, ToolSet, Uncertain, Verdict, file_input, quarantine,
-    quarantined_at, run_grouped, stderr_tail, unique_suffix,
+    Quarantine, RunError, Tool, ToolSet, Uncertain, Verdict, file_input, lower_priority,
+    quarantine, quarantined_at, run_grouped, stderr_tail, unique_suffix,
 };
 use crate::playable::is_safe_filename;
 use crate::public_net::{PublicResolver, is_public_url};
@@ -1535,6 +1535,7 @@ async fn download_with_yt_dlp(
         .map_err(|error| DownloadError::io("creating the yt-dlp work directory", error))?;
 
     let mut command = Command::new(Tool::YtDlp.binary());
+    lower_priority(&mut command);
     command
         .args([
             "--no-playlist",
@@ -1913,6 +1914,7 @@ async fn encode_cover(
     let jpeg = Scratch::file(covers.join(format!("{era_id}.{suffix}.jpg.tmp")));
 
     let mut command = Command::new(Tool::Ffmpeg.binary());
+    lower_priority(&mut command);
     command
         .args([
             "-nostdin",

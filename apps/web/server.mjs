@@ -1,7 +1,8 @@
 /**
  * Production entry point (`pnpm start`, after `pnpm build`). It validates the environment, then serves the built app
  * (`dist/`) through its own HTTP server: the @astrojs/node handler does the routing and static files; this file adds
- * gzip/brotli compression, long-lived caching of the hashed `/_astro/*` assets, and a graceful shutdown.
+ * gzip/brotli compression, long-lived caching of the hashed `/_astro/*` assets, an in-memory cache of finished
+ * responses (public pages for a few seconds, compressed assets for good), and a graceful shutdown.
  *
  * The build bundles every dependency (`dist/server` imports only `node:*` modules), so at runtime it needs only
  * `dist/`, this file and `env.mjs`: no `src/`, no `node_modules` (`package.json` just provides `pnpm start`).
@@ -23,6 +24,16 @@ const PUBLIC_FILE_CACHE_CONTROL = 'public, max-age=86400';
 const MIN_COMPRESSIBLE_BYTES = 1024;
 const COMPRESSIBLE_TYPE =
   /^\s*(?:text\/|application\/(?:javascript|ecmascript|json|xml|manifest\+json|[\w.-]+\+(?:json|xml))|image\/(?:svg\+xml|x-icon|vnd\.microsoft\.icon))/i;
+/**
+ * How long a rendered public page is served from memory. Pages allow browsers and shared caches 60 s
+ * (`PAGE_CACHE_CONTROL`), so a few seconds here add no staleness; under load they turn most requests into a copy.
+ */
+const PAGE_CACHE_TTL_MS = 10_000;
+/** Memory budget of the response cache, and the largest body it keeps. */
+const RESPONSE_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const RESPONSE_CACHE_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
+/** Response headers that belong to one connection or one transfer, not to the cached representation. */
+const UNCACHED_HEADERS = new Set(['connection', 'content-length', 'date', 'keep-alive', 'transfer-encoding']);
 
 const log = (message) => console.log(`[web] ${message}`);
 const logWarning = (message) => console.warn(`[web] warning: ${message}`);
@@ -145,17 +156,84 @@ function negotiateEncoding(acceptEncoding) {
   return null;
 }
 
-function createEncoder(encoding, sizeHint) {
+/** `best`: the output is cached for good (hashed assets), so the slowest, smallest setting pays off. */
+function createEncoder(encoding, sizeHint, best) {
   if (encoding === 'br') {
     const params = {
       [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
-      // Quality 5: close to the best ratio for text at a fraction of the CPU cost of the default (11).
-      [zlib.constants.BROTLI_PARAM_QUALITY]: 5,
+      // Quality 5: close to the best ratio for text at a fraction of the CPU cost of the default (11), which only
+      // output compressed once pays for.
+      [zlib.constants.BROTLI_PARAM_QUALITY]: best ? zlib.constants.BROTLI_MAX_QUALITY : 5,
     };
     if (sizeHint > 0) params[zlib.constants.BROTLI_PARAM_SIZE_HINT] = sizeHint;
     return zlib.createBrotliCompress({ params });
   }
-  return zlib.createGzip({ level: 6 });
+  return zlib.createGzip({ level: best ? 9 : 6 });
+}
+
+/**
+ * Finished responses kept in memory, least recently used first out: public pages for `PAGE_CACHE_TTL_MS`, compressed
+ * hashed assets for the life of the process. Keys hold everything a response depends on (see `responseCacheKey`).
+ */
+const responseCache = new Map();
+let responseCacheBytes = 0;
+
+/**
+ * The request as far as a cached response depends on it: the negotiated coding, the URL, and what pages derive their
+ * origin and HTTPS status from (the socket and the host/forwarding headers, whether or not they are trusted).
+ */
+function responseCacheKey(req, encoding) {
+  const { host = '', 'x-forwarded-host': forwardedHost = '', 'x-forwarded-proto': forwardedProto = '' } = req.headers;
+  return [encoding ?? 'identity', req.socket.encrypted ? 'tls' : '', host, forwardedHost, forwardedProto, req.url].join(
+    '\n',
+  );
+}
+
+function cachedResponse(key) {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    forgetResponse(key, entry);
+    return null;
+  }
+  // Most recently used last.
+  responseCache.delete(key);
+  responseCache.set(key, entry);
+  return entry;
+}
+
+function forgetResponse(key, entry) {
+  responseCache.delete(key);
+  responseCacheBytes -= entry.body.length;
+}
+
+function storeResponse(key, headers, chunks, ttlMs) {
+  const body = Buffer.concat(chunks);
+  if (body.length > RESPONSE_CACHE_MAX_ENTRY_BYTES) return;
+  const previous = responseCache.get(key);
+  if (previous) forgetResponse(key, previous);
+  responseCache.set(key, { headers, body, storedAt: Date.now(), expiresAt: Date.now() + ttlMs });
+  responseCacheBytes += body.length;
+  for (const [oldKey, entry] of responseCache) {
+    if (responseCacheBytes <= RESPONSE_CACHE_MAX_BYTES) break;
+    forgetResponse(oldKey, entry);
+  }
+}
+
+/** Answers a GET from the cache: the stored headers and body, a `304` when the client already has it. */
+function sendCachedResponse(req, res, entry) {
+  for (const [name, value] of Object.entries(entry.headers)) res.setHeader(name, value);
+  res.setHeader('Age', String(Math.floor((Date.now() - entry.storedAt) / 1000)));
+  const etag = entry.headers.etag;
+  if (typeof etag === 'string' && req.headers['if-none-match']?.split(',').some((tag) => tag.trim() === etag)) {
+    res.removeHeader('content-encoding');
+    res.writeHead(304);
+    res.end();
+    return;
+  }
+  res.setHeader('Content-Length', entry.body.length);
+  res.writeHead(200);
+  res.end(entry.body);
 }
 
 /** Copies the headers given to `writeHead()` onto the response so they can be inspected and changed first. */
@@ -178,18 +256,55 @@ function mergeWriteHeadHeaders(res, headers) {
  * Wraps `res` so that, once the status and headers are known, text responses (HTML, CSS, JS, JSON, SVG…) are
  * compressed with the best coding the client accepts. Also sets the caching headers of static files.
  */
-function prepareResponse(req, res) {
-  const pathname = pathnameOf(req.url);
-  const isAsset = pathname.startsWith('/_astro/');
-  const isPublicFile = publicFiles.has(pathname);
-  const encoding = req.method === 'HEAD' ? null : negotiateEncoding(req.headers['accept-encoding']);
-
+function prepareResponse(req, res, { isAsset, isPublicFile, encoding, cacheKey }) {
   const writeHead = res.writeHead;
   const write = res.write;
   const end = res.end;
   let decided = false;
   let encoder = null;
   let flushPending = false;
+  /** The bytes sent so far, while the response may still be cached (see `cacheIfPossible`). */
+  let captured = null;
+  let capturedHeaders = null;
+  let capturedTtl = 0;
+
+  const capture = (chunk, chunkEncoding) => {
+    if (captured && chunk != null) {
+      captured.push(Buffer.from(chunk, typeof chunkEncoding === 'string' ? chunkEncoding : undefined));
+    }
+  };
+  const send = (chunk, chunkEncoding, callback) => {
+    capture(chunk, chunkEncoding);
+    return write.call(res, chunk, chunkEncoding, callback);
+  };
+  const finish = (chunk, chunkEncoding, callback) => {
+    capture(chunk, chunkEncoding);
+    return end.call(res, chunk, chunkEncoding, callback);
+  };
+
+  /**
+   * Starts recording a GET 200 that every client with this cache key gets alike: a public HTML page, or a compressed
+   * hashed asset. It is stored once it has been sent completely.
+   */
+  function cacheIfPossible() {
+    if (cacheKey === null || res.statusCode !== 200 || res.hasHeader('set-cookie')) return;
+    if (isAsset) {
+      if (!encoder) return;
+      capturedTtl = Number.POSITIVE_INFINITY;
+    } else {
+      const type = String(res.getHeader('content-type') ?? '').toLowerCase();
+      const cacheControl = String(res.getHeader('cache-control') ?? '').toLowerCase();
+      if (!type.startsWith('text/html') || !/\bpublic\b/.test(cacheControl)) return;
+      if (/\b(?:private|no-store|no-cache)\b/.test(cacheControl)) return;
+      capturedTtl = PAGE_CACHE_TTL_MS;
+    }
+    capturedHeaders = {};
+    for (const [name, value] of Object.entries(res.getHeaders())) {
+      if (!UNCACHED_HEADERS.has(name)) capturedHeaders[name] = value;
+    }
+    captured = [];
+    res.once('finish', () => storeResponse(cacheKey, capturedHeaders, captured, capturedTtl));
+  }
 
   function decide() {
     decided = true;
@@ -213,11 +328,11 @@ function prepareResponse(req, res) {
     res.removeHeader('content-length');
     res.setHeader('Content-Encoding', encoding);
 
-    encoder = createEncoder(encoding, Number.isFinite(length) ? length : 0);
+    encoder = createEncoder(encoding, Number.isFinite(length) ? length : 0, isAsset && cacheKey !== null);
     encoder.on('data', (chunk) => {
-      if (write.call(res, chunk) === false) encoder.pause();
+      if (send(chunk) === false) encoder.pause();
     });
-    encoder.on('end', () => end.call(res));
+    encoder.on('end', () => finish());
     encoder.on('error', (error) => {
       logError(`compression failed for ${req.url}:`, error);
       res.destroy(error);
@@ -247,12 +362,13 @@ function prepareResponse(req, res) {
     mergeWriteHeadHeaders(this, reason === undefined ? reasonOrHeaders : maybeHeaders);
     this.statusCode = statusCode;
     decide();
+    cacheIfPossible();
     return reason === undefined ? writeHead.call(this, statusCode) : writeHead.call(this, statusCode, reason);
   };
 
   res.write = function patchedWrite(chunk, chunkEncoding, callback) {
     if (!this.headersSent) this.writeHead(this.statusCode);
-    if (!encoder) return write.call(this, chunk, chunkEncoding, callback);
+    if (!encoder) return send(chunk, chunkEncoding, callback);
     scheduleFlush();
     return encoder.write(chunk, chunkEncoding, callback);
   };
@@ -273,7 +389,7 @@ function prepareResponse(req, res) {
       }
       this.writeHead(this.statusCode);
     }
-    if (!encoder) return end.call(this, chunk, chunkEncoding, callback);
+    if (!encoder) return finish(chunk, chunkEncoding, callback);
     if (callback) this.once('finish', callback);
     if (chunk != null) encoder.end(chunk, chunkEncoding);
     else encoder.end();
@@ -309,7 +425,19 @@ function onRequest(req, res) {
     req.resume();
     return;
   }
-  prepareResponse(req, res);
+  const pathname = pathnameOf(req.url);
+  const isAsset = pathname.startsWith('/_astro/');
+  const isPublicFile = publicFiles.has(pathname);
+  const encoding = req.method === 'HEAD' ? null : negotiateEncoding(req.headers['accept-encoding']);
+  // Only plain GETs: a range or a HEAD gets a different answer than the one stored.
+  const cacheKey =
+    req.method === 'GET' && !isPublicFile && req.headers.range === undefined ? responseCacheKey(req, encoding) : null;
+  const cached = cacheKey === null ? null : cachedResponse(cacheKey);
+  if (cached) {
+    sendCachedResponse(req, res, cached);
+    return;
+  }
+  prepareResponse(req, res, { isAsset, isPublicFile, encoding, cacheKey });
   astroHandler(req, res);
 }
 

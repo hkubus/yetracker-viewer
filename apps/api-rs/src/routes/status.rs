@@ -8,7 +8,6 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use serde_json::json;
 
-use super::songs::DOWNLOADED;
 use super::{NO_STORE, json_cached, json_response, set_header};
 use crate::db::{self, meta_keys};
 use crate::error::ApiError;
@@ -69,11 +68,10 @@ pub async fn status(State(state): State<SharedState>) -> Result<Response, ApiErr
             .query_row([], |row| row.get(0))?;
         // Only songs whose file has been downloaded can be playable; the disk
         // decides which of those still are.
-        let sql = format!(
-            "SELECT (SELECT filename FROM files WHERE url = s.url) FROM songs s \
-             WHERE s.catalog_id = 'unreleased' AND {DOWNLOADED}"
-        );
-        let mut statement = conn.prepare_cached(&sql)?;
+        let mut statement = conn.prepare_cached(
+            "SELECT f.filename FROM songs s JOIN files f ON f.url = s.url \
+             WHERE s.catalog_id = 'unreleased' AND f.filename IS NOT NULL",
+        )?;
         let filenames = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;

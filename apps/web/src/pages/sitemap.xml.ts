@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { ERA_PAGE_SIZE, OUTAGE_RETRY_AFTER_SECONDS, originDependentCacheControl, requestOrigin } from '../config';
-import { loadEraSummaries } from '../utils/era-list';
 import { eraPageHref, maxReachablePage, pageCountFor } from '../utils/era-page';
+import { loadEraSummaries } from '../utils/shared-api';
 
 const XML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 

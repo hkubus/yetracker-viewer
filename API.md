@@ -483,7 +483,9 @@ The stored audio file, or with `?quality=<kbps>` an Ogg Opus (or AAC) transcode 
   AVPlayer on iOS, which cannot play Ogg). Anything else → `400 Invalid format`.
 - `start` (only read with `quality`): seconds into the song at which the transcode begins — plain decimal, at most 3
   decimals, `0`–`86400` (`0`, absent or blank = the beginning), else `400 Invalid start`. A client that cannot seek a
-  live transcode restarts it with `start`. Such transcodes are never cached (every seek would be its own entry).
+  live transcode restarts it with `start`. Such transcodes are never cached (every seek would be its own entry), but
+  with `format=aac` a cached whole-song AAC transcode serves them: its bytes from the ADTS frame holding `start`, with
+  the live headers below and without ffmpeg (no transcode slot, so never `503` for capacity).
 - `format` and `start` are checked right after `quality`, also before the song is looked up.
 - Original: `Content-Type` by file extension — `mp3` `audio/mpeg`, `opus` `audio/ogg; codecs=opus`, `ogg`/`oga`
   `audio/ogg`, `flac` `audio/flac`, `wav` `audio/wav`, `aif`/`aiff`/`aifc` `audio/aiff`, `m4a`/`mp4`/`alac` `audio/mp4`,
@@ -495,8 +497,10 @@ The stored audio file, or with `?quality=<kbps>` an Ogg Opus (or AAC) transcode 
   - **Not cached**: the request waits up to 15 s for a transcode slot (`MAX_CONCURRENT_TRANSCODES`), else `503
     Transcoding capacity reached; try again shortly` + `Retry-After: 5`. ffmpeg then writes at full speed to a temp
     file while the response streams it as it grows: `200`, no `Content-Length`, `Accept-Ranges: none`,
-    `Cache-Control: no-store`. Concurrent requests for the same transcode share it; once no request has been reading it for 10 s,
-    ffmpeg is stopped; the slot is released when ffmpeg exits. The finished file moves into the cache (unless
+    `Cache-Control: no-store`. Concurrent requests for the same transcode share it; once no request has been reading it for 10 s
+    (3 s for a transcode with a `start`), ffmpeg is stopped (a `HEAD` for the transcode counts as reading it, so a client
+    can start one and poll for the cached file); the slot is released when ffmpeg exits. ffmpeg runs at a lower CPU
+    priority (nice 10) than the server. The finished file moves into the cache (unless
     `TRANSCODE_CACHE_MAX_MB=0`, the transcode is larger than that budget, or it has a `start`), which is trimmed to
     its budget, least recently used first. The cache key covers the source file's name, size and mtime plus the
     bitrate, format and start, so a replaced file never gets a stale transcode.

@@ -185,19 +185,22 @@ const DROPPED_INDEXES: &[&str] = &[
     "songs_quality_index",
     "songs_available_length_index",
     "songs_era_index",
+    // Global search matches in memory now (`rank::CatalogIndex`).
+    "songs_search_scan",
 ];
 
 /// `(catalog_id, position)` serves catalog-ordered listings, `(catalog_id,
 /// era, position)` era pages and per-era counts. The `id` variants serve
-/// `sort=id` and id-ordered era listings. `songs_search_scan` covers the
-/// catalog-wide search, which then scans the index instead of the wider
-/// table rows.
+/// `sort=id` and id-ordered era listings. `(url, catalog_id)` joins
+/// downloaded `files` rows to their songs (`/status`, `playable` filters)
+/// without reading the wide table rows; it leads with `url` so the planner
+/// never takes it for a catalog-wide listing.
 const INDEXES: &str = "\
 CREATE INDEX IF NOT EXISTS songs_catalog_era_id_index ON songs (catalog_id, era, id);
 CREATE INDEX IF NOT EXISTS songs_catalog_id_index ON songs (catalog_id, id);
 CREATE INDEX IF NOT EXISTS songs_catalog_position_index ON songs (catalog_id, position);
 CREATE INDEX IF NOT EXISTS songs_catalog_era_position_index ON songs (catalog_id, era, position);
-CREATE INDEX IF NOT EXISTS songs_search_scan ON songs (catalog_id, search_text, url);
+CREATE INDEX IF NOT EXISTS songs_url_catalog_index ON songs (url, catalog_id);
 CREATE INDEX IF NOT EXISTS eras_is_main_index ON eras (is_main);
 CREATE UNIQUE INDEX IF NOT EXISTS eras_key_index ON eras (key);";
 
@@ -208,6 +211,8 @@ pub fn create_pool(path: &Path) -> Result<Pool, ApiError> {
     // the per-connection pragma below is then a no-op.
     Connection::open(path)?.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
     let manager = SqliteConnectionManager::file(path).with_init(|conn: &mut Connection| {
+        // The routes' distinct statements outnumber rusqlite's default of 16.
+        conn.set_prepared_statement_cache_capacity(64);
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.execute_batch(PRAGMAS)
     });
@@ -274,13 +279,25 @@ pub fn migrate(conn: &Connection, covers_dir: &Path, songs_dir: &Path) -> Result
     for index in DROPPED_INDEXES {
         conn.execute_batch(&format!("DROP INDEX IF EXISTS {index}"))?;
     }
+    let had_url_index = has_index(conn, "songs_url_catalog_index")?;
     conn.execute_batch(INDEXES)?;
+    if !had_url_index {
+        // Imports refresh the planner's statistics (`PRAGMA optimize`), but
+        // only when the catalog changed: give a new index its own right away.
+        conn.execute_batch("ANALYZE songs")?;
+    }
     conn.execute(
         "UPDATE eras SET dominant_color = '666666' \
          WHERE dominant_color IS NULL OR trim(dominant_color) = ''",
         [],
     )?;
     Ok(())
+}
+
+fn has_index(conn: &Connection, name: &str) -> Result<bool, ApiError> {
+    Ok(conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1")?
+        .exists([name])?)
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, ApiError> {

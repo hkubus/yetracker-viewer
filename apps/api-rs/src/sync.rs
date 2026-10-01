@@ -18,6 +18,7 @@ use crate::downloader;
 use crate::error::ApiError;
 use crate::importer;
 use crate::media::{Tool, ToolSet};
+use crate::routes;
 use crate::state::SharedState;
 
 /// Starts the sync loop.
@@ -121,6 +122,9 @@ async fn run_sync(state: SharedState, shutdown: CancellationToken) {
     let import = async { importer::import_data(state.clone()).await };
     if !phase(&shutdown, "import", import).await {
         return;
+    }
+    if let Err(error) = routes::songs::warm_search_index(&state).await {
+        warn!(%error, "building the search index failed");
     }
     // The playable set also has to notice media that changed out of band.
     if let Err(error) = state.playable.refresh(&state.config.songs_path).await {

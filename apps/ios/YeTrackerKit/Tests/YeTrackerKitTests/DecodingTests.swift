@@ -65,6 +65,22 @@ struct DecodingTests {
     #expect(first.name?.hasPrefix("✨") == true)
   }
 
+  @Test func searchSongsCarryTheirLengthAndCover() throws {
+    let json = #"""
+      [{"id":1,"eraId":3,"name":"Probed","trackLength":180,"duration":181.5,"eraCoverVersion":"abc123def456"},
+       {"id":2,"eraId":3,"name":"Catalog only","trackLength":"95","duration":null,"eraCoverVersion":null},
+       {"id":3,"eraId":3,"name":"Unknown","trackLength":0}]
+      """#
+    let songs = try JSONDecoder().decode([SearchSong].self, from: Data(json.utf8))
+    #expect(songs.map(\.bestDuration) == [181.5, 95, nil])
+    let probed = Track(song: songs[0], coverVersion: "fromtheeras")
+    #expect(probed.durationHint == 181.5)
+    #expect(probed.coverVersion == "abc123def456")
+    let older = Track(song: songs[1], coverVersion: "fromtheeras")
+    #expect(older.durationHint == 95)
+    #expect(older.coverVersion == "fromtheeras")
+  }
+
   @Test func recentLeaksDecode() throws {
     let response = try Fixture.decode(SearchResponse.self, "recent-leaks")
     #expect(response.songs.allSatisfy { $0.isPlayable })

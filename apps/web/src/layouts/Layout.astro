@@ -67,7 +67,8 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     {preconnectOrigin && <link rel="preconnect" href={preconnectOrigin} />}
-    <Font cssVariable="--font-body" />
+    {/* Preloaded: found only through the CSS, the faces would miss the first render (`display: optional`). */}
+    <Font cssVariable="--font-body" preload />
     <ClientRouter />
   </head>
   <body>

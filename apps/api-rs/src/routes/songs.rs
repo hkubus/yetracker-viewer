@@ -20,7 +20,7 @@ use crate::db::{self, meta_keys};
 use crate::downloader::{Source, source_of};
 use crate::error::ApiError;
 use crate::importer::is_downloadable_url;
-use crate::rank::{CatalogIndex, SearchQuery, SongTexts};
+use crate::rank::{CatalogIndex, IndexedFields, SearchQuery, SongTexts};
 use crate::request::{
     SONG_LIST_PARAMS, SongSort, limit_value, offset_value, positive_integer, search_query,
     sort_value,
@@ -68,9 +68,6 @@ const SEARCH_SLOT_WAIT: Duration = Duration::from_secs(10);
 /// pages and filter-only requests are cheap and never wait for one.
 const HEAVY_PAGE: i64 = 100;
 
-/// The folded text a global search matches: the song's own text plus its
-/// era's name and subtitle.
-const SEARCH_TEXT: &str = "s.search_text";
 /// The folded text an era's song list matches: the song's own text only, so a
 /// token from the era's name doesn't match every song of the era (rows written
 /// before the column existed fall back to the full text).
@@ -159,9 +156,10 @@ impl Filter {
         self.values.extend(values);
     }
 
-    /// Songs whose folded `text` ([`SEARCH_TEXT`] or [`OWN_SEARCH_TEXT`])
-    /// contains every token (fold/substring semantics; the tokens are folded
-    /// already).
+    /// Songs whose folded `text` ([`OWN_SEARCH_TEXT`]) contains every token
+    /// (fold/substring semantics; the tokens are folded already). A global
+    /// search matches `songs.search_text` in memory instead
+    /// ([`CatalogIndex::text_matches`]).
     fn matching(&mut self, text: &str, tokens: &[String]) {
         let clause = format!("instr({text}, ?) > 0");
         for token in tokens {
@@ -701,8 +699,12 @@ async fn search_songs(
         found
     })
     .await?;
-    let body = json!({ "songs": songs, "total": total, "offset": offset, "limit": limit });
-    Ok(json_list(body, total))
+    let mut body = Map::with_capacity(4);
+    body.insert("songs".into(), Value::Array(songs));
+    body.insert("total".into(), json!(total));
+    body.insert("offset".into(), json!(offset));
+    body.insert("limit".into(), json!(limit));
+    Ok(json_list(Value::Object(body), total))
 }
 
 fn run_search(
@@ -734,9 +736,6 @@ fn run_search(
     }
 
     let mut filter = Filter::catalog();
-    if let Some(tokens) = search.map(SearchQuery::tokens) {
-        filter.matching(SEARCH_TEXT, tokens);
-    }
     if let Some(era) = filters.era {
         filter.and("s.era = ?", [SqlValue::Integer(era)]);
     }
@@ -759,34 +758,45 @@ fn run_search(
         );
     }
     filter.categories(&filters.categories);
-    if filters.playable == Some(true) {
-        // Only downloaded files can be playable; the disk check follows.
-        filter.and(DOWNLOADED, []);
-    }
 
     let (total, rows) = if search.is_none() && filters.playable.is_none() {
         // Plain SQL paging: nothing to rank and nothing to check on disk.
         (filter.count(conn)?, filter.page(conn, sort, limit, offset)?)
     } else {
-        let mut matches: Vec<(i64, bool)> =
-            find_matches(conn, &filter, search.is_none().then_some(sort))?
-                .into_iter()
-                .map(|found| {
-                    let playable = state.playable.resolve_playable_blocking(
-                        &state.config.songs_path,
-                        found.filename.as_deref(),
-                    );
-                    (found.id, playable)
-                })
-                .collect();
+        // Only downloaded files can be playable; the disk check follows.
+        let downloaded_only = filters.playable == Some(true);
+        let (index, found) = match search {
+            Some(search) => {
+                let index = catalog_index(state, conn)?;
+                let range = (from.is_some() || to.is_some())
+                    .then(|| (from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX)));
+                let ids: Vec<i64> = index
+                    .text_matches(search.tokens())
+                    .filter(|song| passes(song, filters, &eras, range))
+                    .map(|song| song.id)
+                    .collect();
+                let found = with_files(conn, ids, downloaded_only)?;
+                (Some(index), found)
+            }
+            None => (None, find_matches(conn, &filter, sort, downloaded_only)?),
+        };
+        let mut matches: Vec<(i64, bool)> = found
+            .into_iter()
+            .map(|found| {
+                let playable = state
+                    .playable
+                    .resolve_playable_blocking(&state.config.songs_path, found.filename.as_deref());
+                (found.id, playable)
+            })
+            .collect();
         if let Some(wanted) = filters.playable {
             matches.retain(|(_, playable)| *playable == wanted);
         }
         let total = matches.len() as i64;
         let wanted = usize::try_from(offset + limit).unwrap_or(usize::MAX);
-        let order: Vec<usize> = match search {
-            Some(search) => catalog_index(state, conn)?.rank(search, &matches, wanted),
-            None => (0..matches.len().min(wanted)).collect(),
+        let order: Vec<usize> = match (index, search) {
+            (Some(index), Some(search)) => index.rank(search, &matches, wanted),
+            _ => (0..matches.len().min(wanted)).collect(),
         };
         let page: Vec<i64> = order
             .into_iter()
@@ -818,26 +828,104 @@ fn run_search(
     Ok((total, songs))
 }
 
-/// Songs whose link has a downloaded file (a membership test against the
-/// few downloaded links is much cheaper than joining `files` for every row).
-pub(super) const DOWNLOADED: &str = "s.url IN (SELECT url FROM files WHERE filename IS NOT NULL)";
+/// Whether an indexed text match passes the other filters of a search,
+/// exactly as their SQL in [`run_search`] would: `s.era = ?`, the era range
+/// over `coalesce(position, id)` (`range`), `s.quality = ?`,
+/// `s.available_length = ?` and `instr(s.title, marker)` for each category.
+fn passes(
+    song: &IndexedFields<'_>,
+    filters: &SearchFilters,
+    eras: &HashMap<i64, EraInfo>,
+    range: Option<(i64, i64)>,
+) -> bool {
+    filters.era.is_none_or(|era| song.era == Some(era))
+        && range.is_none_or(|(from, to)| {
+            song.era
+                .and_then(|era| eras.get(&era))
+                .is_some_and(|era| (from..=to).contains(&era.position))
+        })
+        && filters
+            .quality
+            .as_deref()
+            .is_none_or(|quality| song.quality == Some(quality))
+        && filters
+            .available_length
+            .as_deref()
+            .is_none_or(|length| song.available_length == Some(length))
+        && filters
+            .categories
+            .iter()
+            .all(|marker| song.title.contains(marker))
+}
 
-/// Every song passing `filter` with its downloaded file, in `sort` order
-/// when given.
+/// Above this many songs, [`with_files`] reads every downloaded file of the
+/// catalog instead of looking the songs up one by one.
+const FILE_LOOKUP_BY_ID_MAX: usize = 1000;
+
+/// `ids` (in that order) with their downloaded file; only the songs that
+/// have one when `downloaded_only`.
+fn with_files(
+    conn: &Connection,
+    ids: Vec<i64>,
+    downloaded_only: bool,
+) -> Result<Vec<Match>, ApiError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut files: HashMap<i64, String> = HashMap::new();
+    let mut collect = |statement: &mut rusqlite::CachedStatement<'_>,
+                       params: &[&dyn rusqlite::ToSql]|
+     -> Result<(), ApiError> {
+        let mut rows = statement.query(params)?;
+        while let Some(row) = rows.next()? {
+            files.insert(row.get(0)?, row.get(1)?);
+        }
+        Ok(())
+    };
+    if ids.len() <= FILE_LOOKUP_BY_ID_MAX {
+        let ids_json = serde_json::to_string(&ids).expect("a list of integers serialises");
+        collect(
+            &mut conn.prepare_cached(
+                "SELECT s.id, f.filename FROM songs s JOIN files f ON f.url = s.url \
+                 WHERE s.id IN (SELECT value FROM json_each(?1)) AND f.filename IS NOT NULL",
+            )?,
+            &[&ids_json],
+        )?;
+    } else {
+        collect(
+            &mut conn.prepare_cached(
+                "SELECT s.id, f.filename FROM songs s JOIN files f ON f.url = s.url \
+                 WHERE s.catalog_id = 'unreleased' AND f.filename IS NOT NULL",
+            )?,
+            &[],
+        )?;
+    }
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| {
+            let filename = files.remove(&id);
+            (!downloaded_only || filename.is_some()).then_some(Match { id, filename })
+        })
+        .collect())
+}
+
+/// Every song passing `filter` with its downloaded file, in `sort` order;
+/// only the songs that have one when `downloaded_only`.
 fn find_matches(
     conn: &Connection,
     filter: &Filter,
-    sort: Option<SongSort>,
+    sort: SongSort,
+    downloaded_only: bool,
 ) -> Result<Vec<Match>, ApiError> {
-    let mut sql = format!(
-        "SELECT s.id, CASE WHEN {DOWNLOADED} THEN (SELECT filename FROM files WHERE url = s.url) END \
-         FROM songs s WHERE {}",
-        filter.sql
+    // `files.url` is the primary key: the join never repeats a song.
+    let join = if downloaded_only { "JOIN" } else { "LEFT JOIN" };
+    let sql = format!(
+        "SELECT s.id, f.filename FROM songs s \
+         {join} files f ON f.url = s.url AND f.filename IS NOT NULL \
+         WHERE {} ORDER BY {}",
+        filter.sql,
+        order_by(sort)
     );
-    if let Some(sort) = sort {
-        sql.push_str(" ORDER BY ");
-        sql.push_str(order_by(sort));
-    }
     let mut statement = conn.prepare_cached(&sql)?;
     let rows = statement.query_map(params_from_iter(&filter.values), |row| {
         Ok(Match {
@@ -846,6 +934,19 @@ fn find_matches(
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Builds the search index of the stored catalog ahead of time (at boot and
+/// after each import), so that no search waits for it.
+pub async fn warm_search_index(state: &SharedState) -> Result<(), ApiError> {
+    let shared = state.clone();
+    db::call(&state.pool, move |conn| {
+        let snapshot = conn.unchecked_transaction()?;
+        catalog_index(&shared, &snapshot)?;
+        snapshot.finish()?;
+        Ok(())
+    })
+    .await
 }
 
 /// The ranking index of the current catalog, rebuilt after an import changed
@@ -868,7 +969,8 @@ fn catalog_index(state: &AppState, conn: &Connection) -> Result<Arc<CatalogIndex
         let mut songs = conn.prepare_cached(
             "SELECT id, coalesce(position, id), era, coalesce(name, ''), \
              coalesce(search_text, ''), sub_era, quality, available_length, \
-             coalesce(category_rank, 4) FROM songs WHERE catalog_id = 'unreleased'",
+             coalesce(category_rank, 4), coalesce(title, '') FROM songs \
+             WHERE catalog_id = 'unreleased' ORDER BY position, id",
         )?;
         let mut rows = songs.query([])?;
         while let Some(row) = rows.next()? {
@@ -881,6 +983,7 @@ fn catalog_index(state: &AppState, conn: &Connection) -> Result<Arc<CatalogIndex
                     position: row.get(1)?,
                     era: row.get(2)?,
                     name: text(3)?.unwrap_or_default(),
+                    title: text(9)?.unwrap_or_default(),
                     search_text: text(4)?.unwrap_or_default(),
                     sub_era: text(5)?,
                     quality: text(6)?,
@@ -1121,16 +1224,105 @@ mod tests {
             .unwrap()
     }
 
+    /// The ids a global search for `tokens` selects in memory, after the
+    /// other `filters` ([`passes`]), in catalog order.
+    fn indexed_ids(conn: &Connection, tokens: &[&str], filters: &SearchFilters) -> Vec<i64> {
+        let mut index = CatalogIndex::new(None);
+        let mut statement = conn
+            .prepare("SELECT id, era, position, title, search_text FROM songs ORDER BY position")
+            .unwrap();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            let title: String = row.get(3).unwrap();
+            let search_text: String = row.get(4).unwrap();
+            index.add_song(
+                row.get(0).unwrap(),
+                &SongTexts {
+                    name: &title,
+                    title: &title,
+                    search_text: &search_text,
+                    era: row.get(1).unwrap(),
+                    position: row.get(2).unwrap(),
+                    ..SongTexts::default()
+                },
+            );
+        }
+        let eras = HashMap::from([7, 8].map(|id| {
+            let era = EraInfo {
+                position: id - 6,
+                name: String::new(),
+                dominant_color: DEFAULT_COLOR.to_string(),
+                cover_version: None,
+            };
+            (id, era)
+        }));
+        let tokens: Vec<String> = tokens.iter().map(ToString::to_string).collect();
+        let range = filters.era_from.map(|from| (from, i64::MAX));
+        index
+            .text_matches(&tokens)
+            .filter(|song| passes(song, filters, &eras, range))
+            .map(|song| song.id)
+            .collect()
+    }
+
+    #[test]
+    fn global_searches_filter_in_memory_like_the_sql_filters() {
+        let conn = catalog();
+        let all = SearchFilters::default();
+        assert_eq!(indexed_ids(&conn, &["donda"], &all), [1, 2, 3, 4, 5]);
+        assert_eq!(indexed_ids(&conn, &["jail", "v"], &all), [2, 3]);
+        assert!(indexed_ids(&conn, &["zzz"], &all).is_empty());
+
+        let mut best = Filter::catalog();
+        best.categories(&["⭐"]);
+        let in_memory = SearchFilters {
+            categories: vec!["⭐"],
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            indexed_ids(&conn, &["donda"], &in_memory),
+            ids(&conn, &best)
+        );
+
+        let mut both = Filter::catalog();
+        both.categories(&["🗑", "🤖"]);
+        let in_memory = SearchFilters {
+            categories: vec!["🗑", "🤖"],
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            indexed_ids(&conn, &["donda"], &in_memory),
+            ids(&conn, &both)
+        );
+
+        let era = SearchFilters {
+            era: Some(8),
+            ..SearchFilters::default()
+        };
+        assert_eq!(indexed_ids(&conn, &["donda"], &era), [5]);
+        // `eraFrom` as an era position (era 8 is the second era).
+        let from = SearchFilters {
+            era_from: Some(2),
+            ..SearchFilters::default()
+        };
+        assert_eq!(indexed_ids(&conn, &["donda"], &from), [5]);
+        let quality = SearchFilters {
+            quality: Some("Lossless".to_string()),
+            ..SearchFilters::default()
+        };
+        assert!(indexed_ids(&conn, &["donda"], &quality).is_empty());
+    }
+
     #[test]
     fn era_lists_match_the_songs_own_text() {
         let conn = catalog();
         let tokens = vec!["donda".to_string()];
 
         // A global search matches the era name too.
-        let mut global = Filter::catalog();
-        global.matching(SEARCH_TEXT, &tokens);
-        assert_eq!(ids(&conn, &global), [1, 2, 3, 4, 5]);
-        assert_eq!(global.count(&conn).unwrap(), 5);
+        assert_eq!(
+            indexed_ids(&conn, &["donda"], &SearchFilters::default()),
+            [1, 2, 3, 4, 5]
+        );
 
         // An era's list only matches what the songs themselves say; rows
         // without the column yet fall back to the full text.

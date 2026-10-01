@@ -27,6 +27,11 @@ public protocol HTTPClient: Sendable {
 }
 
 /// `URLSession`-backed transport.
+///
+/// `.reloadRevalidatingCacheData` is done here rather than left to URLSession
+/// (which has long treated it like a plain reload): the request goes out
+/// without the cache but with the cached response's validators, and a `304`
+/// is answered with the cached body.
 public struct URLSessionHTTPClient: HTTPClient {
   private let session: URLSession
 
@@ -35,21 +40,42 @@ public struct URLSessionHTTPClient: HTTPClient {
   }
 
   public func send(_ request: URLRequest) async throws -> HTTPResponse {
+    var outgoing = request
+    var cached: CachedURLResponse?
+    if request.cachePolicy == .reloadRevalidatingCacheData {
+      outgoing.cachePolicy = .reloadIgnoringLocalCacheData
+      cached = session.configuration.urlCache?.cachedResponse(for: request)
+      if let validators = cached?.response as? HTTPURLResponse {
+        if let etag = validators.value(forHTTPHeaderField: "ETag") {
+          outgoing.setValue(etag, forHTTPHeaderField: "If-None-Match")
+        }
+        if let modified = validators.value(forHTTPHeaderField: "Last-Modified") {
+          outgoing.setValue(modified, forHTTPHeaderField: "If-Modified-Since")
+        }
+      }
+    }
     let data: Data
     let response: URLResponse
     do {
-      (data, response) = try await perform(request)
+      (data, response) = try await perform(outgoing)
     } catch {
       throw APIError(transportError: error)
     }
     guard let http = response as? HTTPURLResponse else {
       throw APIError.transport("The server sent a response that is not HTTP.")
     }
+    if http.statusCode == 304, let cached, let stored = cached.response as? HTTPURLResponse {
+      return HTTPResponse(status: stored.statusCode, headers: Self.headers(of: stored), body: cached.data)
+    }
+    return HTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: data)
+  }
+
+  private static func headers(of response: HTTPURLResponse) -> [String: String] {
     var headers: [String: String] = [:]
-    for (key, value) in http.allHeaderFields {
+    for (key, value) in response.allHeaderFields {
       headers[String(describing: key).lowercased()] = String(describing: value)
     }
-    return HTTPResponse(status: http.statusCode, headers: headers, body: data)
+    return headers
   }
 
   private func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {

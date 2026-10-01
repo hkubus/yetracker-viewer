@@ -82,6 +82,11 @@ public final class EraDetailModel {
   @ObservationIgnored private var scrollToken = 0
   @ObservationIgnored private var isBatchUpdating = false
   @ObservationIgnored private var haystacks: [Int: [UInt8]] = [:]
+  /// Bumped whenever `songs` changes; keys `visibleCache`.
+  @ObservationIgnored private var songsVersion = 0
+  /// `visibleSongs` for one version of `songs` and one search: views read it
+  /// several times per update (and every row's `onAppear` once more).
+  @ObservationIgnored private var visibleCache: (version: Int, query: String, songs: [EraSong])?
   @ObservationIgnored var filterTask: Task<Void, Never>?
   @ObservationIgnored var pageTask: Task<Void, Never>?
 
@@ -164,10 +169,17 @@ public final class EraDetailModel {
 
   /// Loaded rows passing the instant filter.
   public var visibleSongs: [EraSong] {
+    // Read both observed inputs first, so a cached answer still registers them.
+    let all = songs
     let query = normalizedSearch
-    guard !query.isEmpty else { return songs }
+    guard !query.isEmpty else { return all }
+    if let cache = visibleCache, cache.version == songsVersion, cache.query == query { return cache.songs }
     let needle = Array(query.utf8)
-    return songs.filter { (haystacks[$0.id] ?? Array($0.searchHaystack.utf8)).firstRange(of: needle) != nil }
+    let visible = all.filter {
+      TextNormalization.containsBytes(haystacks[$0.id] ?? Array($0.searchHaystack.utf8), needle)
+    }
+    visibleCache = (songsVersion, query, visible)
+    return visible
   }
 
   /// The typed text has not reached the server yet.
@@ -342,7 +354,7 @@ public final class EraDetailModel {
     pendingFocus = nil
     if let songID = focus.songID {
       while !songs.contains(where: { $0.id == songID }), songs.count < total, current == generation {
-        guard await fetchFocusChunk() else { break }
+        guard await fetchFocusChunk(loadThrough: focus.loadThrough) else { break }
       }
       guard current == generation, songs.contains(where: { $0.id == songID }) else { return }
       highlightedSongID = songID
@@ -350,25 +362,30 @@ public final class EraDetailModel {
     } else if let row = focus.rowIndex, total > 0 {
       let target = min(row, total - 1)
       while songs.count <= target, songs.count < total, current == generation {
-        guard await fetchFocusChunk() else { break }
+        guard await fetchFocusChunk(loadThrough: target + 1) else { break }
       }
       guard current == generation, songs.indices.contains(target) else { return }
       requestScroll(.song(songs[target].id))
     }
   }
 
-  /// One deep-link chunk, first letting a scroll-triggered page finish.
-  private func fetchFocusChunk() async -> Bool {
+  /// One deep-link chunk, first letting a scroll-triggered page finish. Just
+  /// the pages up to `loadThrough` rows while the target lies beyond the
+  /// loaded rows; whole chunks once it should be loaded already (a stale
+  /// position).
+  private func fetchFocusChunk(loadThrough: Int) async -> Bool {
     if paging == .loading, let pageTask {
       await pageTask.value
       return true
     }
-    return await fetchNextPage(limit: Self.focusChunk)
+    let missing = roundUpToPage(loadThrough) - songs.count
+    return await fetchNextPage(limit: missing > 0 ? min(Self.focusChunk, missing) : Self.focusChunk)
   }
 
   private func setSongs(_ newSongs: [EraSong], total newTotal: Int) {
     var seen = Set<Int>()
     songs = newSongs.filter { seen.insert($0.id).inserted }
+    songsVersion += 1
     haystacks = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, Array($0.searchHaystack.utf8)) })
     total = max(newTotal, songs.count)
     paging = songs.count >= total ? .complete : .idle
@@ -379,6 +396,7 @@ public final class EraDetailModel {
     var seen = Set(songs.map(\.id))
     let fresh = newSongs.filter { seen.insert($0.id).inserted }
     songs += fresh
+    songsVersion += 1
     for song in fresh { haystacks[song.id] = Array(song.searchHaystack.utf8) }
     total = max(newTotal, songs.count)
     return fresh.count

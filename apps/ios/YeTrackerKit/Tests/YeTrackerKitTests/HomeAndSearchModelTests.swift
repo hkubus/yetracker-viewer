@@ -70,7 +70,7 @@ struct HomeModelTests {
     #expect(home.directory.eras.count == 43)
     #expect(home.directory.state == .loaded)
     #expect(home.directory.refreshError == .http(status: 503, message: "down"))
-    #expect(http.requests(to: "/eras").last?.cachePolicy == .reloadIgnoringLocalCacheData)
+    #expect(http.requests(to: "/eras").last?.cachePolicy == .reloadRevalidatingCacheData)
   }
 
   @Test func concurrentLoadsShareOneRequest() async throws {

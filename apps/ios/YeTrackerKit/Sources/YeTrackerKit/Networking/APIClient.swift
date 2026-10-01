@@ -107,7 +107,7 @@ public struct APIClient: Sendable {
     struct Body: Decodable {
       let status: String?
     }
-    let response = try await get("/health", reload: true)
+    let response = try await get("/health", cachePolicy: .reloadIgnoringLocalCacheData)
     guard (try? decode(Body.self, from: response))?.status == "ok" else {
       throw APIError.decoding("The server did not report a healthy status.")
     }
@@ -115,11 +115,18 @@ public struct APIClient: Sendable {
 
   // MARK: - Plumbing
 
+  /// `reload` (pull to refresh) skips the HTTP cache's freshness but still
+  /// revalidates what it holds (see `URLSessionHTTPClient`), so an unchanged
+  /// list costs a `304` instead of the whole body.
   private func get(_ path: String, query: [(String, String)] = [], reload: Bool = false) async throws -> HTTPResponse {
+    try await get(path, query: query, cachePolicy: reload ? .reloadRevalidatingCacheData : .useProtocolCachePolicy)
+  }
+
+  private func get(
+    _ path: String, query: [(String, String)] = [], cachePolicy: URLRequest.CachePolicy
+  ) async throws -> HTTPResponse {
     var request = URLRequest(
-      url: endpoint(path, query: query),
-      cachePolicy: reload ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy,
-      timeoutInterval: Self.requestTimeout)
+      url: endpoint(path, query: query), cachePolicy: cachePolicy, timeoutInterval: Self.requestTimeout)
     request.httpMethod = "GET"
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue(userAgent, forHTTPHeaderField: "User-Agent")

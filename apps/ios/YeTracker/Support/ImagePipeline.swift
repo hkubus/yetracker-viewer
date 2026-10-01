@@ -11,6 +11,14 @@ final class ImagePipeline: @unchecked Sendable {
   private let memory = NSCache<NSURL, UIImage>()
   private let session: URLSession
   private let urlCache: URLCache
+  /// How long a cover the server doesn't have (404) is not asked for again. A
+  /// cover that appears later comes with a new `?v=`, so a new URL.
+  private static let missLifetime: TimeInterval = 300
+
+  private let lock = NSLock()
+  /// Downloads in progress: views showing the same cover share one request.
+  private var inFlight: [URL: Task<UIImage?, Never>] = [:]
+  private var misses: [URL: Date] = [:]
 
   private init() {
     // Its own directory: API responses must survive "Clear Cover Cache", and
@@ -38,9 +46,29 @@ final class ImagePipeline: @unchecked Sendable {
   /// The decoded image, or `nil` when it is missing (404) or unreadable.
   func image(for url: URL) async -> UIImage? {
     if let cached = cachedImage(for: url) { return cached }
+    let download: Task<UIImage?, Never>? = lock.withLock {
+      if let missed = misses[url] {
+        if Date().timeIntervalSince(missed) < Self.missLifetime { return nil }
+        misses[url] = nil
+      }
+      if let running = inFlight[url] { return running }
+      let task = Task { await self.download(url) }
+      inFlight[url] = task
+      return task
+    }
+    return await download?.value
+  }
+
+  private func download(_ url: URL) async -> UIImage? {
+    defer { lock.withLock { inFlight[url] = nil } }
     do {
       let (data, response) = try await session.data(from: url)
-      guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+      guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        if (response as? HTTPURLResponse)?.statusCode == 404 {
+          lock.withLock { misses[url] = Date() }
+        }
+        return nil
+      }
       let decoded = await Task.detached(priority: .utility) { () -> UIImage? in
         guard let image = UIImage(data: data) else { return nil }
         return image.preparingForDisplay() ?? image
@@ -54,6 +82,7 @@ final class ImagePipeline: @unchecked Sendable {
 
   func removeAll() {
     memory.removeAllObjects()
+    lock.withLock { misses.removeAll() }
     urlCache.removeAllCachedResponses()
   }
 

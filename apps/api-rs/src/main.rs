@@ -15,6 +15,7 @@ use yetracker_api::config::{self, Config};
 use yetracker_api::db;
 use yetracker_api::http;
 use yetracker_api::media::Tool;
+use yetracker_api::routes;
 use yetracker_api::state::AppState;
 use yetracker_api::sync;
 
@@ -104,6 +105,12 @@ async fn run() -> Result<(), String> {
     // first sync imports in the background.
     let listener = http::bind(&state.config).await?;
     let shutdown = CancellationToken::new();
+    let warm = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = routes::songs::warm_search_index(&warm).await {
+            warn!(%error, "building the search index failed");
+        }
+    });
     let sync = sync::spawn(state.clone(), shutdown.clone());
     let served = http::serve(listener, state, shutdown.clone()).await;
     shutdown.cancel();

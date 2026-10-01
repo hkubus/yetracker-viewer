@@ -15,6 +15,8 @@ struct SongRow: View {
   let onOpenSource: @MainActor (URL) -> Void
 
   var body: some View {
+    // Built once per update: it formats two dates.
+    let details = details
     HStack(alignment: .top, spacing: 12) {
       primaryAction
 
@@ -61,7 +63,7 @@ struct SongRow: View {
     }
     .contextMenu { menu }
     .accessibilityElement(children: .ignore)
-    .accessibilityLabel(accessibilityText)
+    .accessibilityLabel(accessibilityText(details: details))
     .accessibilityHint(song.isPlayable ? "Plays the song." : song.unavailableReason)
     .accessibilityAddTraits(song.isPlayable ? .isButton : [])
     .accessibilityAction {
@@ -142,7 +144,7 @@ struct SongRow: View {
     return parts.joined(separator: " · ")
   }
 
-  private var accessibilityText: String {
+  private func accessibilityText(details: String) -> String {
     var parts = [song.displayTitle]
     if isCurrent { parts.append(isPlaying ? "now playing" : "paused") }
     if !details.isEmpty { parts.append(details) }
