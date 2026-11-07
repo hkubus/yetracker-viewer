@@ -41,6 +41,13 @@ extension HTTPResponse {
   static func text(_ message: String, status: Int) -> HTTPResponse {
     HTTPResponse(status: status, headers: ["Content-Type": "text/plain;charset=UTF-8"], body: Data(message.utf8))
   }
+
+  /// The same response with one more header.
+  func adding(_ name: String, _ value: String) -> HTTPResponse {
+    var headers = self.headers
+    headers[name.lowercased()] = value
+    return HTTPResponse(status: status, headers: headers, body: body)
+  }
 }
 
 /// Canned responses keyed by path. Unmatched requests get the API's JSON 404.
@@ -83,6 +90,19 @@ extension URLRequest {
     var result: [String: String] = [:]
     for item in items { result[item.name] = item.value ?? "" }
     return result
+  }
+}
+
+/// A thread-safe counter for fake responders: `next()` returns 0, 1, 2, …
+final class Counter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+
+  func next() -> Int {
+    lock.withLock {
+      defer { value += 1 }
+      return value
+    }
   }
 }
 

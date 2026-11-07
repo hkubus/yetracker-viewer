@@ -4,6 +4,14 @@ import Observation
 /// The persistent player (`apps/web/src/components/Player.astro`): queue,
 /// quality, fallbacks, buffering hint, duration and lock-screen metadata.
 /// Audio itself is delegated to a `PlaybackEngine`.
+///
+/// A transcode the server has not finished yet plays live (no length, no
+/// ranges), which AVPlayer cannot resume mid-way: a player that reconnects
+/// could get the song from the start again. So the player polls until the
+/// server has the whole song, moves the live stream onto that file (a plain,
+/// seekable file with ranges) as soon as that is inaudible — paused,
+/// stalled, or seeking — and has the next song in the queue transcoded in
+/// advance, so it starts from the finished file.
 @MainActor
 @Observable
 public final class PlayerModel {
@@ -29,6 +37,13 @@ public final class PlayerModel {
   public static let seekRestartDelay: Duration = .milliseconds(300)
   /// The API refuses `start` beyond a day of audio.
   public static let maxTranscodeStart: Double = 86_400
+  /// How often a transcode is polled until finished. The server stops one
+  /// that nobody reads or polls for 10 s.
+  public static let transcodePollInterval: Duration = .seconds(2)
+  /// Polls before giving up on a transcode (ten minutes).
+  public static let maxTranscodePolls = 300
+  /// Failed polls (busy, transport errors) before giving up.
+  public static let maxTranscodePollFailures = 5
 
   public private(set) var current: Track?
   public private(set) var queue: [Track] = []
@@ -75,6 +90,19 @@ public final class PlayerModel {
     var original = false
     var transcode = false
   }
+
+  /// A whole-song transcode on the server.
+  struct TranscodeKey: Hashable {
+    let songID: Int
+    let bitrate: Int
+  }
+
+  /// Whole-song transcodes the server has finished (and serves as files).
+  @ObservationIgnored private var cachedTranscodes: Set<TranscodeKey> = []
+  /// Waits for the live transcode playing now to finish.
+  @ObservationIgnored var cacheWatch: (key: TranscodeKey, task: Task<Void, Never>)?
+  /// Transcodes the next song in the queue in advance.
+  @ObservationIgnored var prefetch: (key: TranscodeKey, task: Task<Void, Never>)?
 
   private struct QualitySwitch {
     let previousSource: PlaybackSource
@@ -160,6 +188,7 @@ public final class PlayerModel {
     wantsToPlay = false
     engine.pause()
     isPlaying = false
+    adoptFinishedTranscode()
     publishNowPlaying()
   }
 
@@ -181,19 +210,19 @@ public final class PlayerModel {
     if duration > 0 { position = min(position, duration) }
     hasEnded = false
     switch source.kind {
-    case .original:
-      if pendingSeek != nil {
-        pendingSeek = position
-      } else {
-        engine.seek(to: position)
-      }
-    case .transcode(let bitrate):
+    case .transcode(let bitrate) where source.isLive:
       if duration > 0, position >= duration - Self.liveEndTolerance {
         cancelSeekRestart()
         handleEnded()
         return
       }
       scheduleRestart(bitrate: bitrate, at: min(position, Self.maxTranscodeStart))
+    case .original, .transcode:
+      if pendingSeek != nil {
+        pendingSeek = position
+      } else {
+        engine.seek(to: position)
+      }
     }
     elapsed = position
     publishNowPlaying()
@@ -210,7 +239,7 @@ public final class PlayerModel {
       }
       guard let self, !Task.isCancelled, self.generation == expected else { return }
       self.seekTask = nil
-      self.load(self.transcodeSource(bitrate: bitrate, at: position), autoplay: self.wantsToPlay)
+      self.load(self.transcodeSource(bitrate: bitrate, at: position), autoplay: self.wantsToPlay, resumeAt: position)
     }
   }
 
@@ -257,6 +286,7 @@ public final class PlayerModel {
   public func stop() {
     generation += 1
     cancelSeekRestart()
+    cancelTranscodeWatches()
     wantsToPlay = false
     stopWaiting()
     engine.stop()
@@ -283,6 +313,8 @@ public final class PlayerModel {
 
   private func start(_ track: Track) {
     generation += 1
+    cacheWatch?.task.cancel()
+    cacheWatch = nil
     current = track
     errorMessage = nil
     hasEnded = false
@@ -314,33 +346,44 @@ public final class PlayerModel {
     PlaybackSource(kind: .original, url: api().streamURL(songID: current?.id ?? 0))
   }
 
+  /// The server's finished transcode when it has one (seekable; pass the
+  /// position as `resumeAt` too), else a live one starting at `position`.
   private func transcodeSource(bitrate: Int, at position: Double) -> PlaybackSource {
-    let start = max(0, position.isFinite ? position : 0)
+    let songID = current?.id ?? 0
+    let finished = cachedTranscodes.contains(TranscodeKey(songID: songID, bitrate: bitrate))
+    let start = finished ? 0 : max(0, position.isFinite ? position : 0)
     let transcode = Transcode(bitrate: bitrate, format: .aac, start: start)
     return PlaybackSource(
       kind: .transcode(bitrate: bitrate),
-      url: api().streamURL(songID: current?.id ?? 0, transcode: transcode),
+      url: api().streamURL(songID: songID, transcode: transcode),
       offset: start,
-      mimeType: "audio/aac")
+      mimeType: "audio/aac",
+      isLive: !finished)
   }
 
-  /// Loads a source. Originals seek to `resumeAt` once ready; transcodes start
-  /// there already (their offset).
+  /// Loads a source. Seekable sources seek to `resumeAt` once ready; live
+  /// transcodes start there already (their offset).
   private func load(_ source: PlaybackSource, autoplay: Bool, resumeAt: Double = 0) {
     cancelSeekRestart()
     wantsToPlay = autoplay
     activeSource = source
-    switch source.kind {
-    case .original:
-      attempts.original = true
-      pendingSeek = resumeAt > 0 ? resumeAt : nil
-      elapsed = max(0, resumeAt)
-    case .transcode:
+    if source.isTranscode {
       attempts.transcode = true
+    } else {
+      attempts.original = true
+    }
+    if source.isLive {
       pendingSeek = nil
       elapsed = source.offset
+    } else {
+      pendingSeek = resumeAt > 0 ? resumeAt : nil
+      elapsed = max(0, resumeAt)
     }
     engine.load(source, autoplay: autoplay)
+    if source.isLive, case .transcode(let bitrate) = source.kind {
+      // Nothing reads the whole song when the stream starts at an offset.
+      watchTranscode(bitrate: bitrate, startIt: source.offset > 0)
+    }
   }
 
   // MARK: - Engine events
@@ -373,6 +416,7 @@ public final class PlayerModel {
       errorMessage = nil
       clearBuffering()
       publishNowPlaying()
+      if let source = activeSource, source.isTranscode, !source.isLive { prefetchNext() }
     case .paused:
       stopWaiting()
       // Only a pause after playback started is the user's (lock screen,
@@ -380,11 +424,13 @@ public final class PlayerModel {
       guard isPlaying else { return }
       wantsToPlay = false
       isPlaying = false
+      adoptFinishedTranscode()
       publishNowPlaying()
     case .waiting:
       isWaiting = true
       showBuffering()
       armEndWatchdog()
+      adoptFinishedTranscode()
     case .time(let time):
       // The old stream keeps reporting its position until a pending restart loads.
       guard let source = activeSource, time.isFinite, pendingSeek == nil, seekTask == nil else { return }
@@ -410,7 +456,7 @@ public final class PlayerModel {
     case .original:
       load(originalSource(), autoplay: wasPlaying, resumeAt: position)
     case .transcode(let bitrate):
-      load(transcodeSource(bitrate: bitrate, at: position), autoplay: wasPlaying)
+      load(transcodeSource(bitrate: bitrate, at: position), autoplay: wasPlaying, resumeAt: position)
     }
     publishNowPlaying()
   }
@@ -431,6 +477,10 @@ public final class PlayerModel {
 
   private func handleFailure() {
     guard let failed = activeSource else { return }
+    if case .transcode(let bitrate) = failed.kind, !failed.isLive, let song = current {
+      // Evicted on the server, perhaps: the next try goes live again.
+      cachedTranscodes.remove(TranscodeKey(songID: song.id, bitrate: bitrate))
+    }
     if let pending = pendingSwitch {
       // Restore the previous working stream instead of leaving a broken one.
       pendingSwitch = nil
@@ -460,7 +510,7 @@ public final class PlayerModel {
       errorMessage = nil
       clearBuffering()
       stateLine = Self.convertingStateLine
-      load(transcodeSource(bitrate: Self.fallbackBitrate, at: position), autoplay: true)
+      load(transcodeSource(bitrate: Self.fallbackBitrate, at: position), autoplay: true, resumeAt: position)
     default:
       clearBuffering()
       wantsToPlay = false
@@ -473,7 +523,7 @@ public final class PlayerModel {
   // MARK: - Live stream end
 
   private func armEndWatchdog() {
-    guard endWatchdog == nil, let source = activeSource, source.isTranscode, duration > 0,
+    guard endWatchdog == nil, let source = activeSource, source.isLive, duration > 0,
       elapsed >= duration - Self.liveEndTolerance
     else { return }
     let expected = generation
@@ -495,6 +545,102 @@ public final class PlayerModel {
     isWaiting = false
     endWatchdog?.cancel()
     endWatchdog = nil
+  }
+
+  // MARK: - Finished transcodes
+
+  /// Polls the live transcode playing now until the server has finished it,
+  /// then moves playback onto the file when that is inaudible.
+  private func watchTranscode(bitrate: Int, startIt: Bool) {
+    guard let song = current else { return }
+    let key = TranscodeKey(songID: song.id, bitrate: bitrate)
+    if cacheWatch?.key == key { return }
+    cacheWatch?.task.cancel()
+    let task = Task { [weak self] in
+      guard let self else { return }
+      let finished = await self.waitForTranscode(key, startIt: startIt)
+      guard !Task.isCancelled else { return }
+      self.cacheWatch = nil
+      guard finished else { return }
+      self.cachedTranscodes.insert(key)
+      self.adoptFinishedTranscode()
+      self.prefetchNext()
+    }
+    cacheWatch = (key, task)
+  }
+
+  /// Has the server transcode the next song in the queue (at the bitrate
+  /// playing now), so it starts from the finished file.
+  private func prefetchNext() {
+    guard let source = activeSource, case .transcode(let bitrate) = source.kind, let next = neighbor(1) else { return }
+    let key = TranscodeKey(songID: next.id, bitrate: bitrate)
+    guard !cachedTranscodes.contains(key), prefetch?.key != key, cacheWatch?.key != key else { return }
+    prefetch?.task.cancel()
+    let task = Task { [weak self] in
+      guard let self else { return }
+      let finished = await self.waitForTranscode(key, startIt: true)
+      guard !Task.isCancelled else { return }
+      self.prefetch = nil
+      if finished { self.cachedTranscodes.insert(key) }
+    }
+    prefetch = (key, task)
+  }
+
+  /// Polls until the server has finished the whole-song transcode (`true`),
+  /// starting it first with `startIt` (when nothing reads it yet). The polls
+  /// keep a running transcode going.
+  private func waitForTranscode(_ key: TranscodeKey, startIt: Bool) async -> Bool {
+    let transcode = Transcode(bitrate: key.bitrate, format: .aac)
+    var needsStart = startIt
+    var failures = 0
+    for _ in 0..<Self.maxTranscodePolls {
+      guard !Task.isCancelled else { return false }
+      switch try? await api().transcodeState(songID: key.songID, transcode: transcode) {
+      case .cached:
+        return true
+      case .live:
+        if needsStart {
+          needsStart = false
+          if (try? await api().startTranscode(songID: key.songID, transcode: transcode)) == nil {
+            failures += 1
+            needsStart = true
+          }
+        }
+      case .unavailable:
+        return false
+      case .busy, nil:
+        failures += 1
+      }
+      guard failures < Self.maxTranscodePollFailures else { return false }
+      do {
+        try await sleeper(Self.transcodePollInterval)
+      } catch {
+        return false
+      }
+    }
+    return false
+  }
+
+  /// Reloads a live transcode as the server's finished file at the same
+  /// position, when the server has it and nothing would be heard: paused,
+  /// stalled, or not started yet. Never near the end (a live stream's end
+  /// is handled by the end watchdog).
+  private func adoptFinishedTranscode() {
+    guard let source = activeSource, source.isLive, case .transcode(let bitrate) = source.kind,
+      let song = current, cachedTranscodes.contains(TranscodeKey(songID: song.id, bitrate: bitrate)),
+      seekTask == nil, pendingSwitch == nil, !hasEnded, errorMessage == nil,
+      !isPlaying || isWaiting,
+      duration <= 0 || elapsed < duration - Self.liveEndTolerance
+    else { return }
+    let position = elapsed
+    load(transcodeSource(bitrate: bitrate, at: position), autoplay: wantsToPlay, resumeAt: position)
+  }
+
+  private func cancelTranscodeWatches() {
+    cacheWatch?.task.cancel()
+    cacheWatch = nil
+    prefetch?.task.cancel()
+    prefetch = nil
   }
 
   // MARK: - Buffering hint

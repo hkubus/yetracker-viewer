@@ -3,9 +3,10 @@ import YeTrackerKit
 
 /// `PlaybackEngine` over `AVPlayer`.
 ///
-/// The stored file streams with HTTP ranges (seekable). A transcode is an
-/// ADTS AAC live stream without ranges, which AVPlayer plays the way it plays
-/// internet radio; `PlayerModel` seeks those by reloading with `start=`.
+/// The stored file and finished transcodes stream with HTTP ranges
+/// (seekable). A live transcode is an ADTS AAC stream without ranges, which
+/// AVPlayer plays the way it plays internet radio; `PlayerModel` seeks those
+/// by reloading with `start=`.
 @MainActor
 final class AVPlayerEngine: PlaybackEngine {
   var eventHandler: (@MainActor @Sendable (PlaybackEngineEvent) -> Void)?
@@ -46,7 +47,7 @@ final class AVPlayerEngine: PlaybackEngine {
     generation += 1
     let current = generation
     detachItem()
-    isLiveSource = source.isTranscode
+    isLiveSource = source.isLive
     reportedReady = false
     lastStatus = nil
 

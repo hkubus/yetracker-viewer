@@ -463,20 +463,22 @@ impl SearchInput {
     }
 }
 
-/// Whether a request needs a search slot: text searches and pages longer
-/// than [`HEAVY_PAGE`] do; filter-only requests and ordinary pages are cheap.
-fn takes_search_slot(text_search: bool, limit: i64) -> bool {
-    text_search || limit > HEAVY_PAGE
+/// Whether a request needs a search slot: requests that scan the whole
+/// catalog (text searches, and the `playable` filter, which checks every
+/// match on disk) and pages longer than [`HEAVY_PAGE`] do; other filters and
+/// ordinary pages are cheap.
+fn takes_search_slot(scans_catalog: bool, limit: i64) -> bool {
+    scans_catalog || limit > HEAVY_PAGE
 }
 
 /// One of the `SEARCH_CONCURRENCY` slots, when [`takes_search_slot`]. Waits
 /// at most [`SEARCH_SLOT_WAIT`], then answers 503.
 async fn search_slot(
     state: &AppState,
-    text_search: bool,
+    scans_catalog: bool,
     limit: i64,
 ) -> Result<Option<OwnedSemaphorePermit>, ApiError> {
-    if !takes_search_slot(text_search, limit) {
+    if !takes_search_slot(scans_catalog, limit) {
         return Ok(None);
     }
     match tokio::time::timeout(SEARCH_SLOT_WAIT, state.search_slots.clone().acquire_owned()).await {
@@ -678,7 +680,8 @@ async fn search_songs(
     filters.categories = input.with_markers(std::mem::take(&mut filters.categories));
     let search = input.text;
 
-    let permit = search_slot(&state, search.is_some(), limit).await?;
+    let scans_catalog = search.is_some() || filters.playable.is_some();
+    let permit = search_slot(&state, scans_catalog, limit).await?;
     let shared = state.clone();
     let (total, songs) = db::call(&state.pool, move |conn| {
         // Held until the query is done, even if the client goes away.
@@ -1181,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn only_text_searches_and_big_pages_take_a_search_slot() {
+    fn only_catalog_scans_and_big_pages_take_a_search_slot() {
         assert!(takes_search_slot(true, 1));
         assert!(takes_search_slot(true, 50));
         assert!(!takes_search_slot(false, 50));

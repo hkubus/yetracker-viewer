@@ -2,7 +2,7 @@
  * Server-side configuration and the SSR API client. Server-only: it reads `process.env` at runtime, so client
  * scripts must not import it (they read the API URL from the page, see `utils/api-base-url.ts`).
  */
-import { readRuntimeEnv } from '../env.mjs';
+import { isValidHostHeader, readRuntimeEnv } from '../env.mjs';
 import { isLocalNetworkHost } from './utils/local-network';
 
 export const ERA_PAGE_SIZE = 100;
@@ -84,9 +84,6 @@ export function isSecureRequest(request: Request): boolean {
   return new URL(request.url).protocol === 'https:';
 }
 
-/** A plain `host[:port]` (name, IPv4 or bracketed IPv6): no credentials, path or anything else. */
-const HOST_HEADER = /^(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
-
 /**
  * Public origin for absolute URLs (sitemap, robots.txt, Open Graph images): `SITE_URL` when set, else the origin the
  * request came in on — with `TRUST_PROXY`, the scheme and host the proxy reports. Without `SITE_URL` the result comes
@@ -99,7 +96,7 @@ export function requestOrigin(request: Request): string {
   const protocol = forwardedProtocol(request.headers);
   const host = trustProxy ? firstHeaderValue(request.headers.get('x-forwarded-host')) : undefined;
   if (!protocol && !host) return url.origin;
-  const candidate = host && HOST_HEADER.test(host) ? host : url.host;
+  const candidate = host && isValidHostHeader(host) ? host : url.host;
   try {
     return new URL(`${protocol ?? url.protocol.slice(0, -1)}://${candidate}`).origin;
   } catch {

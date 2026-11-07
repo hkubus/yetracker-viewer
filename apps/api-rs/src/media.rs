@@ -34,6 +34,18 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CACHED_PROBES: usize = 1024;
 const MAX_QUEUED_REVERIFICATIONS: usize = 10_000;
 
+/// The ffmpeg demuxers (`-format_whitelist`) allowed to read stored song
+/// media: the audio containers the downloader stores and the API serves
+/// (MP3 and MP2, Ogg, FLAC, WAV/W64, AIFF, CAF, MP4/M4A, raw AAC, Matroska
+/// and WebM, ASF/WMA, Monkey's Audio, WavPack, raw AC-3/DTS/TrueHD, AMR, …).
+/// Downloads are untrusted, and with every demuxer enabled a "song" could be
+/// a playlist or script that makes ffmpeg read other files (HLS, concat,
+/// image sequences). ffmpeg matches each comma-separated name against every
+/// name of a demuxer, so `mov` covers `mov,mp4,m4a,3gp,3g2,mj2` and
+/// `matroska` covers `matroska,webm`.
+pub const AUDIO_DEMUXERS: &str = "mp3,ogg,flac,wav,w64,aiff,caf,mov,aac,loas,matroska,asf,ape,wv,\
+                                  tta,tak,mpc,mpc8,dsf,ac3,eac3,dts,dtshd,truehd,amr,au";
+
 /// An external program the API shells out to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -237,6 +249,7 @@ impl Tools {
 
 async fn tool_works(tool: Tool) -> bool {
     let mut command = Command::new(tool.binary());
+    isolate_env(&mut command);
     command
         .arg(tool.version_flag())
         .stdin(Stdio::null())
@@ -247,6 +260,25 @@ async fn tool_works(tool: Tool) -> bool {
         tokio::time::timeout(TOOL_CHECK_TIMEOUT, command.status()).await,
         Ok(Ok(status)) if status.success()
     )
+}
+
+/// What a media tool keeps of the server's environment (see [`isolate_env`]):
+/// where programs are, the home directory, the locale (UTF-8 file names) and
+/// the temporary directory.
+const TOOL_ENV: [&str; 6] = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"];
+
+/// Starts `command` with a minimal environment ([`TOOL_ENV`]) instead of the
+/// server's: everything loaded from `.env`, proxy settings
+/// (`HTTP(S)_PROXY`/`ALL_PROXY`) and interpreter hooks such as `PYTHONPATH`
+/// stay out of ffmpeg, ffprobe and yt-dlp. Callers add what one tool needs
+/// on top (after this call).
+pub fn isolate_env(command: &mut Command) {
+    command.env_clear();
+    for name in TOOL_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
 }
 
 /// A 16-hex-digit suffix that makes temporary file names unique per attempt.
@@ -404,6 +436,9 @@ pub enum InvalidReason {
     Empty,
     InvalidData,
     NoAudioStream,
+    /// The container is not one of [`AUDIO_DEMUXERS`] (a playlist, an image,
+    /// a video-only format, …).
+    UnsupportedFormat,
 }
 
 impl InvalidReason {
@@ -412,6 +447,7 @@ impl InvalidReason {
             InvalidReason::Empty => "empty file",
             InvalidReason::InvalidData => "invalid data",
             InvalidReason::NoAudioStream => "no audio stream",
+            InvalidReason::UnsupportedFormat => "not an audio container",
         }
     }
 }
@@ -451,12 +487,15 @@ pub enum Verdict {
 
 async fn run_ffprobe(path: &Path) -> Verdict {
     let mut command = Command::new(Tool::Ffprobe.binary());
+    isolate_env(&mut command);
     command
         .args([
             "-v",
             "error",
             "-protocol_whitelist",
             "file",
+            "-format_whitelist",
+            AUDIO_DEMUXERS,
             "-show_entries",
             "format=duration:stream=codec_type",
             "-select_streams",
@@ -509,6 +548,10 @@ pub fn classify_probe(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Verdic
         }
         Some(_) if stderr.contains("Invalid data found when processing input") => {
             Verdict::Invalid(InvalidReason::InvalidData)
+        }
+        // ffprobe recognised the container and it is not an audio one.
+        Some(_) if stderr.contains("Format not on whitelist") => {
+            Verdict::Invalid(InvalidReason::UnsupportedFormat)
         }
         Some(code) => {
             let detail = stderr
@@ -749,6 +792,14 @@ mod tests {
                 b"file:x.mp3: Invalid data found when processing input\n"
             ),
             Verdict::Invalid(InvalidReason::InvalidData)
+        );
+        assert_eq!(
+            classify_probe(
+                Some(1),
+                b"{}",
+                b"[hls @ 0x1] Format not on whitelist 'mp3,ogg'\nfile:x.m3u8: Invalid argument\n"
+            ),
+            Verdict::Invalid(InvalidReason::UnsupportedFormat)
         );
         // Anything else is not a verdict on the file itself.
         assert!(matches!(
@@ -1027,6 +1078,110 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let survivors = processes_mentioning(&needle);
         assert!(survivors.is_empty(), "still running: {survivors:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tools_get_a_minimal_environment() {
+        let mut command = Command::new("sh");
+        isolate_env(&mut command);
+        let output = command.arg("-c").arg("env").output().await.unwrap();
+        assert!(output.status.success());
+        let names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| Some(line.split_once('=')?.0.to_string()))
+            .collect();
+        // sh itself adds PWD, SHLVL and `_`.
+        for name in &names {
+            assert!(
+                TOOL_ENV.contains(&name.as_str()) || ["PWD", "SHLVL", "_"].contains(&name.as_str()),
+                "{name} was passed on"
+            );
+        }
+        if std::env::var_os("PATH").is_some() {
+            assert!(names.iter().any(|name| name == "PATH"));
+        }
+    }
+
+    /// Writes a one-second tone with ffmpeg; `false` when ffmpeg (or its
+    /// `lavfi` input) is not available.
+    async fn write_tone(path: &Path, extra: &[&str]) -> bool {
+        let mut command = Command::new(Tool::Ffmpeg.binary());
+        isolate_env(&mut command);
+        command
+            .args(["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=1")
+            .args(extra)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.status().await.is_ok_and(|status| status.success())
+    }
+
+    #[tokio::test]
+    async fn probes_accept_audio_containers_and_refuse_playlists() {
+        let dir = scratch_dir("demuxers");
+        if !write_tone(&dir.join("tone.m4a"), &["-c:a", "aac"]).await
+            || !tool_works(Tool::Ffprobe).await
+        {
+            eprintln!("skipping: ffmpeg/ffprobe are not available");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        for (name, extra) in [
+            ("tone.mp3", &[][..]),
+            ("tone.ogg", &["-c:a", "libvorbis"][..]),
+            ("tone.flac", &[][..]),
+            ("tone.wav", &[][..]),
+            ("tone.aiff", &[][..]),
+            ("tone.mka", &[][..]),
+            ("tone.aac", &["-c:a", "aac", "-f", "adts"][..]),
+            ("tone.wma", &["-c:a", "wmav2"][..]),
+        ] {
+            // An encoder missing from this ffmpeg build is not the test's
+            // business.
+            if !write_tone(&dir.join(name), extra).await {
+                continue;
+            }
+            let verdict = run_ffprobe(&dir.join(name)).await;
+            assert!(
+                matches!(verdict, Verdict::Valid { .. }),
+                "{name}: {verdict:?}"
+            );
+        }
+        assert!(matches!(
+            run_ffprobe(&dir.join("tone.m4a")).await,
+            Verdict::Valid { duration: Some(_) }
+        ));
+        // The content decides, not the name.
+        std::fs::copy(dir.join("tone.m4a"), dir.join("tone.bin")).unwrap();
+        assert!(matches!(
+            run_ffprobe(&dir.join("tone.bin")).await,
+            Verdict::Valid { .. }
+        ));
+        // Playlists that would make ffmpeg read other files.
+        let target = dir.join("tone.m4a");
+        std::fs::write(
+            dir.join("list.bin"),
+            format!("ffconcat version 1.0\nfile '{}'\n", target.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("list.m3u8"),
+            format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nfile:{}\n#EXT-X-ENDLIST\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+        for name in ["list.bin", "list.m3u8"] {
+            assert_eq!(
+                run_ffprobe(&dir.join(name)).await,
+                Verdict::Invalid(InvalidReason::UnsupportedFormat),
+                "{name}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

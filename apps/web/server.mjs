@@ -1,8 +1,9 @@
 /**
  * Production entry point (`pnpm start`, after `pnpm build`). It validates the environment, then serves the built app
  * (`dist/`) through its own HTTP server: the @astrojs/node handler does the routing and static files; this file adds
- * gzip/brotli compression, long-lived caching of the hashed `/_astro/*` assets, an in-memory cache of finished
- * responses (public pages for a few seconds, compressed assets for good), and a graceful shutdown.
+ * request validation (GET/HEAD only, a plain `Host`, see `invalidRequestReason`), gzip/brotli compression, long-lived
+ * caching of the hashed `/_astro/*` assets, an in-memory cache of finished responses (public pages for a few seconds,
+ * compressed assets for good), and a graceful shutdown.
  *
  * The build bundles every dependency (`dist/server` imports only `node:*` modules), so at runtime it needs only
  * `dist/`, this file and `env.mjs`: no `src/`, no `node_modules` (`package.json` just provides `pnpm start`).
@@ -14,8 +15,10 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
-import { EnvError, readRuntimeEnv, readServerEnv, runtimeEnvWarnings } from './env.mjs';
+import { EnvError, isValidHostHeader, readRuntimeEnv, readServerEnv, runtimeEnvWarnings } from './env.mjs';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
@@ -117,9 +120,43 @@ const publicFiles = new Set(
     .map((entry) => `/${entry.name}`),
 );
 
-function pathnameOf(url = '/') {
-  const end = url.search(/[?#]/);
-  return end === -1 ? url : url.slice(0, end);
+/**
+ * The hashed build assets (`/_astro/…`), the only responses sent as immutable and kept in memory for good. A list of
+ * the files on disk rather than a path prefix: a missing asset, or a path that only resolves elsewhere
+ * (`/_astro/%2e%2e/eras/1`), goes to SSR and must not be cached like a hashed file.
+ */
+const assetsDir = fileURLToPath(new URL('_astro/', clientDir));
+const assetFiles = new Set(
+  fs.existsSync(assetsDir)
+    ? fs
+        .readdirSync(assetsDir, { recursive: true })
+        .filter((name) => fs.statSync(path.join(assetsDir, name)).isFile())
+        .map((name) => pathnameOf(`/_astro/${name.split(path.sep).join('/')}`))
+    : [],
+);
+
+/** The path Astro routes on: it parses `<scheme>://<Host><target>` with the WHATWG URL parser (dot segments, `\`). */
+function pathnameOf(target) {
+  return new URL(`http://localhost${target}`).pathname;
+}
+
+/**
+ * Why Astro must not see this request, as the reason for a 400; `null` when it is fine. Astro builds the request URL
+ * by concatenating the raw `Host` header and the request target, so a `Host` such as `x/eras/1?` or `x#` would change
+ * the route it renders while this file (and any cache in front) keys on the real path. HTTP/1.1 requests without a
+ * `Host` are already rejected by Node; HTTP/1.0 ones may omit it (Astro then uses `localhost`). This server speaks
+ * HTTP/1.x only, so there is no `:authority`.
+ */
+function invalidRequestReason(req) {
+  // Origin-form only (`/path?query`): an absolute-form target (`http://x/eras/1`) would be appended to the host.
+  if (!req.url?.startsWith('/')) return 'Invalid request target';
+  let hostHeaders = 0;
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    if (req.rawHeaders[index].toLowerCase() === 'host') hostHeaders += 1;
+  }
+  if (hostHeaders === 0) return req.httpVersionMajor === 1 && req.httpVersionMinor === 0 ? null : 'Missing Host header';
+  if (hostHeaders > 1) return 'More than one Host header';
+  return isValidHostHeader(req.headers.host ?? '') ? null : 'Invalid Host header';
 }
 
 function appendVary(res, value) {
@@ -254,7 +291,8 @@ function mergeWriteHeadHeaders(res, headers) {
 
 /**
  * Wraps `res` so that, once the status and headers are known, text responses (HTML, CSS, JS, JSON, SVG…) are
- * compressed with the best coding the client accepts. Also sets the caching headers of static files.
+ * compressed with the best coding the client accepts. Also sets the caching headers of static files (`isAsset` and
+ * `isPublicFile` are only true for files that exist in `dist/client/`, which the adapter serves before any route).
  */
 function prepareResponse(req, res, { isAsset, isPublicFile, encoding, cacheKey }) {
   const writeHead = res.writeHead;
@@ -414,6 +452,13 @@ function onRequest(req, res) {
   // Requests that arrive on kept-alive connections while shutting down are served, then the connection closes.
   if (shuttingDown) res.setHeader('Connection', 'close');
   for (const [name, value] of Object.entries(BASELINE_HEADERS)) res.setHeader(name, value);
+  const invalid = invalidRequestReason(req);
+  if (invalid) {
+    res.writeHead(400, { 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(`Bad Request: ${invalid}\n`);
+    req.resume();
+    return;
+  }
   // The site is read-only: nothing but GET and HEAD reaches the app (or its cache policy).
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, {
@@ -426,7 +471,7 @@ function onRequest(req, res) {
     return;
   }
   const pathname = pathnameOf(req.url);
-  const isAsset = pathname.startsWith('/_astro/');
+  const isAsset = assetFiles.has(pathname);
   const isPublicFile = publicFiles.has(pathname);
   const encoding = req.method === 'HEAD' ? null : negotiateEncoding(req.headers['accept-encoding']);
   // Only plain GETs: a range or a HEAD gets a different answer than the one stored.

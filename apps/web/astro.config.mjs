@@ -68,9 +68,11 @@ export default defineConfig({
   // `astro dev`/`astro preview` listen where server.mjs would: WEB_HOST/WEB_PORT, then HOST/PORT, then
   // 127.0.0.1:4321, blank values counting as unset. An invalid port stops every command with a clear message.
   server: readServerEnv(process.env),
-  // Covers are served by the API; nothing goes through Astro's image pipeline, so sharp is not needed.
+  // Covers are served by the API; nothing goes through Astro's image pipeline, so sharp is not needed. Astro cannot
+  // leave out the `/_image` endpoint of an on-demand build: this one renders the 404 page (src/image-endpoint.ts).
   image: {
     service: passthroughImageService(),
+    endpoint: { route: '/_image', entrypoint: './src/image-endpoint.ts' },
   },
   // <ClientRouter /> would otherwise prefetch every link on hover. Links opt in with `data-astro-prefetch` (era cards,
   // previous/next page): the page is fetched on hover or focus, so the click doesn't wait for it.

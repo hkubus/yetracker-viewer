@@ -41,6 +41,12 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         return is_public_ipv4(v4);
     }
     let segments = address.segments();
+    // 6to4 (2002::/16) routes to the IPv4 address in bits 16–47 (RFC 3056).
+    if segments[0] == 0x2002 {
+        let [high, low] = [segments[1], segments[2]];
+        let embedded = Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
+        return is_public_ipv4(embedded);
+    }
     !(address.is_unspecified()
         || address.is_loopback()
         || address.is_multicast()
@@ -49,6 +55,10 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         || (segments[0] & 0xffc0) == 0xfec0 // site-local (deprecated), fec0::/10
         || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
         || (segments[0] == 0x0064 && segments[1] == 0xff9b) // NAT64, embeds IPv4
+        // Teredo, 2001::/32: embeds a server and an (obfuscated) client IPv4
+        // address and is tunnelled through them; no real host is served
+        // from one (RFC 4380, not globally reachable per the IANA registry).
+        || (segments[0] == 0x2001 && segments[1] == 0)
         || segments[..6] == [0; 6]) // IPv4-compatible (deprecated)
 }
 
@@ -106,6 +116,8 @@ mod tests {
             "93.184.215.14",
             "2606:4700::1111",
             "::ffff:8.8.8.8",
+            "2002:0808:0808::1", // 6to4 of 8.8.8.8
+            "2001:4860:4860::8888",
         ] {
             assert!(is_public_ip(ip(public)), "{public}");
         }
@@ -128,6 +140,12 @@ mod tests {
             "::ffff:169.254.169.254",
             "64:ff9b::a9fe:a9fe",
             "::7f00:1",
+            "2002:7f00:0001::1",                    // 6to4 of 127.0.0.1
+            "2002:a9fe:a9fe::",                     // 6to4 of 169.254.169.254
+            "2002:c0a8:0101:1::",                   // 6to4 of 192.168.1.1
+            "2002::1",                              // 6to4 of 0.0.0.0
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo
+            "2001::7f00:1",
         ] {
             assert!(!is_public_ip(ip(internal)), "{internal}");
         }
@@ -147,6 +165,8 @@ mod tests {
             "http://169.254.169.254/latest/meta-data/",
             "http://[::1]/",
             "http://[::ffff:10.0.0.1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2001::1]/",
             "http://localhost/",
             "http://LOCALHOST./",
             "http://api.localhost/",

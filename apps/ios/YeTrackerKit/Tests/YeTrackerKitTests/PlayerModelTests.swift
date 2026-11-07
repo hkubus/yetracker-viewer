@@ -142,6 +142,118 @@ struct PlayerModelTests {
     #expect(engine.calls.last == .seek(0))
   }
 
+  /// The stream route: `HEAD` answers like a finished transcode once `finished`
+  /// returns true (ranges), like a live one before; `GET`s are recorded.
+  func serveTranscodes(song: Int = 1, finished: @escaping @Sendable (Int) -> Bool) {
+    let heads = Counter()
+    http.on("/songs/\(song)/stream") { request in
+      guard request.httpMethod == "HEAD" else { return HTTPResponse(status: 200) }
+      let ranges = finished(heads.next()) ? "bytes" : "none"
+      return HTTPResponse(status: 200, headers: ["Accept-Ranges": ranges])
+    }
+  }
+
+  @Test func aFinishedTranscodeIsAdoptedOncePlaybackPauses() async throws {
+    serveTranscodes { poll in poll >= 2 }
+    let player = makePlayer(sleeper: immediateSleeper)
+    player.play(track(1, duration: 100), queue: [])
+    #expect(engine.lastSource?.isLive == true)
+    engine.emit(.ready(duration: nil))
+    engine.emit(.playing)
+    engine.emit(.time(30))
+    await player.cacheWatch?.task.value
+    #expect(engine.loaded.count == 1, "never switched while audible")
+
+    player.pause()
+    let source = try #require(engine.lastSource)
+    #expect(!source.isLive)
+    #expect(source.url.absoluteString == "http://test.local/songs/1/stream?quality=128&format=aac")
+    #expect(engine.calls.last == .load(source.url, autoplay: false))
+    engine.emit(.ready(duration: nil))
+    #expect(engine.calls.last == .seek(30))
+    #expect(player.elapsed == 30)
+
+    // Now it seeks like a file, without restarting anything.
+    player.seek(to: 60)
+    #expect(engine.calls.last == .seek(60))
+    #expect(engine.loaded.count == 2)
+    engine.emit(.time(61))
+    #expect(player.elapsed == 61)
+  }
+
+  @Test func aStallMovesOntoTheFinishedTranscode() async throws {
+    serveTranscodes { _ in true }
+    let player = makePlayer(sleeper: immediateSleeper)
+    player.play(track(1, duration: 100), queue: [])
+    engine.emit(.playing)
+    engine.emit(.time(20))
+    await player.cacheWatch?.task.value
+    engine.emit(.waiting)
+    let source = try #require(engine.lastSource)
+    #expect(!source.isLive)
+    #expect(engine.calls.last == .load(source.url, autoplay: true))
+  }
+
+  @Test func aSeekAfterTheTranscodeFinishedUsesTheFile() async throws {
+    serveTranscodes { _ in true }
+    let player = makePlayer(sleeper: immediateSleeper)
+    player.play(track(1, duration: 100), queue: [])
+    engine.emit(.playing)
+    await player.cacheWatch?.task.value
+    player.seek(to: 42)
+    await player.seekTask?.value
+    let source = try #require(engine.lastSource)
+    #expect(source.url.absoluteString == "http://test.local/songs/1/stream?quality=128&format=aac")
+    #expect(!source.isLive)
+    engine.emit(.ready(duration: nil))
+    #expect(engine.calls.last == .seek(42))
+  }
+
+  @Test func aLiveStreamFromAnOffsetHasTheWholeSongTranscoded() async {
+    serveTranscodes { poll in poll >= 1 }
+    let player = makePlayer(settings: makeSettings([AppSettings.qualityKey: ""]), sleeper: immediateSleeper)
+    player.play(track(1, duration: 100), queue: [])
+    engine.emit(.ready(duration: 100))
+    engine.emit(.playing)
+    engine.emit(.time(50))
+    player.setQuality(.kbps128)
+    #expect(engine.lastSource?.url.absoluteString == "http://test.local/songs/1/stream?quality=128&format=aac&start=50")
+    await player.cacheWatch?.task.value
+
+    let requests = http.requests(to: "/songs/1/stream")
+    #expect(requests.map { $0.httpMethod ?? "" } == ["HEAD", "GET", "HEAD"])
+    #expect(requests.allSatisfy { $0.query["start"] == nil }, "always the whole song")
+  }
+
+  @Test func theNextSongIsTranscodedInAdvance() async throws {
+    serveTranscodes(song: 1) { _ in true }
+    serveTranscodes(song: 2) { poll in poll >= 1 }
+    let player = makePlayer(sleeper: immediateSleeper)
+    let list = [track(1, duration: 100), track(2, duration: 90)]
+    player.play(list[0], queue: list)
+    engine.emit(.playing)
+    await player.cacheWatch?.task.value
+    await player.prefetch?.task.value
+    #expect(http.requests(to: "/songs/2/stream").map { $0.httpMethod ?? "" } == ["HEAD", "GET", "HEAD"])
+
+    engine.emit(.ended)
+    let source = try #require(engine.lastSource)
+    #expect(player.current == list[1])
+    #expect(!source.isLive, "starts from the finished file")
+    #expect(source.url.absoluteString == "http://test.local/songs/2/stream?quality=128&format=aac")
+  }
+
+  @Test func pollingStopsWhenTheServerKeepsFailing() async {
+    let player = makePlayer(sleeper: immediateSleeper)
+    player.play(track(1, duration: 100), queue: [])
+    engine.emit(.playing)
+    await player.cacheWatch?.task.value
+    #expect(player.cacheWatch == nil)
+    #expect(http.requests(to: "/songs/1/stream").count == PlayerModel.maxTranscodePollFailures)
+    player.pause()
+    #expect(engine.lastSource?.isLive == true, "still on the live stream")
+  }
+
   @Test func endedAdvancesThroughTheQueueThenStops() {
     let player = makePlayer()
     let list = [track(1, duration: 10), track(2, duration: 20)]

@@ -83,9 +83,16 @@ function coverVersion(value: unknown): string | null {
   return COVER_VERSION.test(text) ? text : null;
 }
 
-/** Same-site path (`/eras/…`), or null: stored/derived links must never point elsewhere. */
+const SITE_PATH_BASE = 'https://site.invalid';
+
+/**
+ * Same-site path (`/eras/…`), or null: stored/derived links must never point elsewhere. Browsers read `\` as `/` and
+ * drop tabs and line breaks, so `/\evil.example` and `/\t/evil.example` mean `//evil.example`: no backslashes or
+ * whitespace, and the path must resolve on the page's own origin.
+ */
 function sitePath(value: unknown): string | null {
-  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') ? value : null;
+  if (typeof value !== 'string' || !value.startsWith('/') || /[\\\s]/.test(value)) return null;
+  return URL.canParse(value, SITE_PATH_BASE) && new URL(value, SITE_PATH_BASE).origin === SITE_PATH_BASE ? value : null;
 }
 
 /**

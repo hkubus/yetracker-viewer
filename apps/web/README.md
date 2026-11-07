@@ -193,10 +193,17 @@ this machine), then serves `dist/` through the adapter's request handler with it
 
 - brotli/gzip for text responses (HTML, CSS, JS, JSON, SVG…) of at least 1 KiB or of unknown length, with
   `Vary: Accept-Encoding`; strong ETags become weak when the body is compressed;
-- `Cache-Control: public, max-age=31536000, immutable` for `/_astro/*`, one day for the files from `public/`; pages
+- `Cache-Control: public, max-age=31536000, immutable` for the files in `dist/client/_astro/` (a request for any other
+  `/_astro/` path is rendered like any page), one day for the files from `public/`; pages
   get `public, max-age=60, s-maxage=300, stale-while-revalidate=600` from the middleware (errors, redirects and pages
   rendered without their data: `no-store`);
 - only `GET` and `HEAD` (anything else: 405); keep-alive 65 s;
+- `400` (plain text, `no-store`) for a request Astro could route by the wrong path: a `Host` that is not a plain
+  `host[:port]` (`x#`, `x/eras/1?`, empty, port 99999), several `Host` headers, or a target that is not a path
+  (`GET http://…`). Astro builds the request URL from the raw `Host` and the target. HTTP/1.0 may omit `Host`;
+  `astro dev` gets the same protection from Vite's host check (403 for hosts other than localhost/IPs);
+- `/_image` (Astro's image endpoint, registered by every on-demand build) is replaced by `src/image-endpoint.ts`,
+  which renders the 404 page;
 - SIGTERM/SIGINT: stop accepting, let open requests finish for up to 10 s, then exit (a second signal exits at once);
   an uncaught exception drains the same way and exits 1.
 

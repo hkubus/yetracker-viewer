@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-use crate::media::{Tool, file_input, lower_priority};
+use crate::media::{Tool, file_input, isolate_env, lower_priority};
 
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -28,6 +28,7 @@ pub fn to_hex([red, green, blue]: [u8; 3]) -> String {
 
 async fn sample_rgb(path: &Path) -> Result<[u8; 3], String> {
     let mut command = Command::new(Tool::Ffmpeg.binary());
+    isolate_env(&mut command);
     lower_priority(&mut command);
     command
         .args([

@@ -12,7 +12,15 @@
 //! `MAX_CONCURRENT_TRANSCODES` slots until ffmpeg exits) while the request
 //! streams the growing file; other requests for the same transcode join it.
 //! A transcode nobody reads any more is stopped after [`ABANDONED_GRACE`].
-//! Transcodes that start at an offset (`?start=`) are never cached.
+//! Transcodes that start at an offset (`?start=`) are never cached, and only
+//! half of the slots may run them.
+//!
+//! A live transcode has no length and no ranges, so a player that loses its
+//! connection mid-song and reconnects with `Range: bytes=<n>-` is answered
+//! from the finished output (see [`resume`]): sending the stream from its
+//! first byte again would make it play the song again from the start. The
+//! output is bit-exact, so a transcode run again later (its cache entry
+//! evicted, or a seek's, which is never kept) has the same bytes.
 
 use std::collections::HashMap;
 use std::io;
@@ -42,11 +50,12 @@ use crate::db;
 use crate::downloader::{covers_dir, primary_cover};
 use crate::error::ApiError;
 use crate::media::{
-    Tool, Uncertain, Verdict, file_input, lower_priority, stderr_tail, unique_suffix,
+    AUDIO_DEMUXERS, Tool, Uncertain, Verdict, file_input, isolate_env, lower_priority, stderr_tail,
+    unique_suffix,
 };
 use crate::playable::stored_song_path;
 use crate::request::Query;
-use crate::serve::{self, ByteRange, FileHeaders, Growth, set_header};
+use crate::serve::{self, ByteRange, FileHeaders, Growth, RangeRequest, set_header};
 use crate::state::{AppState, SharedState};
 
 /// Stored files and cached transcodes: cacheable, but revalidated (the
@@ -64,6 +73,9 @@ const JSON_CONTENT_TYPE: &str = "application/json";
 const SLOT_WAIT: Duration = Duration::from_secs(15);
 /// How long a request waits for a new transcode's first bytes.
 const FIRST_OUTPUT_WAIT: Duration = Duration::from_secs(30);
+/// How long a request resuming a live transcode mid-way waits for it to
+/// finish (transcodes run at full speed: seconds for a song).
+const RESUME_WAIT: Duration = Duration::from_secs(45);
 const TRANSCODE_TIME_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long a transcode keeps running once its last reader is gone (a player
 /// that reconnects or seeks within it joins the running job instead). A
@@ -736,6 +748,17 @@ fn unknown_length_empty_body() -> Body {
     Body::from_stream(futures_util::stream::empty::<Result<Bytes, io::Error>>())
 }
 
+/// The `Range` header of a GET that resumes a live transcode past its first
+/// byte: a player that lost its connection mid-song asks for the rest. A
+/// range from byte 0 (players probing with `bytes=0-1`) gets the live stream.
+fn resume_range(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::RANGE)?.to_str().ok()?;
+    match serve::parse_range(value, u64::MAX) {
+        RangeRequest::Partial(range) if range.start > 0 => Some(value),
+        _ => None,
+    }
+}
+
 /// Serves a cached transcode like a stored file, if there is one.
 async fn serve_cached_transcode(
     headers: &HeaderMap,
@@ -841,6 +864,7 @@ fn adts_frame_at<R: io::Read + io::Seek>(
 /// [`adts_frame_at`]), with the headers of a live transcode, without ffmpeg
 /// or a transcode slot. `None` sends the request down the ffmpeg path.
 async fn serve_cached_seek(
+    headers: &HeaderMap,
     dir: &FsPath,
     source: &StoredFile,
     wanted: &TranscodeRequest,
@@ -890,17 +914,59 @@ async fn serve_cached_seek(
             unknown_length_empty_body(),
         )));
     }
-    let range = ByteRange {
-        start: offset,
-        end: len - 1,
+    // These bytes are the same every time, so a reconnecting player's range
+    // (counted from the frame at the start) can be served exactly.
+    let window = len - offset;
+    let (range, partial) =
+        match resume_range(headers).map(|value| serve::parse_range(value, window)) {
+            Some(RangeRequest::Partial(range)) => (range, true),
+            Some(RangeRequest::Unsatisfiable) => return Ok(Some(range_not_satisfiable(window))),
+            _ => (
+                ByteRange {
+                    start: 0,
+                    end: window - 1,
+                },
+                false,
+            ),
+        };
+    let in_file = ByteRange {
+        start: offset + range.start,
+        end: offset + range.end,
     };
-    let body = serve::file_body(tokio::fs::File::from_std(file), Some(range))
+    let body = serve::file_body(tokio::fs::File::from_std(file), Some(in_file))
         .await
         .map_err(|error| {
             error!(path = %path.display(), %error, "could not stream a cached transcode");
             ApiError::internal("Could not stream song")
         })?;
-    Ok(Some(live_response(AAC_CONTENT_TYPE, body)))
+    let mut response = live_response(AAC_CONTENT_TYPE, body);
+    if partial {
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+        set_header(&mut response, header::ACCEPT_RANGES, "bytes");
+        set_header(
+            &mut response,
+            header::CONTENT_RANGE,
+            &format!("bytes {}-{}/{window}", range.start, range.end),
+        );
+        set_header(
+            &mut response,
+            header::CONTENT_LENGTH,
+            &range.length().to_string(),
+        );
+    }
+    Ok(Some(response))
+}
+
+/// 416 for a resume past the end of an output of `size` bytes.
+fn range_not_satisfiable(size: u64) -> Response {
+    let mut response =
+        serve::plain_response(StatusCode::RANGE_NOT_SATISFIABLE, "Range Not Satisfiable");
+    set_header(
+        &mut response,
+        header::CONTENT_RANGE,
+        &format!("bytes */{size}"),
+    );
+    response
 }
 
 /// Records a cache hit for the LRU eviction (the access time; the mtime is
@@ -933,7 +999,7 @@ async fn transcode(
     {
         return Ok(response);
     }
-    if let Some(response) = serve_cached_seek(&dir, &source, &wanted, head_only).await? {
+    if let Some(response) = serve_cached_seek(headers, &dir, &source, &wanted, head_only).await? {
         return Ok(response);
     }
     if !state.tools.available(Tool::Ffmpeg) {
@@ -944,20 +1010,32 @@ async fn transcode(
     }
     if head_only {
         // Never start a transcode for HEAD; report what a GET would get.
-        return if state.transcode_slots.available_permits() == 0 {
+        let full = state.transcode_slots.available_permits() == 0
+            || (!wanted.cacheable() && state.seek_slots.available_permits() == 0);
+        return if full {
             Err(busy(BUSY_RETRY_SECS))
         } else {
             Ok(live_response(content_type, unknown_length_empty_body()))
         };
     }
 
-    let permit = match tokio::time::timeout(
-        SLOT_WAIT,
+    let deadline = tokio::time::Instant::now() + SLOT_WAIT;
+    // A seek's slot first: seeks wait among themselves, not holding a slot.
+    let seek_permit = if wanted.cacheable() {
+        None
+    } else {
+        match tokio::time::timeout_at(deadline, state.seek_slots.clone().acquire_owned()).await {
+            Ok(Ok(permit)) => Some(permit),
+            _ => return Err(busy(BUSY_RETRY_SECS)),
+        }
+    };
+    let permit = match tokio::time::timeout_at(
+        deadline,
         state.transcode_slots.clone().acquire_owned(),
     )
     .await
     {
-        Ok(Ok(permit)) => permit,
+        Ok(Ok(permit)) => (permit, seek_permit),
         _ => return Err(busy(BUSY_RETRY_SECS)),
     };
     // The transcode may have been finished or started while this request
@@ -1030,6 +1108,9 @@ async fn attach(
         job.note_poll();
         return Ok(live_response(job.content_type, unknown_length_empty_body()));
     }
+    if resume_range(headers).is_some() {
+        return resume(headers, job).await;
+    }
     let mut progress = job.progress.clone();
     let started = tokio::time::timeout(FIRST_OUTPUT_WAIT, async {
         progress
@@ -1080,6 +1161,70 @@ async fn attach(
     }
 }
 
+/// Answers a request that resumes a live transcode mid-way (see
+/// [`resume_range`]) from the finished output, with its range. The live
+/// stream cannot start at a byte offset, so the request waits (as a reader,
+/// which keeps the job going) at most [`RESUME_WAIT`] for the job to finish.
+async fn resume(headers: &HeaderMap, job: Arc<TranscodeJob>) -> Result<Response, ApiError> {
+    let mut progress = job.progress.clone();
+    let finished = tokio::time::timeout(RESUME_WAIT, async {
+        progress
+            .wait_for(|progress| !matches!(progress.growth, Growth::Writing { .. }))
+            .await
+            .map(|snapshot| *snapshot)
+    })
+    .await;
+    let snapshot = match finished {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(_)) => *job.progress.borrow(),
+        Err(_) => return Err(busy(BUSY_RETRY_SECS)),
+    };
+    match snapshot.growth {
+        Growth::Complete { size } if size > 0 => {}
+        Growth::Failed if snapshot.tool_missing => return Err(unavailable()),
+        _ => return Err(ApiError::internal("Could not transcode song")),
+    }
+    if snapshot.cached {
+        return match serve_cached_transcode(headers, false, &job.cache_path, job.content_type)
+            .await?
+        {
+            Some(response) => Ok(response),
+            // Evicted at once (a tiny cache budget): the next attempt redoes it.
+            None => Err(busy(1)),
+        };
+    }
+    // Not kept (a seek, or too big for the cache): the output lives as long
+    // as the job, and the open file outlives its deletion.
+    let file = tokio::fs::File::open(&job.temp_path)
+        .await
+        .map_err(|error| {
+            error!(path = %job.temp_path.display(), %error, "could not open a finished transcode");
+            ApiError::internal("Could not transcode song")
+        })?;
+    let metadata = file.metadata().await.map_err(|error| {
+        error!(path = %job.temp_path.display(), %error, "could not stat a finished transcode");
+        ApiError::internal("Could not transcode song")
+    })?;
+    let file_headers = FileHeaders {
+        content_type: job.content_type,
+        cache_control: "no-store",
+        content_disposition: None,
+    };
+    serve::file_response(
+        headers,
+        false,
+        file,
+        metadata.len(),
+        metadata.modified().ok(),
+        &file_headers,
+    )
+    .await
+    .map_err(|error| {
+        error!(path = %job.temp_path.display(), %error, "could not stream a finished transcode");
+        ApiError::internal("Could not stream song")
+    })
+}
+
 struct TranscodeInput {
     source: PathBuf,
     wanted: TranscodeRequest,
@@ -1102,7 +1247,8 @@ async fn run_transcode(
     job: Arc<TranscodeJob>,
     progress: watch::Sender<JobProgress>,
     input: TranscodeInput,
-    permit: OwnedSemaphorePermit,
+    // The slot, and the seek slot of a transcode from an offset.
+    permit: (OwnedSemaphorePermit, Option<OwnedSemaphorePermit>),
 ) {
     let TranscodeInput {
         source,
@@ -1180,6 +1326,7 @@ async fn fail_transcode(
 }
 
 /// ffmpeg arguments for `wanted` from `input` (a `file:` URL) to stdout.
+/// Only audio containers are read (see [`AUDIO_DEMUXERS`]).
 fn ffmpeg_args(input: &std::ffi::OsStr, wanted: &TranscodeRequest) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = [
         "-nostdin",
@@ -1188,6 +1335,8 @@ fn ffmpeg_args(input: &std::ffi::OsStr, wanted: &TranscodeRequest) -> Vec<std::f
         "error",
         "-protocol_whitelist",
         "file",
+        "-format_whitelist",
+        AUDIO_DEMUXERS,
     ]
     .map(Into::into)
     .into();
@@ -1202,6 +1351,9 @@ fn ffmpeg_args(input: &std::ffi::OsStr, wanted: &TranscodeRequest) -> Vec<std::f
     args.extend(wanted.format.ffmpeg_args().map(Into::into));
     args.push("-b:a".into());
     args.push(format!("{}k", wanted.kbps).into());
+    // The same bytes on every run (the Ogg muxer picks a random stream serial
+    // otherwise), so a resumed range always continues the stream it began.
+    args.extend(["-fflags", "+bitexact", "-flags:a", "+bitexact"].map(Into::into));
     args.push("pipe:1".into());
     args
 }
@@ -1215,6 +1367,7 @@ async fn run_ffmpeg(
 ) -> Result<u64, TranscodeError> {
     let grace = wanted.abandoned_grace();
     let mut command = Command::new(Tool::Ffmpeg.binary());
+    isolate_env(&mut command);
     lower_priority(&mut command);
     command
         .args(ffmpeg_args(file_input(source).as_ref(), wanted))
@@ -1722,11 +1875,17 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let prefix = "-nostdin -hide_banner -loglevel error -protocol_whitelist file";
+        let prefix = format!(
+            "-nostdin -hide_banner -loglevel error -protocol_whitelist file \
+             -format_whitelist {AUDIO_DEMUXERS}"
+        );
         let map = "-map 0:a:0 -vn -sn -dn -map_metadata 0";
+        let exact = "-fflags +bitexact -flags:a +bitexact";
         assert_eq!(
             render(&opus(128)),
-            format!("{prefix} -i file:/songs/a.flac {map} -c:a libopus -f ogg -b:a 128k pipe:1")
+            format!(
+                "{prefix} -i file:/songs/a.flac {map} -c:a libopus -f ogg -b:a 128k {exact} pipe:1"
+            )
         );
         let seeked = TranscodeRequest {
             kbps: 64,
@@ -1736,7 +1895,8 @@ mod tests {
         assert_eq!(
             render(&seeked),
             format!(
-                "{prefix} -ss 93.050 -i file:/songs/a.flac {map} -c:a aac -f adts -b:a 64k pipe:1"
+                "{prefix} -ss 93.050 -i file:/songs/a.flac {map} -c:a aac -f adts -b:a 64k {exact} \
+                 pipe:1"
             )
         );
     }
@@ -1817,6 +1977,115 @@ mod tests {
         );
         assert_eq!(file_status, "downloaded");
         drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A player that reconnects mid-song with `Range: bytes=<n>-` gets the
+    /// rest of the same bytes, never the stream from the start again: from
+    /// a running or cached whole-song transcode, from a seek's transcode run
+    /// again, and from the cached AAC a seek is cut from. Needs ffmpeg.
+    #[tokio::test]
+    async fn reconnecting_players_resume_transcodes_where_they_left_off() {
+        use tower::ServiceExt;
+
+        let root = std::env::temp_dir().join(format!("yt-media-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let songs = root.join("songs");
+        std::fs::create_dir_all(&songs).unwrap();
+        let config = Config::for_tests(&root, &songs);
+        let pool = crate::db::create_pool(&root.join("db.sqlite3")).unwrap();
+        crate::db::run_migrations(&pool, &config).unwrap();
+        let state = crate::state::AppState::new(config, pool.clone());
+        state.tools.detect(&[Tool::Ffmpeg]).await;
+        if !state.tools.available(Tool::Ffmpeg) {
+            eprintln!("skipped: ffmpeg is not installed");
+            return;
+        }
+        let made = std::process::Command::new(Tool::Ffmpeg.binary())
+            .args(["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=120")
+            .args(["-c:a", "libmp3lame", "-b:a", "128k"])
+            .arg(songs.join("song.mp3"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let url = "https://pillows.su/f/0123456789abcdef";
+        pool.get()
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO eras (id, key, name, is_main, position) VALUES (1, 'era', 'Era', 1, 1);
+                 INSERT INTO songs (id, era, catalog_id, name, title, url, position, era_position,
+                   search_text, category_rank)
+                   VALUES (1, 1, 'unreleased', 'Song', 'Song', '{url}', 1, 1, 'song era', 4);
+                 INSERT INTO files (url, filename, status, downloaded)
+                   VALUES ('{url}', 'song.mp3', 'downloaded', 1);"
+            ))
+            .unwrap();
+        let app = crate::http::app(state.clone());
+        let get = |uri: &str, range: Option<&str>| {
+            let mut request = axum::http::Request::builder().uri(uri);
+            if let Some(range) = range {
+                request = request.header(header::RANGE, range);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let app = app.clone();
+            async move { app.oneshot(request).await.unwrap() }
+        };
+        let read = |response: Response| async move {
+            let headers = response.headers().clone();
+            let body = axum::body::to_bytes(response.into_body(), 64 << 20)
+                .await
+                .unwrap();
+            (headers, body)
+        };
+
+        // The first request starts the transcode; the second, a reconnect
+        // while it is (most likely) still running, waits for it to finish.
+        let whole = "/songs/1/stream?quality=128";
+        let live = get(whole, Some("bytes=0-1")).await;
+        assert_eq!(
+            live.status(),
+            StatusCode::OK,
+            "a probe gets the live stream"
+        );
+        assert_eq!(live.headers()[header::ACCEPT_RANGES], "none");
+        let resumed = get(whole, Some("bytes=1000-")).await;
+        assert_eq!(resumed.status(), StatusCode::PARTIAL_CONTENT);
+        let (_, all) = read(live).await;
+        let (headers, rest) = read(resumed).await;
+        assert!(all.len() > 1000);
+        assert_eq!(rest, all[1000..], "the same bytes, from the requested one");
+        assert_eq!(
+            headers[header::CONTENT_RANGE],
+            format!("bytes 1000-{}/{}", all.len() - 1, all.len()).as_str()
+        );
+
+        // A seek is never cached: a reconnect runs it again, to the same bytes.
+        let seek = "/songs/1/stream?quality=128&start=30";
+        let (_, seek_all) = read(get(seek, None).await).await;
+        let resumed = get(seek, Some("bytes=500-")).await;
+        assert_eq!(resumed.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resumed.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(read(resumed).await.1, seek_all[500..]);
+
+        // An AAC seek is cut from the cached whole-song AAC.
+        let (_, _) = read(get("/songs/1/stream?quality=128&format=aac", None).await).await;
+        let aac_seek = "/songs/1/stream?quality=128&format=aac&start=30";
+        let (headers, cut) = read(get(aac_seek, None).await).await;
+        assert_eq!(headers[header::ACCEPT_RANGES], "none");
+        let resumed = get(aac_seek, Some("bytes=100-")).await;
+        assert_eq!(resumed.status(), StatusCode::PARTIAL_CONTENT);
+        let (headers, rest) = read(resumed).await;
+        assert_eq!(rest, cut[100..]);
+        assert_eq!(
+            headers[header::CONTENT_RANGE],
+            format!("bytes 100-{}/{}", cut.len() - 1, cut.len()).as_str()
+        );
+        let past = format!("bytes={}-", cut.len());
+        assert_eq!(
+            get(aac_seek, Some(&past)).await.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

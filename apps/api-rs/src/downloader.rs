@@ -51,8 +51,8 @@ use crate::dominant_color;
 use crate::error::ApiError;
 use crate::importer;
 use crate::media::{
-    Quarantine, RunError, Tool, ToolSet, Uncertain, Verdict, file_input, lower_priority,
-    quarantine, quarantined_at, run_grouped, stderr_tail, unique_suffix,
+    Quarantine, RunError, Tool, ToolSet, Uncertain, Verdict, file_input, isolate_env,
+    lower_priority, quarantine, quarantined_at, run_grouped, stderr_tail, unique_suffix,
 };
 use crate::playable::is_safe_filename;
 use crate::public_net::{PublicResolver, is_public_url};
@@ -131,6 +131,10 @@ const AUDIO_EXTENSIONS: [&str; 20] = [
     "mp3", "m4a", "aac", "flac", "wav", "ogg", "oga", "opus", "aif", "aiff", "aifc", "wma", "weba",
     "alac", "mka", "ape", "wv", "ac3", "amr", "mp2",
 ];
+
+/// What a download is stored as when the host suggests no extension, or one
+/// outside [`is_storable_extension`].
+const UNKNOWN_EXTENSION: &str = "bin";
 
 static IMGUR_FILE_PATH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/f/([A-Za-z0-9]+)/?$").expect("valid imgur path regex"));
@@ -414,6 +418,28 @@ fn extension_for_content_type(content_type: &str) -> Option<&'static str> {
         "audio/x-ms-wma" => "wma",
         _ => return None,
     })
+}
+
+/// Whether a download may keep `extension` (normalized): the audio
+/// extensions plus the containers the API serves as audio too (`mp4`,
+/// `webm`). Anything else a host suggests (`.m3u8`, `.ffconcat`, `.html`, …)
+/// is stored as [`UNKNOWN_EXTENSION`]: ffprobe and ffmpeg recognise the
+/// container by its content (within `media::AUDIO_DEMUXERS`), and only the
+/// raw stream's content type goes by the name (`application/octet-stream`
+/// for an unknown one).
+fn is_storable_extension(extension: &str) -> bool {
+    AUDIO_EXTENSIONS.contains(&extension) || matches!(extension, "mp4" | "webm")
+}
+
+/// The extension a pillows.su download is stored under: the one of the
+/// `Content-Disposition` file name, else the content type's.
+fn pillows_extension(disposition: Option<&str>, content_type: &str) -> String {
+    disposition
+        .and_then(disposition_filename)
+        .and_then(|name| extension_of_name(&name))
+        .filter(|extension| is_storable_extension(extension))
+        .or_else(|| extension_for_content_type(content_type).map(str::to_string))
+        .unwrap_or_else(|| UNKNOWN_EXTENSION.to_string())
 }
 
 fn content_type_of(response: &reqwest::Response) -> String {
@@ -1057,7 +1083,9 @@ async fn reuse_existing_files(state: &AppState, index: &MediaIndex) -> Result<us
 /// Runs the song download phase: re-links media already on disk, then
 /// downloads due rows (at most `MAX_DOWNLOADS_PER_CYCLE`, `DOWNLOAD_CONCURRENCY`
 /// at a time, within `DOWNLOAD_TIME_BUDGET_MINUTES`) while the disk keeps
-/// `MIN_FREE_DISK_MB` free.
+/// `MIN_FREE_DISK_MB` free. A download only starts when that much would be
+/// left even if every running one grew to `MAX_DOWNLOAD_MB`; otherwise it
+/// waits for them (with none running, the phase stops starting downloads).
 pub async fn download_songs(
     state: &AppState,
     shutdown: &CancellationToken,
@@ -1113,7 +1141,7 @@ pub async fn download_songs(
 
     let limit = state.config.max_downloads_per_cycle.unwrap_or(usize::MAX);
     let concurrency = state.config.download_concurrency.max(1);
-    let mut queue = candidates.into_iter();
+    let mut queue = candidates.into_iter().peekable();
     let mut running = FuturesUnordered::new();
     let mut breaker = HostBreaker::default();
     let mut low_disk = false;
@@ -1126,29 +1154,48 @@ pub async fn download_songs(
             && !out_of_time
             && !shutdown.is_cancelled()
         {
-            let Some(candidate) = queue.next() else {
+            let Some(next) = queue.peek() else {
                 break;
             };
-            if breaker.is_paused(candidate.service()) {
+            if breaker.is_paused(next.service()) {
+                queue.next();
                 summary.deferred += 1;
                 continue;
             }
             if state.config.min_free_disk_bytes > 0 {
                 match free_space(&songs_dir).await {
-                    Ok(free) if free < state.config.min_free_disk_bytes => {
-                        warn!(
-                            free_mb = free / (1024 * 1024),
-                            required_mb = state.config.min_free_disk_bytes / (1024 * 1024),
-                            "not enough free disk space; postponing further downloads"
-                        );
-                        low_disk = true;
-                        summary.deferred += 1;
+                    Ok(free)
+                        if !keeps_reserve(
+                            free,
+                            running.len(),
+                            state.config.max_download_bytes,
+                            state.config.min_free_disk_bytes,
+                        ) =>
+                    {
+                        if running.is_empty() {
+                            warn!(
+                                free_mb = free / (1024 * 1024),
+                                required_mb = state.config.min_free_disk_bytes / (1024 * 1024),
+                                "not enough free disk space; postponing further downloads"
+                            );
+                            low_disk = true;
+                            queue.next();
+                            summary.deferred += 1;
+                        } else {
+                            // Try again once a running download is done.
+                            debug!(
+                                free_mb = free / (1024 * 1024),
+                                running = running.len(),
+                                "little free disk space; waiting for running downloads"
+                            );
+                        }
                         break;
                     }
                     Ok(_) => {}
                     Err(error) => warn!(%error, "could not check free disk space"),
                 }
             }
+            let candidate = queue.next().expect("peeked");
             summary.attempted += 1;
             running.push(async move {
                 let outcome = download_candidate(state, &candidate).await;
@@ -1282,6 +1329,13 @@ pub async fn download_songs(
         "song downloads finished"
     );
     Ok(summary)
+}
+
+/// Whether `free` bytes still cover the `reserve` once each of `running`
+/// downloads has grown to the size limit (`max_bytes`), which they may.
+fn keeps_reserve(free: u64, running: usize, max_bytes: u64, reserve: u64) -> bool {
+    let in_flight = (running as u64).saturating_mul(max_bytes);
+    free.saturating_sub(in_flight) >= reserve
 }
 
 /// Sleeps until `deadline`, or forever without one.
@@ -1420,14 +1474,11 @@ async fn download_pillows(state: &AppState, url: &Url) -> Result<String, Downloa
             "pillows.su answered with {content_type} instead of a file"
         )));
     }
-    let extension = response
+    let disposition = response
         .headers()
         .get(reqwest::header::CONTENT_DISPOSITION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(disposition_filename)
-        .and_then(|name| extension_of_name(&name))
-        .or_else(|| extension_for_content_type(&content_type).map(str::to_string))
-        .unwrap_or_else(|| "bin".to_string());
+        .and_then(|value| value.to_str().ok());
+    let extension = pillows_extension(disposition, &content_type);
     store_download(state, response, format!("{hash}.{extension}")).await
 }
 
@@ -1503,8 +1554,10 @@ async fn download_imgur(
         (Some(extension), _) => extension.to_string(),
         (None, true) => extension_for_content_type(&content_type)
             .map(str::to_string)
-            .or(url_extension.clone())
-            .unwrap_or_else(|| "bin".to_string()),
+            .or(url_extension
+                .clone()
+                .filter(|extension| is_storable_extension(extension)))
+            .unwrap_or_else(|| UNKNOWN_EXTENSION.to_string()),
         (None, false) => {
             return Err(DownloadError::Terminal(format!(
                 "not an audio file ({}{})",
@@ -1523,6 +1576,38 @@ async fn download_imgur(
     store_download(state, response, format!("{}.{extension}", sha256_hex(link))).await
 }
 
+/// The yt-dlp extractors (`--use-extractors`) for the links [`source_of`]
+/// hands to yt-dlp: videos, shorts, live replays and YouTube Music tracks
+/// (`youtube`), links that also name a playlist (`watch?v=…&list=…` and
+/// `youtu.be/…?list=…`, which `youtube:tab` and `youtubeytbe` hand back to
+/// `youtube` under `--no-playlist`), clips, Instagram posts, reels and
+/// stories, and tweets with the cards, broadcasts and Spaces their audio can
+/// come through. yt-dlp matches each name as a case-insensitive regex
+/// against whole extractor names and refuses a hand-off to any extractor not
+/// listed, so none that fetches whatever host it is given (the generic one,
+/// Mediasite, PeerTube, …) runs, even for a URL a tweet links to.
+const YT_DLP_EXTRACTORS: &str = "youtube,youtube:tab,youtubeytbe,youtube:clip,\
+                                 instagram,instagram:story,\
+                                 twitter,twitter:card,twitter:broadcast,twitter:spaces";
+
+/// yt-dlp's environment: [`isolate_env`], `HOME` moved to the (empty)
+/// `home` of the job, so the server account's yt-dlp configuration
+/// directories, plugins and caches are out of reach, and no plugins at all
+/// (`YTDLP_NO_PLUGINS`, yt-dlp 2024.10.22 and later; `--no-plugin-dirs`
+/// would make releases before 2025.03.31 refuse to run). `PYTHONUSERBASE`
+/// keeps pointing at the real home's `.local`, so that a yt-dlp installed
+/// with `pip install --user` still finds its package.
+fn yt_dlp_env(command: &mut Command, home: &Path) {
+    isolate_env(command);
+    let user_base = std::env::var_os("PYTHONUSERBASE").or_else(|| {
+        std::env::var_os("HOME").map(|home| Path::new(&home).join(".local").into_os_string())
+    });
+    if let Some(user_base) = user_base {
+        command.env("PYTHONUSERBASE", user_base);
+    }
+    command.env("HOME", home).env("YTDLP_NO_PLUGINS", "1");
+}
+
 async fn download_with_yt_dlp(
     state: &AppState,
     url: &Url,
@@ -1534,16 +1619,25 @@ async fn download_with_yt_dlp(
         .await
         .map_err(|error| DownloadError::io("creating the yt-dlp work directory", error))?;
 
+    // An empty home: no user configuration, plugins or caches of the
+    // server's account (see `yt_dlp_env`).
+    let home = work.path.join("home");
+    tokio::fs::create_dir(&home)
+        .await
+        .map_err(|error| DownloadError::io("creating the yt-dlp work directory", error))?;
     let mut command = Command::new(Tool::YtDlp.binary());
+    yt_dlp_env(&mut command, &home);
     lower_priority(&mut command);
     command
         .args([
             "--no-playlist",
             "--ignore-config",
-            // Only the site extractors: the generic one would fetch whatever
-            // URL a post links to.
             "--use-extractors",
-            "default,-generic",
+            YT_DLP_EXTRACTORS,
+            // Direct connections only, like the HTTP clients: no proxy from
+            // anywhere yt-dlp would otherwise look for one.
+            "--proxy",
+            "",
             // A live stream never ends and dodges --max-filesize.
             "--match-filter",
             "!is_live",
@@ -1914,6 +2008,7 @@ async fn encode_cover(
     let jpeg = Scratch::file(covers.join(format!("{era_id}.{suffix}.jpg.tmp")));
 
     let mut command = Command::new(Tool::Ffmpeg.binary());
+    isolate_env(&mut command);
     lower_priority(&mut command);
     command
         .args([
@@ -2765,6 +2860,39 @@ mod tests {
     }
 
     #[test]
+    fn only_audio_extensions_are_stored() {
+        let pillows = |disposition: &str, content_type: &str| {
+            pillows_extension(
+                Some(disposition).filter(|value| !value.is_empty()),
+                content_type,
+            )
+        };
+        assert_eq!(pillows("attachment; filename=\"a.FLAC\"", ""), "flac");
+        assert_eq!(pillows("attachment; filename=\"a.mp4\"", ""), "mp4");
+        // A suggested extension outside the list falls back to the content
+        // type, then to the neutral one.
+        assert_eq!(
+            pillows("attachment; filename=\"a.m3u8\"", "audio/mpeg"),
+            "mp3"
+        );
+        assert_eq!(pillows("attachment; filename=\"a.ffconcat\"", ""), "bin");
+        assert_eq!(
+            pillows("attachment; filename=\"a.html\"", "text/html"),
+            "bin"
+        );
+        assert_eq!(pillows("", "audio/ogg"), "ogg");
+        assert_eq!(pillows("", "application/octet-stream"), "bin");
+        for extension in AUDIO_EXTENSIONS {
+            assert!(is_storable_extension(extension), "{extension}");
+        }
+        for extension in [
+            "m3u8", "m3u", "ffconcat", "concat", "txt", "jpg", "sdp", "mpd",
+        ] {
+            assert!(!is_storable_extension(extension), "{extension}");
+        }
+    }
+
+    #[test]
     fn finds_the_media_link_on_imgur_pages() {
         let audio_page = r#"<link rel="preload" as="image" href="https://i.imgur.gg/other-image.png"/>
             <h2>KW - Interlude Ref (4.11.13).mp3</h2>
@@ -2830,6 +2958,17 @@ mod tests {
         assert_eq!(sniff_image(b"RIFF\x00\x00\x00\x00WEBPVP8 "), Some("webp"));
         assert_eq!(sniff_image(b"GIF89a..."), Some("gif"));
         assert_eq!(sniff_image(b"<html>"), None);
+    }
+
+    #[test]
+    fn running_downloads_count_against_the_disk_reserve() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert!(keeps_reserve(GIB, 0, GIB, GIB));
+        assert!(!keeps_reserve(GIB - 1, 0, GIB, GIB));
+        // Two downloads of up to 1 GiB each could still eat 2 GiB.
+        assert!(!keeps_reserve(2 * GIB, 2, GIB, GIB));
+        assert!(keeps_reserve(3 * GIB, 2, GIB, GIB));
+        assert!(!keeps_reserve(u64::MAX, usize::MAX, u64::MAX, 1));
     }
 
     #[test]

@@ -67,7 +67,7 @@ public struct PlaybackSource: Hashable, Sendable {
   public enum Kind: Hashable, Sendable {
     /// The stored file: range-capable, natively seekable.
     case original
-    /// A live AAC transcode: not seekable, restarted at an offset instead.
+    /// An AAC transcode: live (see `isLive`) or the server's finished copy.
     case transcode(bitrate: Int)
   }
 
@@ -77,12 +77,17 @@ public struct PlaybackSource: Hashable, Sendable {
   public let offset: Double
   /// MIME type hint for URLs without a file extension.
   public let mimeType: String?
+  /// A transcode streamed while the server produces it: no length, no
+  /// ranges, so not seekable (restarted at an offset instead). Otherwise the
+  /// source is a plain file the server serves with ranges, seekable natively.
+  public let isLive: Bool
 
-  public init(kind: Kind, url: URL, offset: Double = 0, mimeType: String? = nil) {
+  public init(kind: Kind, url: URL, offset: Double = 0, mimeType: String? = nil, isLive: Bool = false) {
     self.kind = kind
     self.url = url
     self.offset = max(0, offset)
     self.mimeType = mimeType
+    self.isLive = isLive
   }
 
   public var isTranscode: Bool {

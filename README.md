@@ -152,8 +152,8 @@ Put both processes behind one TLS-terminating reverse proxy and keep them bound 
   proxy, and never compress audio.
 - For `/songs/*/stream` and `/songs/*/download`: pass `Range`, `If-Range`, `If-None-Match` and `If-Modified-Since`
   through, turn response buffering off (live transcodes stream while ffmpeg writes them) and allow long reads.
-- Add per-IP request, connection and bandwidth limits at the proxy, especially for the media routes. The API itself
-  only caps total connections (`MAX_CONNECTIONS`: at the cap a new connection replaces the longest-idle one or one
+- Add per-IP request and connection limits at the proxy (the example below has them), especially for the media
+  routes: every new transcode costs a CPU core for seconds. The API itself only caps total connections (`MAX_CONNECTIONS`: at the cap a new connection replaces the longest-idle one or one
   whose client has read nothing for 10 s; a client that reads nothing for 60 s is dropped), concurrent transcodes and
   concurrent searches.
 - Caching: HTML is `public, max-age=60, s-maxage=300, stale-while-revalidate=600` (errors, redirects and pages that
@@ -166,24 +166,46 @@ Put both processes behind one TLS-terminating reverse proxy and keep them bound 
 Example (nginx):
 
 ```nginx
+# Per client IP (in the http block). Players make a few range requests per song and poll a transcode with HEAD
+# about once a second while it runs; size the media limits for a household behind one address.
+limit_conn_zone $binary_remote_addr zone=yt_conn:10m;
+limit_req_zone $binary_remote_addr zone=yt_req:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=yt_media:10m rate=4r/s;
+
 server {
     listen 443 ssl;
     server_name example.com;
     # ssl_certificate / ssl_certificate_key ...
 
-    location /api/ {
-        proxy_pass http://127.0.0.1:3000/;   # the trailing slash strips /api
+    limit_conn yt_conn 32;
+    limit_conn_status 429;
+    limit_req_status 429;
+
+    # Streams, downloads and transcodes.
+    location ~ ^/api/songs/[0-9]+/(stream|download)$ {
+        limit_req zone=yt_media burst=20 nodelay;
+        rewrite ^/api(/.*)$ $1 break;   # the API has no prefix
+        proxy_pass http://127.0.0.1:3000;
         proxy_buffering off;
         proxy_read_timeout 15m;
     }
 
+    location /api/ {
+        limit_req zone=yt_req burst=40 nodelay;
+        proxy_pass http://127.0.0.1:3000/;   # the trailing slash strips /api
+    }
+
     location / {
+        limit_req zone=yt_req burst=40 nodelay;
         proxy_pass http://127.0.0.1:4321;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;   # read with TRUST_PROXY=true
     }
 }
 ```
+
+The web server answers `400` to a `Host` that isn't a plain `host[:port]`, so a cache in front can't be made to store
+one page under another URL; still keep the host in any proxy cache key.
 
 ### systemd
 
@@ -202,6 +224,33 @@ ExecStart=/opt/yetracker-viewer/apps/api-rs/target/release/yetracker-api
 Restart=on-failure
 # SIGTERM: stops accepting, drains connections (≤ 10 s) and the background sync.
 TimeoutStopSec=30
+# Hardening: ffmpeg, ffprobe and yt-dlp process files and pages from the internet as this user. Only STORAGE_DIR
+# (and SONGS_DIR, if elsewhere) is writable.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/yetracker
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0027
+# Downloads go to the internet only: no private, link-local (cloud metadata) or CGNAT addresses. Loopback stays
+# allowed for the proxy's connections (and a local resolver such as 127.0.0.53); allow your DNS resolver here if it
+# is on the LAN.
+IPAddressAllow=localhost
+IPAddressDeny=link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7
 
 [Install]
 WantedBy=multi-user.target
@@ -221,6 +270,22 @@ EnvironmentFile=/opt/yetracker-viewer/.env
 ExecStart=/usr/bin/node server.mjs
 Restart=on-failure
 TimeoutStopSec=20
+# Hardening: it writes nothing and talks to the proxy and the API on loopback only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=localhost
+IPAddressDeny=any
 
 [Install]
 WantedBy=multi-user.target

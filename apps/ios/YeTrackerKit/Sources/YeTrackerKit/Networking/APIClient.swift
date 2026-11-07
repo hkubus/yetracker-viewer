@@ -102,6 +102,38 @@ public struct APIClient: Sendable {
     return value
   }
 
+  /// What the server has for a whole-song transcode (`transcode.start` is
+  /// ignored), from a `HEAD`, which never starts one but keeps a running one
+  /// going. Throws for other answers (e.g. `404` for a song without a file).
+  public func transcodeState(songID: Int, transcode: Transcode) async throws -> TranscodeState {
+    var whole = transcode
+    whole.start = 0
+    let response = try await stream(songID: songID, transcode: whole, method: "HEAD")
+    switch response.status {
+    case 200..<300:
+      // A finished transcode is served like a stored file; a live one has no ranges.
+      return response.header("accept-ranges")?.lowercased() == "bytes" ? .cached : .live
+    case 503 where response.header("retry-after") != nil:
+      return .busy
+    case 503:
+      return .unavailable
+    default:
+      throw APIError.http(status: response.status, message: Self.errorMessage(from: response))
+    }
+  }
+
+  /// Makes the server start a whole-song transcode without downloading it
+  /// (`GET`, cancelled once the response head is in). The server stops it
+  /// unless someone reads or polls it (`transcodeState`) within 10 s.
+  public func startTranscode(songID: Int, transcode: Transcode) async throws {
+    var whole = transcode
+    whole.start = 0
+    let response = try await stream(songID: songID, transcode: whole, method: "GET", headersOnly: true)
+    guard (200..<300).contains(response.status) else {
+      throw APIError.http(status: response.status, message: Self.errorMessage(from: response))
+    }
+  }
+
   /// `GET /health`; succeeds only for `{"status":"ok"}`.
   public func health() async throws {
     struct Body: Decodable {
@@ -141,6 +173,21 @@ public struct APIClient: Sendable {
       throw APIError.http(status: response.status, message: Self.errorMessage(from: response))
     }
     return response
+  }
+
+  private func stream(
+    songID: Int, transcode: Transcode, method: String, headersOnly: Bool = false
+  ) async throws -> HTTPResponse {
+    var request = URLRequest(
+      url: streamURL(songID: songID, transcode: transcode), cachePolicy: .reloadIgnoringLocalCacheData,
+      timeoutInterval: Self.requestTimeout)
+    request.httpMethod = method
+    request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+    do {
+      return headersOnly ? try await http.sendHeadersOnly(request) : try await http.send(request)
+    } catch {
+      throw APIError(transportError: error)
+    }
   }
 
   private func decode<T: Decodable>(_ type: T.Type, from response: HTTPResponse) throws -> T {
@@ -254,6 +301,18 @@ public struct SongSearchRequest: Hashable, Sendable {
 
   /// Stable identity of the request, used to drop out-of-date responses.
   public var signature: String { QueryEncoding.encode(queryItems) }
+}
+
+/// What the server has for a whole-song transcode.
+public enum TranscodeState: Hashable, Sendable {
+  /// Finished: served as a plain file with ranges.
+  case cached
+  /// Running, or not started yet: a request gets the live stream.
+  case live
+  /// Every transcode slot is taken; ask again later.
+  case busy
+  /// The server cannot transcode (no ffmpeg).
+  case unavailable
 }
 
 /// Live transcode parameters for `/songs/:id/stream`.

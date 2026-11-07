@@ -44,6 +44,36 @@ struct APIClientTests {
     #expect(Transcode(bitrate: 250).queryItems.first! == ("quality", "256"))
   }
 
+  @Test func transcodeStateComesFromAHead() async throws {
+    let api = client()
+    let transcode = Transcode(bitrate: 128, start: 30)
+    let answer = { (response: HTTPResponse) async throws -> TranscodeState in
+      self.http.on("/songs/5/stream", respond: response)
+      return try await api.transcodeState(songID: 5, transcode: transcode)
+    }
+    #expect(try await answer(HTTPResponse(status: 200, headers: ["Accept-Ranges": "bytes"])) == .cached)
+    #expect(try await answer(HTTPResponse(status: 200, headers: ["Accept-Ranges": "none"])) == .live)
+    #expect(try await answer(.text("Transcoding capacity reached", status: 503).adding("Retry-After", "5")) == .busy)
+    #expect(try await answer(.text("Transcoding unavailable", status: 503)) == .unavailable)
+    await #expect(throws: APIError.self) { try await answer(.text("Song file not found", status: 404)) }
+
+    let request = try #require(http.requests.last)
+    #expect(request.httpMethod == "HEAD")
+    #expect(request.url?.absoluteString == "http://test.local/songs/5/stream?quality=128&format=aac")
+  }
+
+  @Test func startingATranscodeAsksForTheWholeSong() async throws {
+    http.on("/songs/5/stream", respond: HTTPResponse(status: 200, headers: ["Accept-Ranges": "none"]))
+    try await client().startTranscode(songID: 5, transcode: Transcode(bitrate: 64, start: 12))
+    let request = try #require(http.requests.last)
+    #expect(request.httpMethod == "GET")
+    #expect(request.url?.absoluteString == "http://test.local/songs/5/stream?quality=64&format=aac")
+    http.on("/songs/5/stream", respond: .text("Transcoding capacity reached", status: 503))
+    await #expect(throws: APIError.self) {
+      try await self.client().startTranscode(songID: 5, transcode: Transcode(bitrate: 64))
+    }
+  }
+
   @Test func startSecondsNeverUseExponents() {
     #expect(Transcode.formatSeconds(0.25) == "0.25")
     #expect(Transcode.formatSeconds(1e-7) == "0")

@@ -24,6 +24,17 @@ public protocol HTTPClient: Sendable {
   /// Performs the request. Throws `APIError` for transport failures; any HTTP
   /// status (including 4xx/5xx) is returned, not thrown.
   func send(_ request: URLRequest) async throws -> HTTPResponse
+
+  /// Like `send`, but done once the response head is in: the body is not
+  /// read (the request is cancelled), and the returned body is empty or
+  /// partial.
+  func sendHeadersOnly(_ request: URLRequest) async throws -> HTTPResponse
+}
+
+extension HTTPClient {
+  public func sendHeadersOnly(_ request: URLRequest) async throws -> HTTPResponse {
+    try await send(request)
+  }
 }
 
 /// `URLSession`-backed transport.
@@ -69,6 +80,23 @@ public struct URLSessionHTTPClient: HTTPClient {
     }
     return HTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: data)
   }
+
+  #if !canImport(FoundationNetworking)
+    public func sendHeadersOnly(_ request: URLRequest) async throws -> HTTPResponse {
+      let bytes: URLSession.AsyncBytes
+      let response: URLResponse
+      do {
+        (bytes, response) = try await session.bytes(for: request)
+      } catch {
+        throw APIError(transportError: error)
+      }
+      bytes.task.cancel()
+      guard let http = response as? HTTPURLResponse else {
+        throw APIError.transport("The server sent a response that is not HTTP.")
+      }
+      return HTTPResponse(status: http.statusCode, headers: Self.headers(of: http))
+    }
+  #endif
 
   private static func headers(of response: HTTPURLResponse) -> [String: String] {
     var headers: [String: String] = [:]

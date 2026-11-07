@@ -192,6 +192,28 @@ describe('sanitizeTrack', () => {
       pageHref: null,
     });
   });
+
+  test('keeps only same-origin page links', () => {
+    const pageHrefOf = (pageHref: unknown) => sanitizeTrack({ id: 3, pageHref })?.pageHref;
+    assert.equal(pageHrefOf('/eras/31?q=a%20b&page=2#song-1'), '/eras/31?q=a%20b&page=2#song-1');
+    for (const pageHref of [
+      '//evil.example/x',
+      '/\\evil.example',
+      '/\\/evil.example',
+      '\\\\evil.example',
+      '/\t/evil.example',
+      '/\n/evil.example',
+      '/\r/evil.example',
+      ' //evil.example',
+      'https://evil.example/',
+      'javascript:alert(1)',
+      'eras/31',
+      '',
+      42,
+    ]) {
+      assert.equal(pageHrefOf(pageHref), null, JSON.stringify(pageHref));
+    }
+  });
 });
 
 describe('eraHref', () => {

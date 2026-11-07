@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
@@ -40,6 +40,7 @@ use crate::catalogs::{PRIMARY_CATALOG, PRIMARY_CATALOG_ID, catalog_sheet_url, ca
 use crate::db::{self, meta_keys};
 use crate::downloader::error_chain;
 use crate::error::ApiError;
+use crate::public_net::{PublicResolver, is_public_url};
 use crate::search_text::{self, SearchFields};
 use crate::state::SharedState;
 use crate::text;
@@ -50,6 +51,7 @@ use crate::text;
 const PARSER_VERSION: u32 = 2;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const FETCH_MAX_REDIRECTS: usize = 5;
 const FETCH_ATTEMPTS: u32 = 3;
 const MAX_SHEET_BYTES: usize = 50 * 1024 * 1024;
 const FETCH_USER_AGENT: &str = "yetracker-viewer/1.0 (+https://yetracker.net)";
@@ -1927,14 +1929,33 @@ async fn fetch_once(client: &reqwest::Client, url: &str) -> Result<String, Fetch
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
+/// The client for the sheet, which is only ever fetched from the public
+/// internet: like the media client (`downloader::HttpClients`) it resolves
+/// hosts to public addresses only, re-checks every redirect and ignores
+/// `HTTP(S)_PROXY`/`ALL_PROXY` (a proxy would resolve the host names itself).
+fn sheet_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(FETCH_CONNECT_TIMEOUT)
+        .timeout(FETCH_TIMEOUT)
+        .dns_resolver(Arc::new(PublicResolver))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= FETCH_MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if is_public_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                let host = attempt.url().host_str().unwrap_or_default().to_string();
+                attempt.error(format!("redirect to a non-public address ({host})"))
+            }
+        }))
+        .build()
+}
+
 /// GETs the sheet: 30 s per attempt, three attempts with backoff, retrying
 /// only network errors and 5xx responses.
 async fn fetch_sheet(url: &str) -> Result<String, ApiError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(FETCH_CONNECT_TIMEOUT)
-        .timeout(FETCH_TIMEOUT)
-        .build()
-        .map_err(ApiError::unexpected)?;
+    let client = sheet_client().map_err(ApiError::unexpected)?;
     let mut delay = Duration::from_millis(500);
     let mut attempt = 1;
     loop {
@@ -3317,6 +3338,42 @@ mod tests {
             message.to_lowercase().contains("connection refused"),
             "{message}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_sheet_is_only_fetched_from_public_addresses() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let client = sheet_client().unwrap();
+        // A name that resolves to loopback only.
+        let Err(FetchError::Retryable(message)) =
+            fetch_once(&client, "http://localhost:1/sheet").await
+        else {
+            panic!("localhost must not be reached");
+        };
+        assert!(message.contains("public address"), "{message}");
+        // A redirect to loopback (the test server itself is reached by its
+        // address, which no resolver sees).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/internal\r\n\
+                      Content-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let Err(FetchError::Fatal(message)) =
+            fetch_once(&client, &format!("http://127.0.0.1:{port}/sheet")).await
+        else {
+            panic!("a redirect to a non-public address is not followed");
+        };
+        assert!(message.contains("non-public"), "{message}");
+        server.await.unwrap();
     }
 
     /// The v1 schema and a v1-style import of the fixture: collapsed names,

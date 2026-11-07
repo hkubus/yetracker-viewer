@@ -98,7 +98,7 @@ never answers `406`.
 | Response that moves no bytes | closed after 10 min |
 | Client that reads nothing of its response (its socket stays full) | connection closed after 60 s, which also frees the file it streams |
 | Open connections | `MAX_CONNECTIONS` (default `min(1024, (open-file limit − 128) / 3)`, at least 1: a streamed file holds two descriptors, and 128 stay for the process; the API raises its soft limit to the hard limit at startup). At the limit a new connection replaces the one idle the longest (no request in flight) or one whose client has read nothing for 10 s or more (that one goes before connections opened less than a second ago); it is closed on accept only when every connection is busy. Replacements and refusals are logged at most every 10 s, with counts |
-| Concurrent searches | `SEARCH_CONCURRENCY` (default 4) slots, taken by text searches (a `q` with [tokens](#folding-and-tokens), on `/songs` and `/eras/:id/songs`) and by `/songs` or `/eras/:id/songs` pages with `limit` > 100; such a request waits ≤ 10 s for a slot, else `503 Too many searches right now, try again` + `Retry-After: 2`. Filter-only requests and pages ≤ 100 never wait |
+| Concurrent searches | `SEARCH_CONCURRENCY` (default 4) slots, taken by text searches (a `q` with [tokens](#folding-and-tokens), on `/songs` and `/eras/:id/songs`), by `/songs` searches with a `playable` filter (it checks every match on disk) and by `/songs` or `/eras/:id/songs` pages with `limit` > 100; such a request waits ≤ 10 s for a slot, else `503 Too many searches right now, try again` + `Retry-After: 2`. Filter-only requests and pages ≤ 100 never wait |
 | Concurrent transcodes | `MAX_CONCURRENT_TRANSCODES` (default: number of CPUs, at least 2) |
 | Graceful shutdown | stops accepting on SIGINT/SIGTERM, drains open connections for ≤ 10 s |
 
@@ -355,6 +355,9 @@ Smoke test: `200 {"hello":"world"}`.
 | `songs` | number | Songs in the catalog (= `X-Total-Count` of plain `/songs`). |
 | `playableSongs` | number | Songs whose file is on disk (= `total` of `/songs?playable=true`). |
 
+The import fields and the counts are read from the database at most every 5 s (shared by all requests); which files
+are on disk is checked on every request, so `playableSongs` drops at once when a media request finds a file missing.
+
 ### `GET /eras`
 
 Main eras in catalog order (`ORDER BY position`): `Era[]`. No parameters.
@@ -485,7 +488,9 @@ The stored audio file, or with `?quality=<kbps>` an Ogg Opus (or AAC) transcode 
   decimals, `0`–`86400` (`0`, absent or blank = the beginning), else `400 Invalid start`. A client that cannot seek a
   live transcode restarts it with `start`. Such transcodes are never cached (every seek would be its own entry), but
   with `format=aac` a cached whole-song AAC transcode serves them: its bytes from the ADTS frame holding `start`, with
-  the live headers below and without ffmpeg (no transcode slot, so never `503` for capacity).
+  the live headers below and without ffmpeg (no transcode slot, so never `503` for capacity). A `Range: bytes=N-…`
+  with N > 0 on such a response counts within those bytes: `206` with `Content-Range: bytes N-…/<length from the
+  frame>`, or `416`.
 - `format` and `start` are checked right after `quality`, also before the song is looked up.
 - Original: `Content-Type` by file extension — `mp3` `audio/mpeg`, `opus` `audio/ogg; codecs=opus`, `ogg`/`oga`
   `audio/ogg`, `flac` `audio/flac`, `wav` `audio/wav`, `aif`/`aiff`/`aifc` `audio/aiff`, `m4a`/`mp4`/`alac` `audio/mp4`,
@@ -494,7 +499,8 @@ The stored audio file, or with `?quality=<kbps>` an Ogg Opus (or AAC) transcode 
   kept):
   - **Cached** (`<STORAGE_DIR>/transcodes/`): served exactly like a stored file (ranges, ETag, `304`,
     `public, no-cache`, `Content-Length`).
-  - **Not cached**: the request waits up to 15 s for a transcode slot (`MAX_CONCURRENT_TRANSCODES`), else `503
+  - **Not cached**: the request waits up to 15 s for a transcode slot (`MAX_CONCURRENT_TRANSCODES`; a transcode with
+    a `start` also needs one of half of them, rounded up, so seeks never hold every slot), else `503
     Transcoding capacity reached; try again shortly` + `Retry-After: 5`. ffmpeg then writes at full speed to a temp
     file while the response streams it as it grows: `200`, no `Content-Length`, `Accept-Ranges: none`,
     `Cache-Control: no-store`. Concurrent requests for the same transcode share it; once no request has been reading it for 10 s
@@ -504,12 +510,21 @@ The stored audio file, or with `?quality=<kbps>` an Ogg Opus (or AAC) transcode 
     `TRANSCODE_CACHE_MAX_MB=0`, the transcode is larger than that budget, or it has a `start`), which is trimmed to
     its budget, least recently used first. The cache key covers the source file's name, size and mtime plus the
     bitrate, format and start, so a replaced file never gets a stale transcode.
+  - **Resuming**: a `GET` with `Range: bytes=N-…`, N > 0, is a player that lost a live transcode mid-way. It never
+    gets the live stream (from its first byte, which a player would play again from the start): it waits (as a
+    reader) up to 45 s for the transcode to finish — starting it when none runs — and gets the range of the finished
+    output like a stored file (`206`, `416`; `Cache-Control: no-store` for an output that is not cached), else `503`
+    + `Retry-After: 5`. A range from byte 0 (players probing with `bytes=0-1`) gets the live stream. The output is
+    bit-exact (`-fflags +bitexact`), so a transcode run again (an evicted cache entry, a `start` transcode) has the
+    same bytes.
   - No ffmpeg → `503 Transcoding unavailable` (no `Retry-After`). ffmpeg failing before its first output, or no
     output within 30 s → `500 Could not transcode song`. A failure after the headers aborts the body.
   - `HEAD` never starts ffmpeg: cached → the file headers (with `Content-Length`); otherwise the live headers (no
     `Content-Length`) when a slot is free or the transcode is already running, `503` + `Retry-After: 5` when no slot
     is free, `503 Transcoding unavailable` without ffmpeg. The web player polls `HEAD` until `Content-Length` appears
-    to know when a transcode is cached (seekable).
+    to know when a transcode is cached (seekable); the iOS app does the same (`Accept-Ranges: bytes`), then plays the
+    cached file instead of the live stream.
+  - Only audio containers are read (ffmpeg's `-format_whitelist`, `AUDIO_DEMUXERS` in `src/media.rs`).
 
 Errors: `400 Invalid song id | Invalid quality for file | Invalid format | Invalid start`, `404 Song not found | Song file not found`, `500 Could not
 read song file | Could not stream song | Could not transcode song`, `503` as above.

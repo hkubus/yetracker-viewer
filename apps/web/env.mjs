@@ -225,6 +225,22 @@ export function readRuntimeEnv(env, { production }) {
   return { publicApiBaseUrl, internalApiBaseUrl, siteUrl, trustProxy: trustProxy === true };
 }
 
+/** A hostname (letters, digits, `-`, `_`), an IPv4 address or a bracketed IPv6 address, then an optional port. */
+const HOST_AND_PORT = /^(?:[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+
+/**
+ * Whether a `Host` or `X-Forwarded-Host` value is a plain `host[:port]`: no credentials, path, query, fragment or
+ * anything else, and a host and port that make a valid URL (`[1:2]` or port 99999 do not). Astro builds the request
+ * URL by concatenating the `Host` header and the request target, so anything else would let the header change the
+ * path Astro routes on (`Host: x/eras/1?`), or make it fall back to `http://localhost/` (the home page).
+ * `server.mjs` answers such requests with a 400; `src/config.ts` ignores such forwarded hosts.
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function isValidHostHeader(value) {
+  return HOST_AND_PORT.test(value) && URL.canParse(`http://${value}/`);
+}
+
 const LOOPBACK_HOSTNAME = /^(?:localhost|.+\.localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\])$/i;
 
 /**

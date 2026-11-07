@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   EnvError,
+  isValidHostHeader,
   parseAbsoluteBaseUrl,
   parseBoolean,
   parsePort,
@@ -55,6 +56,35 @@ describe('parsers', () => {
   test('parseSiteUrl wants an origin', () => {
     assert.equal(parseSiteUrl('https://example.com/'), 'https://example.com');
     assert.equal(parseSiteUrl('https://example.com/site'), undefined);
+  });
+});
+
+describe('isValidHostHeader', () => {
+  test('accepts a plain host[:port]', () => {
+    for (const value of ['example.com', 'EXAMPLE.com.', 'web_app:4321', '127.0.0.1', '[::1]:80', 'localhost:65535']) {
+      assert.equal(isValidHostHeader(value), true, value);
+    }
+  });
+
+  test('rejects anything that would change the URL Astro routes on', () => {
+    for (const value of [
+      '',
+      'x#',
+      'x?',
+      'x/eras/1?',
+      'x\\y',
+      'user@x',
+      'x y',
+      'x:',
+      'x:99999',
+      'x:4321:1',
+      '[1:2]',
+      '::1',
+      '1.2.3.4.5',
+      '999.1.1.1',
+    ]) {
+      assert.equal(isValidHostHeader(value), false, value);
+    }
   });
 });
 
