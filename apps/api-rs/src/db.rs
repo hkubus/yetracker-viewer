@@ -598,3 +598,439 @@ where
     .await
     .map_err(ApiError::unexpected)?
 }
+
+/// Lock contention (the plan's Phase 4 `busy_timeout` test): every pooled
+/// connection runs in WAL mode with `busy_timeout = 5000`, so
+/// - readers never wait for a writer: requests keep answering while another
+///   connection (an import's transaction, a download's bookkeeping, another
+///   process) holds the write lock, and never see `database is locked`;
+/// - a writer that finds the lock taken waits for it (SQLite's busy handler
+///   retries) instead of failing, and gives up after 5 s with an error that
+///   clients only see as a generic 500.
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use rusqlite::Connection;
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::error::ErrorDetail;
+    use crate::media::Tool;
+    use crate::state::AppState;
+
+    const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+    const SONGS: i64 = 20;
+
+    /// A scratch `STORAGE_DIR` (never `storage/`), removed when dropped.
+    struct Scratch {
+        root: PathBuf,
+        config: Config,
+        pool: Pool,
+    }
+
+    impl Scratch {
+        /// A migrated database with one era, [`SONGS`] songs and a stored
+        /// file for song 1.
+        fn new(name: &str) -> Scratch {
+            let root = std::env::temp_dir().join(format!("yt-db-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let songs = root.join("songs");
+            std::fs::create_dir_all(&songs).unwrap();
+            let config = Config::for_tests(&root, &songs);
+            let pool = create_pool(&root.join("db.sqlite3")).unwrap();
+            run_migrations(&pool, &config).unwrap();
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO eras (id, key, name, is_main, position) VALUES (1, 'era', 'Era', 1, 1)",
+                [],
+            )
+            .unwrap();
+            for id in 1..=SONGS {
+                let url = format!("https://pillows.su/f/{id:032x}");
+                conn.execute(
+                    "INSERT INTO songs (id, era, catalog_id, name, title, url, position, \
+                       era_position, search_text, song_search_text, category_rank) \
+                     VALUES (?1, 1, 'unreleased', ?2, ?2, ?3, ?1, ?1, ?4, ?4, 4)",
+                    params![id, format!("Song {id}"), url, format!("song {id}")],
+                )
+                .unwrap();
+                conn.execute("INSERT INTO files (url) VALUES (?1)", [&url])
+                    .unwrap();
+            }
+            conn.execute(
+                "UPDATE files SET filename = 'song.mp3', status = 'downloaded', downloaded = 1 \
+                 WHERE url = ?1",
+                [format!("https://pillows.su/f/{:032x}", 1)],
+            )
+            .unwrap();
+            drop(conn);
+            std::fs::write(songs.join("song.mp3"), vec![0x55; 4096]).unwrap();
+            Scratch { root, config, pool }
+        }
+
+        fn db_path(&self) -> PathBuf {
+            self.root.join("db.sqlite3")
+        }
+
+        /// Another connection to the same file, outside the pool: the
+        /// importer's transaction, a download's bookkeeping or a second
+        /// process, as far as SQLite's locks are concerned.
+        fn other_writer(&self) -> Connection {
+            Connection::open(self.db_path()).unwrap()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Takes the write lock and leaves an uncommitted change. `EXCLUSIVE`
+    /// rather than the importer's `IMMEDIATE`: in a rollback journal it would
+    /// lock readers out as well (as a commit or a cache spill does), so the
+    /// tests below fail if the database ever leaves WAL mode. In WAL mode
+    /// both only exclude other writers.
+    fn hold_write_lock(writer: &Connection) {
+        writer
+            .execute_batch(
+                "BEGIN EXCLUSIVE;
+                 UPDATE songs SET name = 'Renamed ' || id, title = 'Renamed ' || id;
+                 INSERT OR REPLACE INTO meta (key, value) VALUES ('held_by', 'another writer');",
+            )
+            .unwrap();
+        assert!(!writer.is_autocommit(), "the write transaction is open");
+    }
+
+    fn counter(conn: &Connection) -> i64 {
+        meta_get_i64(conn, "counter").unwrap().unwrap_or(0)
+    }
+
+    #[test]
+    fn every_pooled_connection_uses_wal_and_a_busy_timeout() {
+        let scratch = Scratch::new("pragmas");
+        // All of them at once, so each one's init is checked.
+        let connections: Vec<_> = (0..scratch.pool.max_size())
+            .map(|_| scratch.pool.get().unwrap())
+            .collect();
+        for conn in &connections {
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            let timeout: i64 = conn
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+            let foreign_keys: i64 = conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(foreign_keys, 1);
+        }
+    }
+
+    /// r2d2 replaces idle and old connections (10 and 30 minutes by
+    /// default), and every new one runs the PRAGMAs, so opening connections
+    /// must not need the write lock an import may be holding.
+    #[test]
+    fn connections_open_while_another_connection_writes() {
+        let scratch = Scratch::new("open");
+        let writer = scratch.other_writer();
+        hold_write_lock(&writer);
+
+        let started = Instant::now();
+        let pool = create_pool(&scratch.db_path()).unwrap();
+        let connections: Vec<_> = (0..pool.max_size()).map(|_| pool.get().unwrap()).collect();
+        assert!(
+            started.elapsed() < BUSY_TIMEOUT / 2,
+            "opening the pool waited for the writer: {:?}",
+            started.elapsed()
+        );
+        let name: String = connections[0]
+            .query_row("SELECT name FROM songs WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(name, "Song 1", "readers see the last committed state");
+        writer.execute_batch("COMMIT").unwrap();
+    }
+
+    /// A writer that finds the lock taken is not refused: the busy handler
+    /// retries until the lock is free, then the write commits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writers_wait_for_the_lock_instead_of_failing() {
+        let scratch = Scratch::new("wait");
+        let writer = scratch.other_writer();
+        hold_write_lock(&writer);
+
+        let started = Instant::now();
+        let pool = scratch.pool.clone();
+        let write = tokio::spawn(async move {
+            call(&pool, |conn| {
+                meta_set(conn, "counter", Some("41"))?;
+                Ok(Instant::now())
+            })
+            .await
+        });
+        let held_for = Duration::from_millis(600);
+        tokio::time::sleep(held_for).await;
+        assert!(
+            !write.is_finished(),
+            "the write waits while the lock is held"
+        );
+        writer.execute_batch("COMMIT").unwrap();
+        let committed_at = write
+            .await
+            .unwrap()
+            .expect("the write commits once the lock is free");
+        assert!(committed_at - started >= held_for);
+        assert!(committed_at - started < BUSY_TIMEOUT);
+
+        // Concurrent writers through the pool (the downloads, the duration
+        // backfill and `/duration` requests write at the same time) take
+        // turns: every read-modify-write commits, none is lost. The other
+        // connection holds the lock while they start, so they all queue.
+        hold_write_lock(&writer);
+        let writes: Vec<_> = (0..16)
+            .map(|_| {
+                let pool = scratch.pool.clone();
+                tokio::spawn(async move {
+                    for _ in 0..25 {
+                        call(&pool, |conn| {
+                            let transaction =
+                                Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                            let value = counter(&transaction) + 1;
+                            meta_set(&transaction, "counter", Some(&value.to_string()))?;
+                            transaction.commit()?;
+                            Ok(())
+                        })
+                        .await?;
+                    }
+                    Ok::<_, ApiError>(())
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        writer.execute_batch("COMMIT").unwrap();
+        for write in writes {
+            write
+                .await
+                .unwrap()
+                .expect("every concurrent write commits");
+        }
+        assert_eq!(counter(&scratch.pool.get().unwrap()), 41 + 16 * 25);
+    }
+
+    /// The wait is bounded by `busy_timeout`; the failure is a plain 500
+    /// whose body says nothing about SQLite (the detail goes to the log).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_writer_gives_up_after_the_busy_timeout_without_leaking_the_error() {
+        let scratch = Scratch::new("timeout");
+        let writer = scratch.other_writer();
+        hold_write_lock(&writer);
+
+        let started = Instant::now();
+        let error = call(&scratch.pool, |conn| meta_set(conn, "counter", Some("1")))
+            .await
+            .expect_err("the lock is never released");
+        let waited = started.elapsed();
+        assert!(
+            waited >= BUSY_TIMEOUT - Duration::from_millis(250) && waited < BUSY_TIMEOUT * 2,
+            "gave up after {waited:?}"
+        );
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let detail = response
+            .extensions()
+            .get::<ErrorDetail>()
+            .unwrap()
+            .0
+            .clone();
+        assert!(detail.contains("database is locked"), "{detail}");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"error":"Internal server error"}"#);
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(counter(&scratch.pool.get().unwrap()), 0);
+    }
+
+    async fn start_server(
+        state: Arc<AppState>,
+    ) -> (
+        String,
+        CancellationToken,
+        tokio::task::JoinHandle<Result<(), String>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(crate::http::serve(listener, state, shutdown.clone()));
+        (base, shutdown, server)
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap()
+    }
+
+    /// Every read route answers while another connection holds the write
+    /// lock — far more requests at once than the pool has connections — and
+    /// sees the last committed catalog; after the commit they see the new one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn requests_keep_answering_while_another_connection_writes() {
+        let scratch = Scratch::new("readers");
+        let state = AppState::new(scratch.config.clone(), scratch.pool.clone());
+        state
+            .playable
+            .refresh(&scratch.config.songs_path)
+            .await
+            .unwrap();
+        let (base, shutdown, server) = start_server(state).await;
+        let client = client();
+
+        let writer = scratch.other_writer();
+        hold_write_lock(&writer);
+        let paths = [
+            "/health",
+            "/status",
+            "/eras",
+            "/eras/1",
+            "/eras/1/songs",
+            "/eras/1/songs?q=song",
+            "/songs",
+            "/songs?q=song%201",
+            "/songs?playable=true",
+            "/songs/1",
+            "/songs/2",
+            "/songs/1/stream",
+            "/songs/1/download",
+        ];
+        let started = Instant::now();
+        let requests: Vec<_> = (0..64)
+            .map(|index| {
+                let path = paths[index % paths.len()];
+                let request = client.get(format!("{base}{path}"));
+                tokio::spawn(async move {
+                    let response = request.send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    (path, status, body)
+                })
+            })
+            .collect();
+        for request in requests {
+            let (path, status, body) = request.await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            assert!(!body.contains("locked"), "{path}: {body}");
+            assert!(!body.contains("Renamed"), "{path} saw uncommitted data");
+        }
+        assert!(
+            started.elapsed() < BUSY_TIMEOUT,
+            "the readers waited for the writer: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !writer.is_autocommit(),
+            "the writer held the lock throughout"
+        );
+
+        writer.execute_batch("COMMIT").unwrap();
+        let song = client
+            .get(format!("{base}/songs/1"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let song: serde_json::Value = serde_json::from_str(&song).unwrap();
+        assert_eq!(song["name"], "Renamed 1");
+
+        drop(client);
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
+    }
+
+    /// The one write a request makes — `/duration` storing a probed
+    /// duration — waits for the lock like any writer; when the lock outlasts
+    /// the busy timeout the request still answers 200 (the duration is only
+    /// cached), and a later request stores it. Needs ffmpeg and ffprobe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_duration_route_waits_for_the_lock_and_never_fails_on_it() {
+        let scratch = Scratch::new("duration");
+        let state = AppState::new(scratch.config.clone(), scratch.pool.clone());
+        state.tools.detect(&[Tool::Ffmpeg, Tool::Ffprobe]).await;
+        if !state.tools.available(Tool::Ffmpeg) || !state.tools.available(Tool::Ffprobe) {
+            eprintln!("skipped: ffmpeg or ffprobe is not installed");
+            return;
+        }
+        let made = std::process::Command::new(Tool::Ffmpeg.binary())
+            .args(["-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=3")
+            .args(["-c:a", "libmp3lame", "-b:a", "64k"])
+            .arg(scratch.config.songs_path.join("song.mp3"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        state
+            .playable
+            .refresh(&scratch.config.songs_path)
+            .await
+            .unwrap();
+        let (base, shutdown, server) = start_server(state).await;
+        let client = client();
+        let stored = |path: &Path| {
+            Connection::open(path)
+                .unwrap()
+                .query_row(
+                    "SELECT duration FROM files WHERE filename = 'song.mp3'",
+                    [],
+                    |row| row.get::<_, Option<f64>>(0),
+                )
+                .unwrap()
+        };
+        let duration = || {
+            let request = client.get(format!("{base}/songs/1/duration"));
+            async move {
+                let response = request.send().await.unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+                assert_eq!(status, StatusCode::OK, "{body}");
+                let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                value["duration"].as_f64().unwrap()
+            }
+        };
+
+        // The lock outlasts the busy timeout: answered all the same.
+        let writer = scratch.other_writer();
+        hold_write_lock(&writer);
+        let started = Instant::now();
+        let probed = duration().await;
+        assert!((probed - 3.0).abs() < 0.2, "{probed}");
+        assert!(started.elapsed() >= BUSY_TIMEOUT - Duration::from_millis(250));
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(stored(&scratch.db_path()), None, "not stored, not failed");
+
+        // The lock is released while the request waits: stored.
+        hold_write_lock(&writer);
+        let request = tokio::spawn(duration());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(!request.is_finished(), "the request waits for the lock");
+        writer.execute_batch("COMMIT").unwrap();
+        assert_eq!(request.await.unwrap(), probed);
+        assert_eq!(stored(&scratch.db_path()), Some(probed));
+
+        drop(client);
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
+    }
+}
