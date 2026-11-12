@@ -2089,6 +2089,526 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // -----------------------------------------------------------------------
+    // Ranges over the wire (the plan's Phase 4 "proxy range test")
+    // -----------------------------------------------------------------------
+    //
+    // The API never proxies media from an upstream at request time: the
+    // sync downloads songs, and these routes serve them from disk. The proxy
+    // in question is the reverse proxy in front of the API (README), which
+    // forwards a player's `Range` and relies on the answer: exact
+    // `Content-Range`/`Content-Length`, a body of exactly those bytes and
+    // never re-encoded. So these tests talk HTTP to a real server on a
+    // loopback port, through the whole middleware stack (compression
+    // included), from a scratch storage directory. The contract suite's range
+    // tests cover the same ground but skip on the fixture catalog, which has
+    // no audio.
+
+    /// Bytes that repeat only every 2 MiB, so a slice taken from the wrong
+    /// offset does not match the expected one.
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len as u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect()
+    }
+
+    struct WireServer {
+        root: std::path::PathBuf,
+        state: SharedState,
+        address: std::net::SocketAddr,
+        shutdown: tokio_util::sync::CancellationToken,
+        server: tokio::task::JoinHandle<Result<(), String>>,
+    }
+
+    impl WireServer {
+        /// Song 1 stored as `filename`, written by `write` into the songs
+        /// directory of a scratch `STORAGE_DIR`, served on a loopback port.
+        async fn start(
+            name: &str,
+            filename: &str,
+            configure: impl FnOnce(&mut Config),
+            write: impl FnOnce(&FsPath),
+        ) -> WireServer {
+            let root = std::env::temp_dir().join(format!("yt-media-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let songs = root.join("songs");
+            std::fs::create_dir_all(&songs).unwrap();
+            let mut config = Config::for_tests(&root, &songs);
+            configure(&mut config);
+            let pool = crate::db::create_pool(&root.join("db.sqlite3")).unwrap();
+            crate::db::run_migrations(&pool, &config).unwrap();
+            let url = "https://pillows.su/f/0123456789abcdef";
+            pool.get()
+                .unwrap()
+                .execute_batch(&format!(
+                    "INSERT INTO eras (id, key, name, is_main, position) VALUES (1, 'era', 'Era', 1, 1);
+                     INSERT INTO songs (id, era, catalog_id, name, title, url, position, era_position,
+                       search_text, category_rank)
+                       VALUES (1, 1, 'unreleased', 'Song', 'Song', '{url}', 1, 1, 'song era', 4);
+                     INSERT INTO files (url, filename, status, downloaded)
+                       VALUES ('{url}', '{filename}', 'downloaded', 1);"
+                ))
+                .unwrap();
+            write(&songs.join(filename));
+            let state = crate::state::AppState::new(config, pool);
+            state.tools.detect(&[Tool::Ffmpeg]).await;
+            state.playable.refresh(&songs).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let server = tokio::spawn(crate::http::serve(
+                listener,
+                state.clone(),
+                shutdown.clone(),
+            ));
+            WireServer {
+                root,
+                state,
+                address,
+                shutdown,
+                server,
+            }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("http://{}{path}", self.address)
+        }
+
+        async fn stop(self) {
+            self.shutdown.cancel();
+            self.server.await.unwrap().unwrap();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A client that decodes nothing and asks for every encoding, like a
+    /// browser behind a proxy: a compressed range would show.
+    fn wire_client() -> reqwest::Client {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            "gzip, deflate, br".parse().unwrap(),
+        );
+        reqwest::Client::builder()
+            .no_proxy()
+            .no_gzip()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap()
+    }
+
+    async fn fetch(
+        client: &reqwest::Client,
+        method: reqwest::Method,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut request = client.request(method, url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = request.send().await.unwrap();
+        let (status, response_headers) = (response.status(), response.headers().clone());
+        let body = response.bytes().await.unwrap().to_vec();
+        (status, response_headers, body)
+    }
+
+    fn header_text(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+        headers.get(name).map(|value| value.to_str().unwrap())
+    }
+
+    /// `/stream` and `/download` over a real socket: 206 with the exact
+    /// bytes for bounded, open-ended and suffix ranges (also across the 256
+    /// KiB read chunks), ends past the file clamped, 416 for ranges past
+    /// the end, ignored ranges, `If-Range`, `If-None-Match` and `HEAD` —
+    /// never compressed, whatever `Accept-Encoding` says.
+    #[tokio::test]
+    async fn stored_files_answer_ranges_over_the_wire() {
+        let size = 3 * serve::CHUNK_SIZE + 12_345;
+        let data = patterned(size);
+        let server = WireServer::start(
+            "ranges",
+            "song.mp3",
+            |_| {},
+            |path| std::fs::write(path, &data).unwrap(),
+        )
+        .await;
+        let client = wire_client();
+        let size = size as u64;
+
+        for (path, content_type) in [
+            ("/songs/1/stream", "audio/mpeg"),
+            ("/songs/1/download", "application/octet-stream"),
+        ] {
+            let url = server.url(path);
+            let (status, head, body) = fetch(&client, reqwest::Method::HEAD, &url, &[]).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.is_empty());
+            assert_eq!(
+                header_text(&head, header::CONTENT_LENGTH),
+                Some(&*size.to_string())
+            );
+            assert_eq!(header_text(&head, header::ACCEPT_RANGES), Some("bytes"));
+            let etag = header_text(&head, header::ETAG).unwrap().to_owned();
+            let last_modified = header_text(&head, header::LAST_MODIFIED)
+                .unwrap()
+                .to_owned();
+
+            let partial = [
+                ("bytes=0-99".to_owned(), 0, 99),
+                ("bytes=0-0".to_owned(), 0, 0),
+                (format!("bytes={0}-{0}", size - 1), size - 1, size - 1),
+                // Odd offsets on both sides of several chunk boundaries.
+                ("bytes=100000-700000".to_owned(), 100_000, 700_000),
+                ("bytes=500000-".to_owned(), 500_000, size - 1),
+                ("bytes=-1000".to_owned(), size - 1000, size - 1),
+                ("bytes=-99999999".to_owned(), 0, size - 1),
+                (
+                    format!("bytes={}-{}", size - 10, size + 1000),
+                    size - 10,
+                    size - 1,
+                ),
+            ];
+            for (range, start, end) in &partial {
+                let (status, headers, body) =
+                    fetch(&client, reqwest::Method::GET, &url, &[("range", range)]).await;
+                assert_eq!(status, StatusCode::PARTIAL_CONTENT, "{path} {range}");
+                assert_eq!(
+                    header_text(&headers, header::CONTENT_RANGE),
+                    Some(&*format!("bytes {start}-{end}/{size}")),
+                    "{path} {range}"
+                );
+                let length = end - start + 1;
+                assert_eq!(
+                    header_text(&headers, header::CONTENT_LENGTH),
+                    Some(&*length.to_string()),
+                    "{path} {range}"
+                );
+                assert_eq!(body.len() as u64, length, "{path} {range}");
+                assert!(
+                    body == data[*start as usize..=*end as usize],
+                    "{path} {range}: the requested bytes"
+                );
+                assert_eq!(header_text(&headers, header::CONTENT_ENCODING), None);
+                assert_eq!(
+                    header_text(&headers, header::CONTENT_TYPE),
+                    Some(content_type)
+                );
+                assert_eq!(header_text(&headers, header::ACCEPT_RANGES), Some("bytes"));
+                assert_eq!(header_text(&headers, header::ETAG), Some(&*etag));
+                assert_eq!(
+                    header_text(&headers, header::CACHE_CONTROL),
+                    Some(MEDIA_CACHE)
+                );
+                assert_eq!(header_text(&headers, header::VARY), Some("Origin"));
+            }
+
+            for range in [
+                format!("bytes={size}-"),
+                format!("bytes={size}-{}", size + 10),
+                "bytes=-0".to_owned(),
+                "bytes=99999999999999999999-".to_owned(),
+            ] {
+                let (status, headers, body) =
+                    fetch(&client, reqwest::Method::GET, &url, &[("range", &range)]).await;
+                assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE, "{path} {range}");
+                assert_eq!(
+                    header_text(&headers, header::CONTENT_RANGE),
+                    Some(&*format!("bytes */{size}"))
+                );
+                assert_eq!(body, b"Range Not Satisfiable");
+                assert!(
+                    header_text(&headers, header::CONTENT_TYPE)
+                        .is_some_and(|value| value.starts_with("text/plain"))
+                );
+                assert_eq!(
+                    header_text(&headers, header::CACHE_CONTROL),
+                    Some("no-store")
+                );
+                assert_eq!(header_text(&headers, header::ETAG), None);
+            }
+
+            // Ranges the server does not serve: the whole file.
+            for range in [
+                "bytes=0-1,5-6",
+                "bytes=5-2",
+                "items=0-9",
+                "bytes=abc",
+                "bytes=-",
+            ] {
+                let (status, headers, body) =
+                    fetch(&client, reqwest::Method::GET, &url, &[("range", range)]).await;
+                assert_eq!(status, StatusCode::OK, "{path} {range}");
+                assert_eq!(header_text(&headers, header::CONTENT_RANGE), None);
+                assert_eq!(header_text(&headers, header::CONTENT_ENCODING), None);
+                assert!(body == data, "{path} {range}: the whole file");
+            }
+
+            // If-Range: the range only while the validator matches.
+            for (if_range, expected) in [
+                (etag.clone(), StatusCode::PARTIAL_CONTENT),
+                (last_modified.clone(), StatusCode::PARTIAL_CONTENT),
+                ("\"stale\"".to_owned(), StatusCode::OK),
+                (format!("W/{etag}"), StatusCode::OK),
+            ] {
+                let (status, headers, body) = fetch(
+                    &client,
+                    reqwest::Method::GET,
+                    &url,
+                    &[("range", "bytes=10-19"), ("if-range", &if_range)],
+                )
+                .await;
+                assert_eq!(status, expected, "{path} If-Range: {if_range}");
+                if expected == StatusCode::PARTIAL_CONTENT {
+                    assert_eq!(
+                        header_text(&headers, header::CONTENT_RANGE),
+                        Some(&*format!("bytes 10-19/{size}"))
+                    );
+                    assert!(body == data[10..20]);
+                } else {
+                    assert!(body == data);
+                }
+            }
+
+            // A cached copy that is still current wins over the range.
+            let (status, _, body) = fetch(
+                &client,
+                reqwest::Method::GET,
+                &url,
+                &[("range", "bytes=0-9"), ("if-none-match", &etag)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
+            assert!(body.is_empty());
+
+            // HEAD describes the whole file.
+            let (status, headers, body) = fetch(
+                &client,
+                reqwest::Method::HEAD,
+                &url,
+                &[("range", "bytes=0-9")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(body.is_empty());
+            assert_eq!(
+                header_text(&headers, header::CONTENT_LENGTH),
+                Some(&*size.to_string())
+            );
+            assert_eq!(header_text(&headers, header::CONTENT_RANGE), None);
+        }
+
+        drop(client);
+        server.stop().await;
+    }
+
+    /// Reads one HTTP/1.1 response framed by `Content-Length` from `stream`
+    /// (`buffer` holds bytes already read), leaving whatever follows in
+    /// `buffer`: `(status line, lower-cased headers, body)`.
+    async fn read_framed(
+        stream: &mut tokio::net::TcpStream,
+        buffer: &mut Vec<u8>,
+    ) -> (String, HashMap<String, String>, Vec<u8>) {
+        let mut chunk = vec![0u8; 64 * 1024];
+        let header_end = loop {
+            if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end;
+            }
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "the connection closed before the headers");
+            buffer.extend_from_slice(&chunk[..read]);
+        };
+        let head = String::from_utf8(buffer[..header_end].to_vec()).unwrap();
+        buffer.drain(..header_end + 4);
+        let mut lines = head.split("\r\n");
+        let status = lines.next().unwrap().to_owned();
+        let headers: HashMap<String, String> = lines
+            .map(|line| {
+                let (name, value) = line.split_once(':').unwrap();
+                (name.trim().to_ascii_lowercase(), value.trim().to_owned())
+            })
+            .collect();
+        assert!(!headers.contains_key("transfer-encoding"), "{head}");
+        let length: usize = headers["content-length"].parse().unwrap();
+        while buffer.len() < length {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "the connection closed inside the body");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let body: Vec<u8> = buffer.drain(..length).collect();
+        (status, headers, body)
+    }
+
+    /// A proxy reuses its connections to the API, so a ranged response must
+    /// end exactly where its `Content-Length` says: several 206/416/200
+    /// answers in a row on one keep-alive connection, nothing in between.
+    #[tokio::test]
+    async fn ranged_responses_are_framed_exactly_on_one_connection() {
+        let size = 2 * serve::CHUNK_SIZE + 999;
+        let data = patterned(size);
+        let server = WireServer::start(
+            "framing",
+            "song.flac",
+            |_| {},
+            |path| std::fs::write(path, &data).unwrap(),
+        )
+        .await;
+        let mut stream = tokio::net::TcpStream::connect(server.address)
+            .await
+            .unwrap();
+        let mut buffer = Vec::new();
+        let suffix = serve::CHUNK_SIZE + 7;
+        let exchanges: [(&str, String, &str, &[u8]); 5] = [
+            (
+                "/songs/1/stream",
+                "bytes=100-199".into(),
+                "206",
+                &data[100..200],
+            ),
+            (
+                "/songs/1/stream",
+                format!("bytes={size}-"),
+                "416",
+                b"Range Not Satisfiable",
+            ),
+            (
+                "/songs/1/download",
+                format!("bytes=-{suffix}"),
+                "206",
+                &data[size - suffix..],
+            ),
+            ("/songs/1/stream", "bytes=5-2".into(), "200", &data),
+            ("/songs/1/download", "bytes=0-0".into(), "206", &data[..1]),
+        ];
+        for (path, range, status, expected) in exchanges {
+            stream
+                .write_all(
+                    format!(
+                        "GET {path} HTTP/1.1\r\nHost: api\r\nRange: {range}\r\n\
+                         Accept-Encoding: gzip, br\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (line, headers, body) = read_framed(&mut stream, &mut buffer).await;
+            assert!(
+                line.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{range}: {line}"
+            );
+            assert!(!headers.contains_key("content-encoding"), "{range}");
+            assert!(body == expected, "{range}: the exact bytes");
+            assert!(buffer.is_empty(), "{range}: nothing after the body");
+        }
+        // The server is done talking: closing our side ends the connection
+        // with no stray bytes.
+        stream.shutdown().await.unwrap();
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty(), "{} stray bytes", rest.len());
+        server.stop().await;
+    }
+
+    /// The one response the API serves without range support is a live
+    /// transcode: ffmpeg's output, of unknown length (`Accept-Ranges: none`,
+    /// no `Content-Length`). A range from byte 0 gets that live stream; any
+    /// other range waits for the finished output and gets its exact bytes,
+    /// or 416 — also with the cache off, where every request is live and a
+    /// resumed range runs ffmpeg again (bit-exact). Needs ffmpeg.
+    #[tokio::test]
+    async fn live_transcodes_ignore_ranges_until_their_length_is_known() {
+        let server = WireServer::start(
+            "live-ranges",
+            "song.mp3",
+            |config| config.transcode_cache_max_bytes = 0,
+            |path| {
+                if let Ok(status) = std::process::Command::new(Tool::Ffmpeg.binary())
+                    .args(["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i"])
+                    .arg("sine=frequency=440:duration=8")
+                    .args(["-c:a", "libmp3lame", "-b:a", "128k"])
+                    .arg(path)
+                    .status()
+                {
+                    assert!(status.success());
+                }
+            },
+        )
+        .await;
+        if !server.state.tools.available(Tool::Ffmpeg) {
+            eprintln!("skipped: ffmpeg is not installed");
+            server.stop().await;
+            return;
+        }
+        let client = wire_client();
+        let url = server.url("/songs/1/stream?quality=64");
+
+        for range in ["bytes=0-99", "bytes=0-"] {
+            let (status, headers, _) =
+                fetch(&client, reqwest::Method::GET, &url, &[("range", range)]).await;
+            assert_eq!(status, StatusCode::OK, "{range}");
+            assert_eq!(header_text(&headers, header::ACCEPT_RANGES), Some("none"));
+            assert_eq!(header_text(&headers, header::CONTENT_LENGTH), None);
+            assert_eq!(header_text(&headers, header::CONTENT_RANGE), None);
+            assert_eq!(
+                header_text(&headers, header::CACHE_CONTROL),
+                Some("no-store")
+            );
+        }
+        let (_, _, all) = fetch(&client, reqwest::Method::GET, &url, &[]).await;
+        let len = all.len() as u64;
+        assert!(len > 2000, "{len} bytes");
+        assert_eq!(&all[..4], b"OggS");
+
+        for (range, start, end) in [
+            ("bytes=100-199".to_owned(), 100, 199),
+            ("bytes=1000-".to_owned(), 1000, len - 1),
+            ("bytes=-1000".to_owned(), len - 1000, len - 1),
+            (format!("bytes=1-{}", len + 50), 1, len - 1),
+        ] {
+            let (status, headers, body) =
+                fetch(&client, reqwest::Method::GET, &url, &[("range", &range)]).await;
+            assert_eq!(status, StatusCode::PARTIAL_CONTENT, "{range}");
+            assert_eq!(
+                header_text(&headers, header::CONTENT_RANGE),
+                Some(&*format!("bytes {start}-{end}/{len}")),
+                "{range}"
+            );
+            assert_eq!(
+                header_text(&headers, header::CONTENT_LENGTH),
+                Some(&*(end - start + 1).to_string())
+            );
+            assert_eq!(
+                header_text(&headers, header::CACHE_CONTROL),
+                Some("no-store")
+            );
+            assert!(
+                body == all[start as usize..=end as usize],
+                "{range}: the same bytes"
+            );
+        }
+        let past_the_end = format!("bytes={len}-");
+        let (status, headers, _) = fetch(
+            &client,
+            reqwest::Method::GET,
+            &url,
+            &[("range", &past_the_end)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            header_text(&headers, header::CONTENT_RANGE),
+            Some(&*format!("bytes */{len}"))
+        );
+        // Nothing was cached: it is still a live transcode.
+        let (status, headers, _) = fetch(&client, reqwest::Method::HEAD, &url, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header_text(&headers, header::CONTENT_LENGTH), None);
+
+        drop(client);
+        server.stop().await;
+    }
+
     #[test]
     fn content_types_by_extension() {
         assert_eq!(content_type_for("a.MP3"), "audio/mpeg");
