@@ -99,6 +99,14 @@ stale-response handling, deep-link focus, and the player's fallbacks,
 quality switching, buffering hint and queue. The app target only renders
 state and adapts AVFoundation, MediaPlayer and UIKit.
 
+### App icon
+
+`AppIcon.appiconset` holds `AppIcon.png` (the only source art) and the
+dark and tinted Home Screen variants, which are generated from it: after
+changing the icon, run `node scripts/ios-icon-variants.mjs`. The script cuts
+the record out exactly, so it checks that the art still has the geometry it
+expects and writes nothing otherwise (new art needs new variants).
+
 ## Tests
 
 ```sh
@@ -126,6 +134,7 @@ xcodebuild -project apps/ios/YeTracker.xcodeproj -scheme YeTracker \
 - [ ] Era: header, previous/next era, search (instant local filter, then the whole era), category and sort menu, filter chips, "Clear all filters", infinite scroll, "Showing X of Y songs"
 - [ ] Search: results deep-link into the era and highlight the song; era range slider, "Playable only", Clear; long-press a playable result to play it
 - [ ] Light and dark appearance: era washes, tints and the always-dark Now Playing sheet
+- [ ] Home Screen icon in default, dark and tinted modes (Home Screen → Edit → Customize)
 - [ ] Tab bar: minimizes on scroll, the mini player collapses inline, the search tab's field
 - [ ] Player: mini player and Now Playing sheet (zooms out of the mini player), scrubbing at 128 kbps (restarts with `start=`) and at Original (native seek), quality switch mid-song, auto-advance, previous/next at list ends
 - [ ] An Ogg/Opus original at **Original** quality shows "Converting for playback…" and then plays

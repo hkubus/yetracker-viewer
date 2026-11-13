@@ -4,7 +4,7 @@
 > (iOS/Xcode 26.1+, Liquid Glass) and playback/caching work (§9). CI
 > builds an unsigned IPA on every change (§8); `ios-v1.0.0` tags `b22262b`,
 > from before the redesign. Left (M7): on-device QA, light mode (still forced
-> off, §7), the icon, and two App Store–only items.
+> off, §7) and two App Store–only items.
 
 Goal: a native iPhone/iPad client with **feature parity with `apps/web`**,
 talking to the same public, read-only API (`apps/api-rs`). The web app and the
@@ -245,7 +245,7 @@ play(track, queue) ─► load(stream(quality)) ──ready──► playing ◄
 - [ ] **M7** What's left
   - [ ] On-device QA against a real server: the README's "Manual QA checklist" (`apps/ios/README.md`), nothing ticked yet
   - [ ] Light mode: remove `INFOPLIST_KEY_UIUserInterfaceStyle = Dark` from both target configurations (the checklist's light/dark item fails until then)
-  - [ ] App icon: `AppIcon.appiconset` is a single 1024 px PNG with no dark or tinted variants (planned separately). The SideStore source publishes the same PNG.
+  - [x] App icon: dark and tinted variants (`AppIcon-Dark.png`, `AppIcon-Tinted.png`), cut exactly from `AppIcon.png` by `scripts/ios-icon-variants.mjs`; seeing them on a device is part of the checklist. The SideStore source publishes the default PNG.
   - Optional, App Store build only:
     - [ ] Universal links: an Associated Domains entitlement and an `apple-app-site-association` file on the site (`DeepLink` already parses web URLs)
     - [ ] Network security: narrow `NSAllowsArbitraryLoads` to `NSAllowsLocalNetworking` or per-host `NSExceptionDomains`, and fix Settings' Server footer to match: it says iOS only allows plain http:// for localhost and local network names, which isn't true of the current Info.plist.
