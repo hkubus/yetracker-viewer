@@ -54,11 +54,17 @@ pub mod meta_keys {
     pub const CLEANUP_KEPT_DOWNLOADED: &str = "cleanup_kept_downloaded";
 }
 
+/// Per connection, so everything here costs up to eight times over (the pool
+/// size). Reads of the database file go through the shared `mmap` (one copy
+/// in the OS page cache, however many connections map it); the private page
+/// cache mostly holds pages read from the WAL and the pages an import writes,
+/// so 8 MiB is plenty. Without the `mmap` every connection would keep its own
+/// copy of the hot pages instead.
 const PRAGMAS: &str = "\
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA cache_size = -64000;
+PRAGMA cache_size = -8192;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 67108864;
 PRAGMA journal_size_limit = 67108864;";

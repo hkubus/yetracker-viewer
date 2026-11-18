@@ -25,8 +25,15 @@ const SYNC_STOP_WAIT: Duration = Duration::from_secs(5);
 /// Upper bound for the runtime shutdown. Tasks still running then (a
 /// download, a transcode) are dropped, which kills their child processes.
 const RUNTIME_STOP_WAIT: Duration = Duration::from_secs(5);
+/// glibc malloc arenas. The default (8 per CPU) gives the runtime's worker
+/// and blocking threads their own arenas, which keep the memory freed in them
+/// instead of returning it to the OS: under load that more than doubles the
+/// heap (SQLite's page caches included) for no measurable speed-up.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MALLOC_ARENAS: libc::c_int = 2;
 
 fn main() {
+    limit_malloc_arenas();
     // `.env` may set `RUST_LOG`, so load it before the subscriber reads it.
     config::load_env_file();
     init_tracing();
@@ -54,6 +61,22 @@ fn main() {
     if let Err(error) = result {
         error!("API startup failed: {error}");
         std::process::exit(1);
+    }
+}
+
+/// Caps glibc's malloc arenas at [`MALLOC_ARENAS`] before any thread starts,
+/// unless the environment already sets the cap (`MALLOC_ARENA_MAX`, or
+/// `glibc.malloc.arena_max` in `GLIBC_TUNABLES`), which glibc has applied.
+fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let tunables = std::env::var("GLIBC_TUNABLES").unwrap_or_default();
+        if std::env::var_os("MALLOC_ARENA_MAX").is_none() && !tunables.contains("malloc.arena_max")
+        {
+            // SAFETY: plain libc call with a valid parameter, made while the
+            // process has a single thread.
+            unsafe { libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS) };
+        }
     }
 }
 
