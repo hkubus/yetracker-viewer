@@ -1,6 +1,7 @@
 /**
  * Home page behaviour besides the song search: the era filter above the era grid (accent- and case-insensitive,
- * every word must match) and keeping "Updated … ago" current. Set up per page, torn down on `astro:before-swap`.
+ * every word must match; a "5 of 43 eras" count while it filters, and a "no eras match" state with a button that
+ * clears it) and keeping "Updated … ago" current. Set up per page, torn down on `astro:before-swap`.
  */
 import { formatRelativeTime } from '../utils/dates';
 import { fold, matchesAllTokens, tokens } from '../utils/search';
@@ -17,6 +18,8 @@ function setupEraFilter(root: HTMLElement, signal: AbortSignal): void {
   const count = root.querySelector<HTMLElement>('[data-era-filter-count]');
   const status = root.querySelector<HTMLElement>('[data-era-filter-status]');
   const empty = root.querySelector<HTMLElement>('[data-era-filter-empty]');
+  const emptyQuery = root.querySelector<HTMLElement>('[data-era-filter-query]');
+  const clear = root.querySelector<HTMLButtonElement>('[data-era-filter-clear]');
   if (!input || !grid) return;
 
   const cards = Array.from(grid.querySelectorAll<HTMLElement>('[data-era-filter-text]'));
@@ -36,8 +39,14 @@ function setupEraFilter(root: HTMLElement, signal: AbortSignal): void {
       queryTokens.length === 0
         ? countLabel(cards.length, 'era')
         : `${visible.toLocaleString('en-US')} of ${countLabel(cards.length, 'era')}`;
-    if (count) count.textContent = text;
-    if (empty) empty.hidden = visible !== 0;
+    // The page header already gives the total: the count only shows while the filter narrows the grid.
+    if (count) count.textContent = queryTokens.length === 0 ? '' : text;
+    if (emptyQuery) emptyQuery.textContent = input.value.trim();
+    if (empty) {
+      // Hiding the message must not drop the focus of its button to the page.
+      if (visible !== 0 && empty.contains(document.activeElement)) input.focus();
+      empty.hidden = visible !== 0;
+    }
     window.clearTimeout(announceTimer);
     if (status) {
       announceTimer = window.setTimeout(() => {
@@ -47,6 +56,15 @@ function setupEraFilter(root: HTMLElement, signal: AbortSignal): void {
   };
 
   input.addEventListener('input', apply, { signal });
+  clear?.addEventListener(
+    'click',
+    () => {
+      input.value = '';
+      input.focus();
+      apply();
+    },
+    { signal },
+  );
   // A value the browser restored into the field (e.g. after a reload) filters right away.
   if (input.value) apply();
 }

@@ -8,6 +8,13 @@ export function positionText(position: number, duration: number | null): string 
   return duration !== null && duration > 0 ? `${current} of ${formatDuration(duration)}` : current;
 }
 
+/** Where `value` lies between `min` and `max`, clamped to 0–1 and rounded to 0.001 (finer steps never show). */
+export function progressRatio(value: number, max: number, min = 0): number {
+  const span = max - min;
+  if (!(span > 0) || !Number.isFinite(value)) return 0;
+  return Math.round(Math.min(1, Math.max(0, (value - min) / span)) * 1000) / 1000;
+}
+
 export function volumeText(volume: number, muted: boolean): string {
   return muted ? 'Muted' : `${Math.round(Math.min(1, Math.max(0, volume)) * 100)}%`;
 }

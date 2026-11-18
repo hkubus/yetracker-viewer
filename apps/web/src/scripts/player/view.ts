@@ -5,7 +5,8 @@
 import { themeFor, themeVariables } from '../../utils/color.ts';
 import { coverUrl, eraInitials } from '../../utils/cover.ts';
 import { formatDuration } from '../../utils/duration.ts';
-import { positionText, volumeText } from './format.ts';
+import { positionText, progressRatio, volumeText } from './format.ts';
+import { PlayerSheet } from './sheet.ts';
 import { DEFAULT_PAGE_SIZE, eraHref, type Track } from './track.ts';
 
 const NOTICE_MS = 6_000;
@@ -17,9 +18,17 @@ function find<T extends Element>(root: ParentNode, selector: string, type: { new
   return element;
 }
 
+/** The filled part of a styled range input's track (CSS `--player-fill`; Firefox paints it natively). */
+function setFill(input: HTMLInputElement): void {
+  const fill = `${(progressRatio(Number(input.value), Number(input.max), Number(input.min)) * 100).toFixed(1)}%`;
+  if (input.style.getPropertyValue('--player-fill') !== fill) input.style.setProperty('--player-fill', fill);
+}
+
 export class PlayerView {
   /** The bar: a `<section>` landmark, hidden while there is no track. */
   readonly bar: HTMLElement;
+  /** The expanded "now playing" view of narrow screens. */
+  readonly sheet: PlayerSheet;
   readonly audio: HTMLAudioElement;
   readonly close: HTMLButtonElement;
   readonly previous: HTMLButtonElement;
@@ -36,6 +45,10 @@ export class PlayerView {
   private readonly controls: HTMLElement;
   private readonly title: HTMLElement;
   private readonly era: HTMLAnchorElement;
+  /** The era name as plain text, for the mini bar (whose info area is the expand button). */
+  private readonly eraText: HTMLElement;
+  /** The mini bar's progress line. */
+  private readonly line: HTMLElement;
   private readonly volumeGroup: HTMLElement;
   private readonly qualityControl: HTMLElement;
   private readonly elapsed: HTMLElement;
@@ -49,6 +62,7 @@ export class PlayerView {
   private resizeObserver: ResizeObserver | null = null;
   private shownTime = '';
   private shownDuration = '';
+  private shownProgress = '';
 
   /** `root` is the player bar itself (the element persisted across navigations). */
   constructor(root: HTMLElement) {
@@ -69,6 +83,8 @@ export class PlayerView {
     this.controls = find(root, '[data-player-controls]', HTMLElement);
     this.title = find(root, '[data-player-title]', HTMLElement);
     this.era = find(root, '[data-player-era]', HTMLAnchorElement);
+    this.eraText = find(root, '[data-player-era-text]', HTMLElement);
+    this.line = find(root, '[data-player-line]', HTMLElement);
     this.volumeGroup = find(root, '[data-player-volume-group]', HTMLElement);
     this.qualityControl = find(root, '[data-player-quality-control]', HTMLElement);
     this.elapsed = find(root, '[data-player-elapsed]', HTMLElement);
@@ -78,6 +94,19 @@ export class PlayerView {
     this.notice = find(root, '[data-player-notice]', HTMLElement);
     this.announcer = find(root, '[data-player-announcer]', HTMLElement);
     this.alertRegion = find(root, '[data-player-alert]', HTMLElement);
+    this.sheet = new PlayerSheet(
+      {
+        root,
+        expand: find(root, '[data-player-expand]', HTMLButtonElement),
+        collapse: find(root, '[data-player-collapse]', HTMLButtonElement),
+        fallbackFocus: this.toggle,
+        eraLink: this.era,
+      },
+      () => this.publishHeight(),
+    );
+    // `volumechange` (which repaints the fill through setVolume) is a queued task: paint the fill in the same frame
+    // as the thumb while dragging.
+    this.volume.addEventListener('input', () => setFill(this.volume));
   }
 
   get isVisible(): boolean {
@@ -94,6 +123,8 @@ export class PlayerView {
   }
 
   hide(): void {
+    // First, so the page is no longer inert when the controller moves focus back to it.
+    this.sheet.collapse(false);
     this.bar.hidden = true;
     this.resizeObserver?.disconnect();
     document.documentElement.style.removeProperty('--player-height');
@@ -101,9 +132,12 @@ export class PlayerView {
     this.clearError();
   }
 
-  /** Also called after ClientRouter swaps, which replace every attribute of <html>, inline style included. */
+  /**
+   * Also called after ClientRouter swaps, which replace every attribute of <html>, inline style included. The
+   * expanded view covers the page and keeps the mini bar's height: the page underneath must not reflow.
+   */
   publishHeight(): void {
-    if (this.bar.hidden) return;
+    if (this.bar.hidden || this.sheet.expanded) return;
     const rect = this.bar.getBoundingClientRect();
     const height = Math.ceil(Math.max(0, window.innerHeight - rect.top));
     document.documentElement.style.setProperty('--player-height', `${height}px`);
@@ -117,6 +151,8 @@ export class PlayerView {
     this.title.textContent = track.title;
     // Long titles are truncated with an ellipsis; the tooltip shows the whole title.
     this.title.title = track.title;
+    this.eraText.textContent = track.eraName;
+    this.eraText.hidden = !track.eraName;
     const href = eraHref(track, pageSize);
     if (href && track.eraName) {
       this.era.href = href;
@@ -198,6 +234,13 @@ export class PlayerView {
       const value = String(Math.floor(Math.max(0, position)));
       if (this.seek.value !== value) this.seek.value = value;
     }
+    setFill(this.seek);
+    // While the slider is dragged, `position` is its value: the line previews it too.
+    const progress = String(progressRatio(position, duration ?? 0));
+    if (progress !== this.shownProgress) {
+      this.line.style.transform = `scaleX(${progress})`;
+      this.shownProgress = progress;
+    }
     const valueText = positionText(position, duration);
     if (this.seek.getAttribute('aria-valuetext') !== valueText) this.seek.setAttribute('aria-valuetext', valueText);
   }
@@ -206,6 +249,7 @@ export class PlayerView {
     const silent = muted || volume === 0;
     const value = String(silent ? 0 : Math.round(volume * 100));
     if (this.volume.value !== value) this.volume.value = value;
+    setFill(this.volume);
     this.volume.setAttribute('aria-valuetext', volumeText(volume, silent));
     this.mute.setAttribute('aria-pressed', String(silent));
     this.mute.dataset.muted = String(silent);

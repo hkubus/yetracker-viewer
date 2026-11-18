@@ -8,13 +8,16 @@
  *   Filters alone (era range, playable only) also search. "Show more" pages through the matches with `offset`.
  * - Keyboard: Enter searches right away and moves focus to the results, ArrowDown goes from the input to the first
  *   result, ArrowUp/ArrowDown move between results, Escape returns to the input (or clears it).
+ * - On phones the filters fold behind a "Filters" button that counts the active ones (CSS decides when it shows).
  *
  * Set up on page load and after every client-side navigation; everything registered for a page is torn down on
  * `astro:before-swap`.
  */
 import { getApiBaseUrl } from '../utils/api-base-url';
-import { themeFor, themeVariables } from '../utils/color';
+import { type Theme, themeFor, themeVariables } from '../utils/color';
+import { coverUrl, eraInitials } from '../utils/cover';
 import {
+  activeFilterCount,
   apiSearchParams,
   type GlobalSearchState,
   hasActiveFilters,
@@ -35,9 +38,12 @@ import {
   songTextLines,
 } from '../utils/songDisplay';
 import { countLabel } from '../utils/songRow';
+import { splitCredits } from '../utils/songTitle';
 
 const ROOT_SELECTOR = '[data-global-song-search]';
 const DEBOUNCE_MS = 200;
+/** Loading placeholders only appear when a search takes longer than this (fast answers never flash them). */
+const SKELETON_DELAY_MS = 300;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Results per request (the API's maximum). */
 const PAGE_LIMIT = 50;
@@ -434,13 +440,20 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
   const list = root.querySelector<HTMLElement>('[data-global-search-list]');
   const message = root.querySelector<HTMLElement>('[data-global-search-message]');
   const messageText = root.querySelector<HTMLElement>('[data-global-search-message-text]');
+  const messageHint = root.querySelector<HTMLElement>('[data-global-search-message-hint]');
   const retry = root.querySelector<HTMLButtonElement>('[data-global-search-retry]');
+  const resetFilters = root.querySelector<HTMLButtonElement>('[data-global-search-reset-filters]');
+  const skeleton = root.querySelector<HTMLElement>('[data-global-search-skeleton]');
   const more = root.querySelector<HTMLElement>('[data-global-search-more]');
   const moreButton = root.querySelector<HTMLButtonElement>('[data-global-search-more-button]');
   const moreProgress = root.querySelector<HTMLElement>('[data-global-search-more-progress]');
   const playable = root.querySelector<HTMLInputElement>('[data-playable-filter]');
   const clear = root.querySelector<HTMLButtonElement>('[data-search-clear]');
   const playIcon = root.querySelector<HTMLTemplateElement>('[data-global-search-play-icon]');
+  const coverTemplate = root.querySelector<HTMLTemplateElement>('[data-global-search-cover]');
+  const filtersToggle = root.querySelector<HTMLButtonElement>('[data-filters-toggle]');
+  const filtersBadge = root.querySelector<HTMLElement>('[data-filters-badge]');
+  const filtersCount = root.querySelector<HTMLElement>('[data-filters-count]');
   if (
     !form ||
     !input ||
@@ -465,13 +478,13 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
   const eraById = new Map(eras.map((era) => [era.id, era]));
   const apiBaseUrl = (root.dataset.apiBaseUrl || getApiBaseUrl()).replace(/\/+$/, '');
   const eraPageSize = positiveInteger(root.dataset.eraPageSize) ?? DEFAULT_ERA_PAGE_SIZE;
-  const idleCount = root.dataset.idleCount ?? '';
   const lastEra = Math.max(eras.length - 1, 0);
 
   let results: Results | null = null;
   let request: { controller: AbortController; key: string; kind: 'search' | 'more' } | null = null;
   let debounceTimer: number | undefined;
   let announceTimer: number | undefined;
+  let skeletonTimer: number | undefined;
   let focusResultsWhenReady = false;
   let retryAction: (() => void) | null = null;
   // The URL of this page's history entry (without the hash), kept here because `location` already points at the
@@ -485,6 +498,7 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     () => {
       window.clearTimeout(debounceTimer);
       window.clearTimeout(announceTimer);
+      window.clearTimeout(skeletonTimer);
       request?.controller.abort();
       request = null;
     },
@@ -506,7 +520,19 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
 
   const updateClear = (state: GlobalSearchState) => {
     clear.disabled = input.value === '' && !hasActiveFilters(state, eras.length);
+    const active = activeFilterCount(state, eras.length);
+    if (filtersBadge) filtersBadge.hidden = active === 0;
+    if (filtersCount) filtersCount.textContent = String(active);
   };
+
+  const setFiltersOpen = (open: boolean) => {
+    root.toggleAttribute('data-filters-open', open);
+    filtersToggle?.setAttribute('aria-expanded', String(open));
+  };
+
+  // The server lays out a search from the URL (results area, skeleton) and holds back the sections under it; this
+  // lets them show once the first search settles (results, an error, or no search after all).
+  const settleInitialSearch = () => root.removeAttribute('data-search-pending');
 
   const syncUrl = (state: GlobalSearchState) => {
     const query = pageSearchParams(state, eraIds).toString();
@@ -531,8 +557,13 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
   };
 
   const setBusy = (busy: boolean) => {
-    if (busy) panel.setAttribute('aria-busy', 'true');
-    else panel.removeAttribute('aria-busy');
+    if (busy) {
+      panel.setAttribute('aria-busy', 'true');
+      return;
+    }
+    panel.removeAttribute('aria-busy');
+    window.clearTimeout(skeletonTimer);
+    if (skeleton) skeleton.hidden = true;
   };
 
   const focusResults = () => {
@@ -547,10 +578,20 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     else panel.focus();
   };
 
-  const showMessage = (text: string, onRetry: (() => void) | null = null) => {
+  const showMessage = (
+    text: string,
+    options: { kind?: 'info' | 'error'; hint?: string; onRetry?: () => void; resetFilters?: boolean } = {},
+  ) => {
+    releaseFocus(message);
+    message.dataset.kind = options.kind ?? 'info';
     messageText.textContent = text;
-    retryAction = onRetry;
-    retry.hidden = onRetry === null;
+    if (messageHint) {
+      messageHint.textContent = options.hint ?? '';
+      messageHint.hidden = !options.hint;
+    }
+    retryAction = options.onRetry ?? null;
+    retry.hidden = retryAction === null;
+    if (resetFilters) resetFilters.hidden = !options.resetFilters;
     message.hidden = false;
   };
 
@@ -558,6 +599,19 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     releaseFocus(message);
     message.hidden = true;
     retryAction = null;
+  };
+
+  // A search that takes a moment and has nothing on screen yet (or only a message) shows loading placeholders.
+  const scheduleSkeleton = () => {
+    window.clearTimeout(skeletonTimer);
+    if (!skeleton) return;
+    skeletonTimer = window.setTimeout(() => {
+      if (!panel.hasAttribute('aria-busy') || list.childElementCount > 0) return;
+      hideMessage();
+      hideMore();
+      panel.hidden = false;
+      skeleton.hidden = false;
+    }, SKELETON_DELAY_MS);
   };
 
   const hideMore = () => {
@@ -578,7 +632,7 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     hideMessage();
     hideMore();
     setBusy(false);
-    count.textContent = idleCount;
+    count.textContent = '';
   };
 
   const showNoTerms = () => {
@@ -587,8 +641,10 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     hideMore();
     setBusy(false);
     panel.hidden = false;
-    count.textContent = idleCount;
-    showMessage('Type a word or a number to search.');
+    count.textContent = '';
+    showMessage('Type a word or a number to search.', {
+      hint: 'Punctuation alone matches nothing. Category markers such as ⭐ or 🏆 work too.',
+    });
   };
 
   const showFailure = (failure: Failure) => {
@@ -598,8 +654,32 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     panel.hidden = false;
     count.textContent = 'Search failed';
     const text = failureText(failure);
-    showMessage(text, canRetry(failure) ? () => scheduleSearch({ immediate: true, force: true }) : null);
+    const onRetry = canRetry(failure) ? () => scheduleSearch({ immediate: true, force: true }) : undefined;
+    showMessage(text, { kind: 'error', onRetry });
     announce(`Search failed. ${text}`);
+  };
+
+  /** The era's cover (or its initials tile), cloned from the server-rendered CoverImage template. */
+  const renderCover = (eraId: number | null, eraName: string, theme: Theme, play: Record<string, string> | null) => {
+    const template = coverTemplate?.content.firstElementChild;
+    if (!(template instanceof HTMLElement)) return null;
+    const cover = template.cloneNode(true) as HTMLElement;
+    cover.style.setProperty('--cover-bg', theme.surface);
+    cover.style.setProperty('--cover-bg-end', theme.background);
+    cover.style.setProperty('--cover-fg', theme.accentText);
+    const initials = eraInitials(eraName);
+    const initialsText = cover.querySelector('[data-cover-initials]');
+    if (initialsText) initialsText.textContent = initials;
+    const image = cover.querySelector('img');
+    if (image) {
+      if (eraId !== null && play?.['data-has-cover'] === 'true') {
+        image.src = coverUrl(apiBaseUrl, eraId, play['data-cover-version'] || null);
+        image.dataset.initials = initials;
+      } else {
+        image.remove();
+      }
+    }
+    return cover;
   };
 
   const renderResult = (song: SearchSongPayload): HTMLLIElement => {
@@ -617,6 +697,33 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
 
     const { title, details } = songTextLines(song);
     const eraName = (typeof song.eraName === 'string' && song.eraName.trim()) || era?.name || 'Unknown era';
+    const attributes = playButtonAttributes(song, era);
+    const cover = renderCover(eraId, eraName, theme, attributes);
+
+    // The cover comes first: it is the play button when the song plays, a plain thumbnail otherwise.
+    if (attributes && song.playable === true) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'global-search__result-play';
+      for (const [name, value] of Object.entries(attributes)) button.setAttribute(name, value);
+      button.setAttribute('aria-label', `Play ${title}`);
+      const icon = document.createElement('span');
+      icon.className = 'global-search__result-play-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      if (playIcon) icon.append(playIcon.content.cloneNode(true));
+      if (cover) button.append(cover);
+      button.append(icon);
+      item.append(button);
+    } else if (cover) {
+      const thumb = document.createElement('span');
+      thumb.className = 'global-search__result-thumb';
+      thumb.setAttribute('aria-hidden', 'true');
+      thumb.append(cover);
+      item.append(thumb);
+    }
+
+    const text = document.createElement('div');
+    text.className = 'global-search__result-text';
     const href = songHref(song, eraPageSize);
     const heading = document.createElement(href ? 'a' : 'span');
     heading.className = 'global-search__result-title';
@@ -624,25 +731,42 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
       heading.href = href;
       heading.dataset.resultLink = '';
     }
+    heading.title = title;
+    // Credits are muted so the song's own name stands out.
+    const { main, credits } = splitCredits(title);
     const titleText = document.createElement('span');
-    titleText.textContent = title;
+    titleText.textContent = main;
+    heading.append(titleText);
+    if (credits) {
+      const creditsText = document.createElement('span');
+      creditsText.className = 'global-search__result-credits';
+      creditsText.textContent = ` ${credits}`;
+      heading.append(creditsText);
+    }
     const eraHint = document.createElement('span');
     eraHint.className = 'sr-only';
     eraHint.textContent = `, ${eraName}`;
-    heading.append(titleText, eraHint);
+    heading.append(eraHint);
+    text.append(heading);
 
+    // The era (already in the link's name, so hidden here) and the song's other names on one line.
+    const meta = document.createElement('span');
+    meta.className = 'global-search__result-meta';
     const eraLabel = document.createElement('span');
     eraLabel.className = 'global-search__result-era';
     eraLabel.setAttribute('aria-hidden', 'true');
     eraLabel.textContent = eraName;
-    item.append(heading, eraLabel);
-
+    meta.append(eraLabel);
     if (details.length > 0) {
+      const separator = document.createElement('span');
+      separator.setAttribute('aria-hidden', 'true');
+      separator.textContent = ' · ';
       const detailsText = document.createElement('span');
-      detailsText.className = 'global-search__result-details';
       detailsText.textContent = details.join(' · ');
-      item.append(detailsText);
+      meta.append(separator, detailsText);
+      meta.title = details.join(' · ');
     }
+    text.append(meta);
 
     const notes = typeof song.notes === 'string' ? song.notes.replace(WHITESPACE, ' ').trim() : '';
     if (notes) {
@@ -650,19 +774,9 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
       notesText.className = 'global-search__result-notes';
       notesText.textContent = truncate(notes, NOTES_PREVIEW_LENGTH);
       if (notes.length > NOTES_PREVIEW_LENGTH) notesText.title = truncate(notes, NOTES_TOOLTIP_LENGTH);
-      item.append(notesText);
+      text.append(notesText);
     }
-
-    const attributes = song.playable === true ? playButtonAttributes(song, era) : null;
-    if (attributes) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'global-search__result-play';
-      for (const [name, value] of Object.entries(attributes)) button.setAttribute(name, value);
-      button.setAttribute('aria-label', `Play ${title}`);
-      if (playIcon) button.append(playIcon.content.cloneNode(true));
-      item.append(button);
-    }
+    item.append(text);
 
     return item;
   };
@@ -698,7 +812,17 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     }
     count.textContent = summaryText(results);
     if (results.songs.length === 0) {
-      showMessage(results.hasText ? 'No songs match your search.' : 'No songs match these filters.');
+      const filtered = hasActiveFilters(readState(), eras.length);
+      let hint = 'Widen the era range or turn off “Playable only”.';
+      if (results.hasText) {
+        hint = filtered
+          ? 'Check the spelling, try fewer words, or loosen the filters.'
+          : 'Check the spelling or try fewer words.';
+      }
+      showMessage(results.hasText ? 'No songs match your search.' : 'No songs match these filters.', {
+        hint,
+        resetFilters: filtered,
+      });
     } else {
       hideMessage();
     }
@@ -757,6 +881,7 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
   const runSearch = async (state: GlobalSearchState, key: string, restoreScrollY: number | null = null) => {
     syncUrl(state);
     setBusy(true);
+    scheduleSkeleton();
     const scrollBefore = window.scrollY;
     const outcome = await track(key, 'search', (requestSignal) => fetchPage(state, 0, requestSignal));
     if (outcome === null) return;
@@ -777,6 +902,7 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     } else {
       showFailure(outcome.failure);
     }
+    settleInitialSearch();
     if (focusResultsWhenReady) focusResults();
   };
 
@@ -788,6 +914,7 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     if (mode !== 'search') {
       request?.controller.abort();
       request = null;
+      settleInitialSearch();
       if (mode === 'idle') showIdle();
       else showNoTerms();
       debounceTimer = window.setTimeout(() => syncUrl(state), DEBOUNCE_MS);
@@ -908,6 +1035,23 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
     { signal },
   );
 
+  // "Reset filters" in the no-matches message keeps the query and drops the filters.
+  resetFilters?.addEventListener(
+    'click',
+    () => {
+      range?.set(0, lastEra);
+      playable.checked = false;
+      // The button disappears with the message.
+      input.focus();
+      scheduleSearch({ immediate: true });
+    },
+    { signal },
+  );
+
+  filtersToggle?.addEventListener('click', () => setFiltersOpen(!root.hasAttribute('data-filters-open')), {
+    signal,
+  });
+
   panel.addEventListener(
     'keydown',
     (event) => {
@@ -982,13 +1126,17 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
   const initial = parseSearchState(new URLSearchParams(location.search), eraIds);
   applyState(initial);
   updateClear(initial);
+  // Filters set by the URL stay in view on phones (the server rendered the panel open for the same URL).
+  if (hasActiveFilters(initial, eras.length)) setFiltersOpen(true);
   // Drop what the state doesn't use (unknown era ids, bogus values, stray parameters) so the address matches the
   // page. Without the era list (catalog outage) era ids can't be checked, so the address is left as it is.
   if (eras.length > 0) syncUrl(initial);
   const mode = searchMode(initial, eras.length);
   if (mode === 'idle') {
+    settleInitialSearch();
     showIdle();
   } else if (mode === 'no-terms') {
+    settleInitialSearch();
     showNoTerms();
   } else {
     const key = searchKey(initial, eraIds);
@@ -1002,6 +1150,7 @@ function setupSearch(root: HTMLElement, signal: AbortSignal, navigation: Navigat
         pageable: snapshot.pageable,
       };
       renderResults();
+      settleInitialSearch();
       window.scrollTo({ top: snapshot.scrollY, behavior: 'instant' });
     } else {
       count.textContent = 'Searching…';

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { positionText, qualityLabel, volumeText } from './format.ts';
+import { positionText, progressRatio, qualityLabel, volumeText } from './format.ts';
 import { parseQuality, parseSession, parseVolume } from './storage.ts';
 
 const TRACK = {
@@ -90,5 +90,17 @@ describe('format', () => {
     assert.equal(volumeText(0.8, true), 'Muted');
     assert.equal(qualityLabel(''), 'Original');
     assert.equal(qualityLabel('128'), '128 kbps');
+  });
+
+  test('progress ratio for the fills and the mini progress line', () => {
+    assert.equal(progressRatio(83, 225), 0.369);
+    assert.equal(progressRatio(50, 100, 0), 0.5);
+    assert.equal(progressRatio(75, 100, 50), 0.5);
+    // Clamped, and 0 while the length is unknown or the value isn't a number.
+    assert.equal(progressRatio(-3, 100), 0);
+    assert.equal(progressRatio(230, 225), 1);
+    assert.equal(progressRatio(10, 0), 0);
+    assert.equal(progressRatio(10, Number.NaN), 0);
+    assert.equal(progressRatio(Number.NaN, 100), 0);
   });
 });

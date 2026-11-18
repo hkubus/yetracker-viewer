@@ -1,7 +1,9 @@
 ---
 /**
- * One page of an era's songs: the search form (query, category, sort), the song table, and the queue scope the
- * player reads (see the data-play-* attributes). Client behavior lives in `src/scripts/song-list.ts`.
+ * One page of an era's songs: the search form (query, a "Filters" disclosure with category and sort, the count and
+ * an optional `pager` slot), the song table, and the queue scope the player reads (see the data-play-* attributes).
+ * Wide screens show a table; phones and tablets show the same rows as a compact list. Client behavior lives in
+ * `src/scripts/song-list.ts`.
  *
  * Every prop except `apiBaseUrl` is optional so older callers keep working; without `total`/`offset` the counts
  * describe this page only and the player cannot continue past it.
@@ -15,11 +17,11 @@ import { formatCatalogDate, isoDate } from '../utils/dates';
 import { eraSongsApiPath } from '../utils/era-page';
 import { MAX_QUERY_LENGTH, normalizeQuery } from '../utils/search';
 import {
-  countLabel,
   DOWNLOAD_STATE_LABELS,
   downloadStateOf,
   linkLabel,
   linkNotes,
+  listCountText,
   playbackLength,
   type SongPayload,
   songLength,
@@ -98,16 +100,21 @@ if (!isCatalogOrder) queueParams.set('sort', sort);
 
 const idSuffix = eraIdValue ?? 'list';
 const headingId = `songs-heading-${idSuffix}`;
+const formId = `song-search-form-${idSuffix}`;
 const searchInputId = `song-search-${idSuffix}`;
 const categorySelectId = `song-category-${idSuffix}`;
 const sortSelectId = `song-sort-${idSuffix}`;
 const hintId = `song-search-hint-${idSuffix}`;
 const clearHref = `${eraPath}#songs`;
 
-const countText =
-  totalCount === null
-    ? `${countLabel(songs.length, 'song')} on this page`
-    : countLabel(totalCount, hasServerFilter ? 'matching song' : 'song');
+const countText = listCountText({
+  onPage: songs.length,
+  total: totalCount,
+  offset: firstOffset,
+  filtered: hasServerFilter,
+});
+/** Category and a non-default sort; the query shows in its own field. */
+const activeFilters = (category ? 1 : 0) + (isCatalogOrder ? 0 : 1);
 
 const categoryLabel = SONG_CATEGORIES.find((option) => option.id === category)?.label;
 const sortLabel = SONG_SORTS.find((option) => option.id === sort)?.label;
@@ -216,6 +223,7 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
 >
   <h2 id={headingId} class="sr-only">Songs</h2>
   <form
+    id={formId}
     class="song-search"
     role="search"
     aria-label={`Songs in this ${scopeName}`}
@@ -223,79 +231,101 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     action={`${eraPath}#songs`}
     data-song-search-form
   >
-    <div class="song-search__fields">
-      <div class="song-search__field song-search__field--query">
-        <label for={searchInputId}>Search songs in this {scopeName}</label>
-        <input
-          id={searchInputId}
-          name="q"
-          type="search"
-          value={query}
-          maxlength={MAX_QUERY_LENGTH}
-          autocomplete="off"
-          spellcheck="false"
-          enterkeyhint="search"
-          aria-describedby={hintId}
-          data-song-search
-        />
-      </div>
-      <div class="song-search__field">
-        <label for={categorySelectId}>Category</label>
-        <select id={categorySelectId} name="category">
-          <option value="" selected={category === ''}>All categories</option>
-          {
-            SONG_CATEGORIES.map((option) => (
-              <option value={option.id} selected={option.id === category}>
-                {`${option.label} ${option.emoji}`}
-              </option>
-            ))
-          }
-        </select>
-      </div>
-      <div class="song-search__field">
-        <label for={sortSelectId}>Sort</label>
-        <select id={sortSelectId} name="sort">
-          {
-            SONG_SORTS.map((option) => (
-              <option value={option.id} selected={option.id === sort}>
-                {option.label}
-              </option>
-            ))
-          }
-        </select>
-      </div>
-      <div class="song-search__buttons">
-        <button type="submit" class="song-search__submit">Search</button>
+    {/* The search button comes first in the form: it is the one Enter in the field activates. */}
+    <div class="song-search__query">
+      <label class="sr-only" for={searchInputId}>Search songs in this {scopeName}</label>
+      <input
+        id={searchInputId}
+        name="q"
+        type="search"
+        value={query}
+        placeholder={`Search this ${scopeName}`}
+        maxlength={MAX_QUERY_LENGTH}
+        autocomplete="off"
+        spellcheck="false"
+        enterkeyhint="search"
+        aria-describedby={hintId}
+        data-song-search
+      />
+      <button type="submit" class="song-search__submit">
+        <span class="song-search__submit-text">Search</span>
+      </button>
+    </div>
+    {/* A disclosure whose panel drops over the list; wide screens show the selects inline instead. */}
+    <details class="song-filters" data-song-filters>
+      <summary class="song-filters__toggle">
+        <span class="song-filters__label">Filters</span>
         {
-          (hasServerFilter || !isCatalogOrder) && (
-            <a class="song-search__clear" href={clearHref}>
-              Clear all filters
-            </a>
+          activeFilters > 0 && (
+            <>
+              <span class="song-filters__badge" aria-hidden="true">
+                {activeFilters}
+              </span>
+              <span class="sr-only">{`, ${activeFilters} active`}</span>
+            </>
           )
         }
+      </summary>
+      <div class="song-filters__panel">
+        <div class="song-filter">
+          <label for={categorySelectId}>Category</label>
+          <select id={categorySelectId} name="category">
+            <option value="" selected={category === ''}>All</option>
+            {
+              SONG_CATEGORIES.map((option) => (
+                <option value={option.id} selected={option.id === category}>
+                  {`${option.label} ${option.emoji}`}
+                </option>
+              ))
+            }
+          </select>
+        </div>
+        <div class="song-filter">
+          <label for={sortSelectId}>Sort</label>
+          <select id={sortSelectId} name="sort">
+            {
+              SONG_SORTS.map((option) => (
+                <option value={option.id} selected={option.id === sort}>
+                  {option.label}
+                </option>
+              ))
+            }
+          </select>
+        </div>
+        <button type="submit" class="song-filters__apply">Apply</button>
       </div>
-    </div>
-    <div class="song-search__meta">
-      <p id={hintId} class="song-search__hint">
-        Typing filters this page instantly. Search looks through the whole {scopeName} with the chosen category and
-        sort.
-      </p>
-      <p class="song-count" data-song-count>{countText}</p>
-    </div>
+    </details>
   </form>
+  <div class="song-status">
+    <p class="song-count" data-song-count>{countText}</p>
+    {
+      (hasServerFilter || !isCatalogOrder) && (
+        <a class="song-status__clear" href={clearHref} data-song-search-clear>
+          Clear all
+        </a>
+      )
+    }
+    <p id={hintId} class="song-search__hint">
+      Typing filters this page instantly. Search looks through the whole {scopeName}.
+    </p>
+    <slot name="pager" />
+  </div>
   <p class="sr-only" role="status" data-song-status></p>
 
   {
     rows.length === 0 ? (
-      <p class="song-empty">
+      <div class="song-empty">
         {hasServerFilter ? (
           <>
-            No songs in this {scopeName} match your search. <a href={clearHref}>Show all songs</a>
+            <p class="song-empty__title">No songs in this {scopeName} match your search.</p>
+            <a class="song-empty__action" href={clearHref}>
+              Show all songs
+            </a>
           </>
         ) : (
-          `There are no songs in this ${scopeName} yet.`
+          <p class="song-empty__title">There are no songs in this {scopeName} yet.</p>
         )}
-      </p>
+      </div>
     ) : (
       <>
         <table class="song-table" data-song-table>
@@ -309,16 +339,16 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
                 Title
               </th>
               <th scope="col">Notes</th>
-              <th scope="col" class="col-meta">
+              <th scope="col" class="col-quality">
                 Quality
               </th>
-              <th scope="col" class="col-meta">
+              <th scope="col" class="col-length">
                 Length
               </th>
-              <th scope="col" class="col-meta">
+              <th scope="col" class="col-date">
                 File date
               </th>
-              <th scope="col" class="col-meta">
+              <th scope="col" class="col-date">
                 Leak date
               </th>
             </tr>
@@ -373,12 +403,12 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
                           target="_blank"
                           rel="noopener noreferrer"
                           aria-label={`Open the source of ${row.title} (opens in a new tab)`}
-                          title={row.stateLabel ?? 'Open the source'}
+                          title="Open the source"
                         />
                       )}
                       {row.links.length > 1 && (
                         <details class="more-links" data-more-links>
-                          <summary class="song-action">
+                          <summary class="song-action song-action--more">
                             +{row.links.length - 1}
                             <span class="sr-only">
                               {` more ${row.links.length === 2 ? 'link' : 'links'} for ${row.title}`}
@@ -448,9 +478,12 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
             </tbody>
           ))}
         </table>
-        <p class="song-empty" data-song-empty hidden>
-          No songs on this page match your filter. Press <strong>Search</strong> to look through the whole {scopeName}.
-        </p>
+        <div class="song-empty" data-song-empty hidden>
+          <p class="song-empty__title" data-song-empty-message>No songs on this page match your filter.</p>
+          <button type="submit" form={formId} class="song-empty__action">
+            Search the whole {scopeName}
+          </button>
+        </div>
       </>
     )
   }
@@ -465,199 +498,408 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
   elements of a 100-song page (a fifth of its markup). Rows added by the script (note toggles) are styled the same way.
 -->
 <style is:global>
-  /* Paints its own theme background so the text contrast holds whatever the page puts behind it. */
+  /* No background of its own: the theme's text colors keep their contrast on the neutral page surfaces too. */
   .song-list {
-    --song-line: color-mix(in srgb, var(--theme-accent) 35%, var(--theme-background));
-    /* The icons of components/icons/{Play,Pause,Download,Link,ExternalLink}Icon.astro as CSS masks. */
+    /* The icons of components/icons/{Play,Pause,Download,Link,ExternalLink,Search}Icon.astro as CSS masks, plus a
+       "filters" (sliders) icon. */
     --song-icon-play: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M133 440a35.37 35.37 0 0 1-17.5-4.67c-12-6.8-19.46-20-19.46-34.33V111c0-14.37 7.46-27.53 19.46-34.33a35.13 35.13 0 0 1 35.77.45l247.85 148.36a36 36 0 0 1 0 61l-247.89 148.4A35.5 35.5 0 0 1 133 440'/%3E%3C/svg%3E");
     --song-icon-pause: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='6.5' y='5.5' width='4' height='13' rx='1.1'/%3E%3Crect x='13.5' y='5.5' width='4' height='13' rx='1.1'/%3E%3C/svg%3E");
     --song-icon-download: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M11 3h2v10.17l3.59-3.58L18 11l-6 6l-6-6l1.41-1.41L11 13.17zM5 19h14v2H5z'/%3E%3C/svg%3E");
     --song-icon-link: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M11 17H7q-2.075 0-3.537-1.463T2 12t1.463-3.537T7 7h4v2H7q-1.25 0-2.125.875T4 12t.875 2.125T7 15h4zm-3-4v-2h8v2zm5 4v-2h4q1.25 0 2.125-.875T20 12t-.875-2.125T17 9h-4V7h4q2.075 0 3.538 1.463T22 12t-1.463 3.538T17 17z'/%3E%3C/svg%3E");
     --song-icon-external: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --song-icon-search: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.25' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='6.5'/%3E%3Cpath d='m16 16 4 4'/%3E%3C/svg%3E");
+    --song-icon-filters: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M4 7h8M16 7h4M4 12h2M10 12h10M4 17h10M18 17h2'/%3E%3Ccircle cx='14' cy='7' r='2'/%3E%3Ccircle cx='8' cy='12' r='2'/%3E%3Ccircle cx='16' cy='17' r='2'/%3E%3C/svg%3E");
+    /* A background image in --color-text-muted, not a mask: a <select> has no pseudo-elements to paint one on. */
+    --song-select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a0a0a0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    /* Toolbar controls: 40px for a mouse, the full touch size for fingers. */
+    --control-size: 2.5rem;
+    /* Horizontal padding of a phone row; rows bleed into the page gutter by the same amount. */
+    --row-inset: var(--space-3);
+    --notes-lines: 3;
+    --notes-line-height: 1.45;
     min-width: 0;
     color: var(--theme-text);
-    background: var(--theme-background);
+  }
+  @media (pointer: coarse) {
+    .song-list {
+      --control-size: var(--tap-size);
+    }
   }
   .song-list :is(a, button, summary, input, select):focus-visible {
     outline: 2px solid var(--theme-focus-ring);
     outline-offset: 2px;
   }
 
-  /* ---- Search form ---- */
+  /* ---- Toolbar: the search field with its button, then Filters ---- */
   .song-list .song-search {
-    margin-bottom: 0.75rem;
-  }
-  .song-list .song-search__fields {
+    /* Anchors the Filters panel, which spans the toolbar under it. */
+    position: relative;
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-end;
-    gap: 0.6rem 0.75rem;
+    align-items: center;
+    gap: var(--space-2);
   }
-  .song-list .song-search__field {
+  .song-list .song-search__query {
     display: flex;
-    flex: 0 1 auto;
+    flex: 1 1 11rem;
     min-width: 0;
-    flex-direction: column;
-    gap: 0.3rem;
   }
-  .song-list .song-search__field--query {
-    flex: 1 1 16rem;
+  .song-list .song-search input {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: var(--control-size);
+    margin: 0;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--color-border-control);
+    border-right: 0;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    color: var(--theme-text);
+    background: var(--color-surface);
+    font: inherit;
+    /* 16px: iOS zooms into smaller fields on focus. */
+    font-size: var(--font-size-md);
   }
-  .song-list .song-search label {
+  .song-list .song-search input::placeholder {
     color: var(--theme-muted-text);
-    font-size: 0.85rem;
+    opacity: 1;
+  }
+  /* One rounded ring around the field and its attached button (the field's own ring would have a square right edge
+     where the button joins it). Forced colors keep the global system-colored outline on the field. */
+  .song-list .song-search__query:has(input:focus-visible) {
+    border-radius: var(--radius-md);
+    outline: 2px solid var(--theme-focus-ring);
+    outline-offset: 2px;
+  }
+  .song-list .song-search input:focus-visible {
+    outline: none;
+  }
+  .song-list :is(.song-search__submit, .song-filters__apply, .song-filters__toggle, .song-empty__action) {
+    box-sizing: border-box;
+    display: inline-flex;
+    flex: none;
+    min-width: var(--control-size);
+    height: var(--control-size);
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 0 var(--space-4);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    color: var(--theme-text);
+    background: var(--color-surface);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    line-height: var(--line-height-tight);
+    text-decoration: none;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
+  }
+  /* Primary actions are era-colored. Hover adds a halo instead of changing the fill, so the label keeps its contrast. */
+  .song-list :is(.song-search__submit, .song-filters__apply) {
+    border-color: var(--theme-accent);
+    color: var(--theme-on-accent);
+    background: var(--theme-accent);
     font-weight: 700;
   }
-  .song-list .song-search :is(input, select) {
+  .song-list .song-search__submit {
+    --song-icon: var(--song-icon-search);
+    padding-inline: var(--space-3) var(--space-4);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  }
+  @media (hover: hover) {
+    .song-list :is(.song-search__submit, .song-filters__apply):hover {
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--theme-accent) 40%, transparent);
+    }
+    .song-list :is(.song-filters__toggle, .song-empty__action):hover {
+      border-color: var(--color-border-control);
+      background: var(--color-surface-hover);
+    }
+  }
+  .song-list :is(.song-search__submit, .song-filters__apply, .song-filters__toggle, .song-empty__action):active {
+    transform: scale(0.97);
+  }
+
+  .song-list .song-filters {
+    flex: none;
+  }
+  .song-list .song-filters__toggle {
+    --song-icon: var(--song-icon-filters);
+    position: relative;
+    padding-inline: var(--space-3);
+    list-style: none;
+    user-select: none;
+  }
+  .song-list .song-filters__toggle::-webkit-details-marker {
+    display: none;
+  }
+  .song-list .song-filters[open] > .song-filters__toggle {
+    border-color: var(--theme-accent);
+    background: var(--color-surface-raised);
+  }
+  .song-list .song-filters__badge {
+    box-sizing: border-box;
+    display: inline-grid;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    place-items: center;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-pill);
+    color: var(--theme-on-accent);
+    background: var(--theme-accent);
+    font-size: var(--font-size-xs);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .song-list .song-filters__panel {
+    position: absolute;
+    z-index: var(--z-popover);
+    top: calc(100% + var(--space-2));
+    right: 0;
+    left: 0;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-3) var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-lg);
+  }
+  /* Not laid out at all while closed (a closed disclosure would still size it, against the wrong box). */
+  .song-list .song-filters:not([open]) > .song-filters__panel {
+    display: none;
+  }
+  .song-list .song-filter {
+    display: contents;
+  }
+  .song-list .song-filter label {
+    color: var(--theme-text);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+  }
+  .song-list .song-filter select {
     box-sizing: border-box;
     width: 100%;
-    min-height: 2.75rem;
-    padding: 0.55rem 0.8rem;
-    border: 2px solid var(--theme-accent);
-    border-radius: 0.6rem;
+    min-width: 0;
+    height: var(--control-size);
+    margin: 0;
+    padding: 0 2.25rem 0 var(--space-3);
+    border: 1px solid var(--color-border-control);
+    border-radius: var(--radius-md);
     color: var(--theme-text);
-    background: var(--theme-surface);
+    background: var(--color-bg) var(--song-select-arrow) right 0.625rem center / 1.125rem no-repeat;
     font: inherit;
-  }
-  .song-list .song-search select {
-    min-width: 10rem;
-    max-width: 16rem;
+    font-size: var(--font-size-md);
+    text-overflow: ellipsis;
+    appearance: none;
     color-scheme: dark;
     cursor: pointer;
   }
-  .song-list .song-search__buttons {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
+  @media (hover: hover) {
+    .song-list .song-filter select:hover {
+      border-color: var(--theme-text);
+    }
   }
-  .song-list .song-search__submit {
-    min-height: 2.75rem;
-    padding: 0.55rem 1.2rem;
-    border: 2px solid var(--theme-accent);
-    border-radius: 0.6rem;
-    color: var(--theme-on-accent);
-    background: var(--theme-accent);
-    cursor: pointer;
-    font: inherit;
-    font-weight: 700;
+  .song-list .song-filters__apply {
+    grid-column: 1 / -1;
   }
-  .song-list .song-search__submit:hover {
-    text-decoration: underline;
-    text-underline-offset: 0.2em;
+
+  /* Narrow phones: Filters is an icon with its count as a corner badge. */
+  @media (max-width: 23.99rem) {
+    .song-list .song-filters__label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .song-list .song-filters__toggle {
+      padding: 0;
+    }
+    .song-list .song-filters__badge {
+      position: absolute;
+      top: -0.375rem;
+      right: -0.375rem;
+    }
   }
-  .song-list :is(.song-search__clear, .song-empty a) {
-    color: var(--theme-accent-text);
-    font-size: 0.9rem;
-    text-underline-offset: 0.2em;
+  /* Phones: the search button is its icon. */
+  @media (max-width: 40rem) {
+    .song-list .song-search__submit {
+      padding: 0;
+    }
+    .song-list .song-search__submit-text {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
   }
-  .song-list .song-search__meta {
+  /* Wide screens: the selects sit in the toolbar, without the disclosure. Browsers without ::details-content keep
+     the disclosure. */
+  @media (min-width: 64rem) {
+    .song-list .song-search__query {
+      flex: 0 1 32rem;
+    }
+    @supports selector(::details-content) {
+      .song-list .song-filters {
+        flex: 0 1 auto;
+      }
+      .song-list .song-filters__toggle {
+        display: none;
+      }
+      .song-list .song-filters::details-content {
+        display: block;
+        content-visibility: visible;
+        block-size: auto;
+      }
+      .song-list .song-filters__panel,
+      .song-list .song-filters:not([open]) > .song-filters__panel {
+        position: static;
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2) var(--space-4);
+        padding: 0;
+        border: 0;
+        background: none;
+        box-shadow: none;
+      }
+      .song-list .song-filter {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+      }
+      .song-list .song-filter label {
+        color: var(--theme-muted-text);
+      }
+      .song-list .song-filter select {
+        width: auto;
+        max-width: 16rem;
+      }
+      /* The search button applies the filters too; this one stays for those who look for it next to the selects. */
+      .song-list .song-filters__apply {
+        border-color: var(--color-border-strong);
+        color: var(--theme-text);
+        background: var(--color-surface);
+        font-weight: 600;
+      }
+    }
+  }
+
+  /* ---- Status line: the one count, "Clear all", the hint and the page arrows ---- */
+  .song-list .song-status {
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.25rem 1rem;
-    margin-top: 0.5rem;
-  }
-  .song-list :is(.song-search__hint, .song-count) {
-    margin: 0;
-    color: var(--theme-muted-text);
-    font-size: 0.82rem;
+    align-items: center;
+    gap: var(--space-1) var(--space-3);
+    margin: var(--space-2) 0;
   }
   .song-list .song-count {
+    margin: 0;
+    color: var(--theme-text);
+    font-size: var(--font-size-sm);
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
+  .song-list .song-status__clear {
+    display: inline-flex;
+    min-height: 1.5rem;
+    align-items: center;
+    color: var(--theme-accent-text);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    text-underline-offset: 0.2em;
+  }
+  .song-list .song-search__hint {
+    flex: 1 1 18rem;
+    margin: 0;
+    color: var(--theme-muted-text);
+    font-size: var(--font-size-xs);
+    text-wrap: pretty;
+  }
+  .song-list .song-status > .pagination {
+    margin-left: auto;
+  }
+  @media (pointer: coarse) {
+    .song-list .song-status__clear {
+      min-height: var(--tap-size);
+    }
+  }
+  /* Phones: the field's placeholder and the count say enough; the hint stays as the field's description. */
+  @media (max-width: 47.99rem) {
+    .song-list .song-search__hint {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+
+  /* ---- Empty states ---- */
   .song-list .song-empty {
-    margin: 1rem 0.25rem 0.5rem;
+    --song-icon: var(--song-icon-search);
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    margin: var(--space-4) 0;
+    padding: var(--space-6) var(--space-4);
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius-lg);
     color: var(--theme-muted-text);
     text-align: center;
   }
   .song-list .song-empty[hidden] {
     display: none;
   }
+  .song-list .song-empty::before {
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+  .song-list .song-empty__title {
+    margin: 0;
+    color: var(--theme-text);
+    font-weight: 600;
+    text-wrap: balance;
+  }
 
-  /* ---- Table (wide screens) ---- */
+  /* ---- Rows (both layouts) ---- */
   .song-list .song-table {
-    /* A parent with padding sets --song-list-bleed to it: the table then spans the parent edge to edge. */
-    width: calc(100% + 2 * var(--song-list-bleed, 0px));
-    margin-inline: calc(-1 * var(--song-list-bleed, 0px));
-    border-collapse: collapse;
-    /* Fixed layout keeps the column widths stable: clamped notes contribute almost no intrinsic width. */
-    table-layout: fixed;
-    font-size: 0.9rem;
-  }
-  .song-list .song-table :is(th, td) {
-    padding: 0.5rem 0.6rem;
-    border: 1px solid var(--song-line);
-    background: var(--row-bg, var(--theme-background));
-    text-align: left;
-    vertical-align: top;
-    overflow-wrap: anywhere;
-  }
-  .song-list .song-table tr > :first-child {
-    border-left: 0;
-  }
-  .song-list .song-table tr > :last-child {
-    border-right: 0;
-  }
-  .song-list .song-table thead th {
-    position: sticky;
-    z-index: 2;
-    top: 0;
-    padding-block: 0.6rem;
-    background: var(--theme-surface);
-    font-size: 0.8rem;
-    font-weight: 700;
-    overflow-wrap: normal;
-  }
-  /* Column widths include the padding; the notes column takes the rest. */
-  .song-list .song-table thead th {
-    box-sizing: border-box;
-  }
-  /* Two 2rem icons side by side. */
-  .song-list .col-actions {
-    width: 6rem;
-  }
-  .song-list .col-title {
-    width: 25%;
-  }
-  /* Fits a date such as 12/28/2023 on one line. */
-  .song-list .col-meta {
-    width: 6.5rem;
-  }
-  .song-list .song-table time {
-    white-space: nowrap;
-  }
-  .song-list .song-table :is(.col-meta, .song-quality, .song-length, .song-file-date, .song-leak-date) {
-    text-align: center;
-  }
-  .song-list :is(.song-quality, .song-length, .song-file-date, .song-leak-date) {
-    font-size: 0.85rem;
-  }
-  .song-list .song-table td.is-blank:not(.song-notes-cell)::after {
-    color: var(--theme-muted-text);
-    content: '—';
-    content: '—' / 'Unknown';
-  }
-  /* The availability ("OG File") is the cell's own text; the time goes on the next line. */
-  .song-list .song-length__time {
-    display: block;
-    color: var(--theme-muted-text);
-  }
-  .song-list [data-play-row] {
-    /* Also the backdrop of the "More" toggle that sits on the notes' last line. */
-    --row-bg: var(--theme-background);
-    /* Clear of the sticky column headers. */
-    scroll-margin-top: 3.5rem;
-    scroll-margin-bottom: 1rem;
+    border-spacing: 0;
   }
   .song-list :is([data-play-row], .song-group-row)[hidden] {
     display: none !important;
   }
+  .song-list [data-play-row] {
+    /* Also the backdrop of the "More" toggle that sits on the notes' last line. */
+    --row-bg: var(--color-bg);
+    /* Clear of the sticky column or sub-era headers. */
+    scroll-margin-top: 3.5rem;
+    scroll-margin-bottom: 1rem;
+  }
+  @media (hover: hover) {
+    .song-list [data-play-row]:hover {
+      --row-bg: var(--color-surface);
+    }
+  }
+  /* The playing (or linked) song: the era's surface tint, contrast-safe for the theme's text colors. */
   .song-list [data-play-row]:is(:target, [data-playing='true']) {
     --row-bg: var(--theme-surface);
-  }
-  .song-list [data-play-row]:is(:target, [data-playing='true']) > :first-child {
-    box-shadow: inset 4px 0 0 var(--theme-accent);
   }
   .song-list [data-play-row][data-playing='true'] .song-title::after {
     color: var(--theme-accent-text);
@@ -665,53 +907,62 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     content: ' ♪' / '';
   }
   .song-list .song-group-row > th {
-    padding: 0.45rem 0.6rem;
-    color: var(--theme-accent-text);
-    background: var(--theme-surface);
-    font-size: 0.78rem;
+    color: var(--theme-text);
+    font-size: var(--font-size-md);
     font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    line-height: var(--line-height-snug);
+    text-align: left;
+    text-wrap: balance;
+  }
+  /* A short accent bar marks where a sub-era starts. */
+  .song-list .song-group-row > th::before {
+    display: inline-block;
+    width: 0.25rem;
+    height: 1em;
+    margin-right: var(--space-2);
+    border-radius: var(--radius-pill);
+    background: var(--theme-accent);
+    content: '';
+    vertical-align: -0.125em;
   }
   .song-list .song-group-row__continued {
     color: var(--theme-muted-text);
-    font-weight: 600;
-    letter-spacing: 0;
-    text-transform: none;
+    font-size: var(--font-size-sm);
+    font-weight: 400;
   }
 
   /* Title cell: the title line prominent, credits and alternate titles muted. */
   .song-list .song-title-cell {
     font-weight: 400;
-    line-height: 1.35;
+    line-height: var(--line-height-snug);
+    text-align: left;
   }
   .song-list .song-title {
     display: block;
     color: var(--theme-text);
-    font-size: 0.95rem;
+    font-size: var(--font-size-md);
     font-weight: 600;
   }
   .song-list .song-detail {
     display: block;
-    margin-top: 0.15rem;
+    margin-top: 0.125rem;
     color: var(--theme-muted-text);
-    font-size: 0.8rem;
+    font-size: var(--font-size-xs);
   }
   .song-list .song-subera {
     display: inline-block;
-    margin-top: 0.3rem;
+    margin-top: var(--space-1);
     color: var(--theme-accent-text);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: var(--font-size-xs);
+    font-weight: 600;
   }
 
-  /* Notes keep the catalog's line breaks. Where scripts run they are clamped to three lines until expanded (the
-     script adds "More" toggles). The clamp applies from the first layout: switching it on later would lay out the
-     whole list a second time. Browsers without the `scripting` media feature clamp once the script marks the list. */
+  /* Notes keep the catalog's line breaks. Where scripts run they are clamped (three lines in the table, two in the
+     phone list) until expanded (the script adds "More" toggles). The clamp applies from the first layout: switching
+     it on later would lay out the whole list a second time. Browsers without the `scripting` media feature clamp once
+     the script marks the list. */
   .song-list .song-notes-cell {
-    line-height: 1.45;
+    line-height: var(--notes-line-height);
   }
   .song-list .song-notes {
     position: relative;
@@ -725,16 +976,16 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
       display: -webkit-box;
       overflow: hidden;
       -webkit-box-orient: vertical;
-      -webkit-line-clamp: 3;
-      line-clamp: 3;
+      -webkit-line-clamp: var(--notes-lines);
+      line-clamp: var(--notes-lines);
     }
   }
   .song-list[data-enhanced] .notes-text:not([data-expanded]) {
     display: -webkit-box;
     overflow: hidden;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
+    -webkit-line-clamp: var(--notes-lines);
+    line-clamp: var(--notes-lines);
   }
   .song-list .notes-text a {
     color: var(--theme-accent-text);
@@ -746,15 +997,15 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
   .song-list .notes-toggle {
     position: absolute;
     right: 0;
-    bottom: calc((1.45em - 1.5rem) / 2);
+    bottom: calc((var(--notes-line-height) * 1em - 1.5rem) / 2);
     box-sizing: border-box;
     display: inline-flex;
     min-height: 1.5rem;
     align-items: center;
-    padding: 0 0.1rem 0 1.6rem;
+    padding: 0 0.125rem 0 1.625rem;
     border: 0;
     color: var(--theme-accent-text);
-    background: linear-gradient(90deg, transparent, var(--row-bg) 1.4rem);
+    background: linear-gradient(90deg, transparent, var(--row-bg) 1.375rem);
     cursor: pointer;
     font: inherit;
     font-weight: 700;
@@ -777,17 +1028,7 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.25rem;
-  }
-  /* A song without audio or links: a dash (decorative, the audio state says it in words). */
-  .song-list .song-actions:empty::before {
-    display: inline-grid;
-    min-width: 2rem;
-    height: 2rem;
-    place-items: center;
-    color: var(--theme-muted-text);
-    content: '—';
-    content: '—' / '';
+    gap: var(--space-1);
   }
   .song-list .song-action {
     box-sizing: border-box;
@@ -795,24 +1036,37 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     min-width: 2rem;
     height: 2rem;
     place-items: center;
-    padding: 0 0.3rem;
+    padding: 0 var(--space-1);
     border: 1px solid transparent;
-    border-radius: 999px;
-    color: var(--theme-text);
+    border-radius: var(--radius-pill);
+    color: var(--theme-muted-text);
     background: transparent;
     cursor: pointer;
     font: inherit;
     text-decoration: none;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
   }
-  .song-list .song-action:hover {
-    border-color: var(--theme-accent);
-    background: var(--theme-surface);
+  @media (hover: hover) {
+    .song-list .song-action:hover {
+      border-color: var(--color-border-strong);
+      color: var(--theme-text);
+      background: var(--color-surface);
+    }
+  }
+  .song-list .song-action:active {
+    color: var(--theme-text);
+    background: var(--color-surface-raised);
   }
   /* Icons are masks painted in the text color, so they follow the theme and forced-colors mode alike. */
   .song-list :is(.song-action--play, .song-action--download, .song-action--source)::before,
+  .song-list :is(.song-search__submit, .song-filters__toggle, .song-empty)::before,
   .song-list .more-links a::after {
-    width: 1.15rem;
-    height: 1.15rem;
+    width: 1.125rem;
+    height: 1.125rem;
     flex: none;
     background: currentColor;
     content: '';
@@ -822,12 +1076,15 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
   }
   /* Forced colors: the masks keep their color (forced-color-adjust), so they take the system color of their control. */
   @media (forced-colors: active) {
-    .song-list .song-action--play::before {
+    .song-list :is(.song-action--play, .song-search__submit, .song-filters__toggle)::before {
       background: ButtonText;
     }
     .song-list :is(.song-action--download, .song-action--source)::before,
     .song-list .more-links a::after {
       background: LinkText;
+    }
+    .song-list .song-empty::before {
+      background: CanvasText;
     }
   }
   .song-list .song-action--play {
@@ -835,10 +1092,18 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     color: var(--theme-on-accent);
     background: var(--theme-accent);
   }
-  .song-list .song-action--play:hover {
-    border-color: var(--theme-text);
+  @media (hover: hover) {
+    .song-list .song-action--play:hover {
+      border-color: transparent;
+      color: var(--theme-on-accent);
+      background: var(--theme-accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--theme-accent) 40%, transparent);
+    }
+  }
+  .song-list .song-action--play:active {
     color: var(--theme-on-accent);
     background: var(--theme-accent);
+    transform: scale(0.94);
   }
   /* The player sets aria-pressed on the current song's button while it plays. */
   .song-list .song-action--play[aria-pressed='true'] {
@@ -850,7 +1115,7 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
   .song-list .song-action--source {
     --song-icon: var(--song-icon-link);
   }
-  /* The audio state is read out in the table and shown on the cards. */
+  /* The audio state is read out in the table and shown in the phone list. */
   .song-list .song-state {
     position: absolute;
     width: 1px;
@@ -866,9 +1131,11 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     position: relative;
   }
   .song-list .more-links > summary {
-    border-color: var(--song-line);
-    font-size: 0.75rem;
+    border-color: var(--color-border-strong);
+    color: var(--theme-text);
+    font-size: var(--font-size-xs);
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
     list-style: none;
   }
   .song-list .more-links > summary::-webkit-details-marker {
@@ -876,39 +1143,41 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
   }
   .song-list .more-links[open] > summary {
     border-color: var(--theme-accent);
-    background: var(--theme-surface);
+    background: var(--color-surface);
   }
   .song-list .more-links > ul {
     position: absolute;
-    z-index: 3;
-    top: calc(100% + 0.3rem);
+    z-index: var(--z-popover);
+    top: calc(100% + var(--space-1));
     left: 0;
     box-sizing: border-box;
     width: max-content;
     min-width: 12rem;
     max-width: min(22rem, 80vw);
     margin: 0;
-    padding: 0.3rem;
-    border: 1px solid var(--theme-accent);
-    border-radius: 0.6rem;
-    background: var(--theme-surface);
-    box-shadow: 0 0.6rem 1.6rem rgb(0 0 0 / 45%);
+    padding: var(--space-1);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-md);
     list-style: none;
   }
   .song-list .more-links a {
     --song-icon: var(--song-icon-external);
     display: flex;
-    min-height: 2rem;
+    min-height: 2.25rem;
     align-items: center;
-    gap: 0.4rem;
-    padding: 0.3rem 0.5rem;
-    border-radius: 0.4rem;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     color: var(--theme-accent-text);
-    font-size: 0.82rem;
+    font-size: var(--font-size-sm);
     text-underline-offset: 0.15em;
   }
-  .song-list .more-links a:hover {
-    background: var(--theme-background);
+  @media (hover: hover) {
+    .song-list .more-links a:hover {
+      background: var(--color-bg);
+    }
   }
   .song-list .more-links__label {
     overflow: hidden;
@@ -916,33 +1185,143 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
     white-space: nowrap;
   }
   .song-list .more-links a::after {
-    width: 0.9rem;
-    height: 0.9rem;
+    width: 0.875rem;
+    height: 0.875rem;
   }
 
   @media (pointer: coarse) {
-    .song-list .song-action,
-    .song-list .song-actions:empty::before {
-      min-width: 2.75rem;
-      height: 2.75rem;
-    }
-    .song-list .notes-toggle::before {
-      inset: -0.6rem -0.3rem -0.6rem 0.4rem;
+    .song-list .song-action {
+      min-width: var(--tap-size);
+      height: var(--tap-size);
     }
     .song-list .more-links a {
-      min-height: 2.75rem;
+      min-height: var(--tap-size);
+    }
+    /* A 44px tall target around the small "More"/"Less" link; it only overlaps the notes and the row's padding. */
+    .song-list .notes-toggle::before {
+      position: absolute;
+      inset: -0.625rem -0.5rem;
+      content: '';
     }
   }
 
-  /* ---- Cards (phones and tablets): one card per song; the column headers stay for screen readers. ---- */
+  /* ---- Table (wide screens): hairlines between rows, sticky column headers ---- */
+  @media (min-width: 56.3125rem) {
+    .song-list .song-table {
+      width: 100%;
+      border-collapse: separate;
+      /* Fixed layout keeps the column widths stable: clamped notes contribute almost no intrinsic width. */
+      table-layout: fixed;
+      font-size: var(--font-size-sm);
+    }
+    .song-list .song-table :is(th, td) {
+      box-sizing: border-box;
+      padding: var(--space-3) var(--space-2);
+      border-bottom: 1px solid var(--color-border);
+      background: var(--row-bg, var(--color-bg));
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    .song-list .song-table tr > :first-child {
+      padding-left: var(--space-3);
+    }
+    .song-list .song-table tr > :last-child {
+      padding-right: var(--space-3);
+    }
+    .song-list .song-table thead th {
+      position: sticky;
+      z-index: var(--z-sticky);
+      top: 0;
+      padding-block: var(--space-2);
+      border-bottom-color: var(--color-border-strong);
+      color: var(--theme-muted-text);
+      font-size: var(--font-size-xs);
+      font-weight: 600;
+      overflow-wrap: normal;
+      white-space: nowrap;
+    }
+    /* Three icons side by side; extra links wrap under them. */
+    .song-list .col-actions {
+      width: 7.75rem;
+    }
+    .song-list .col-title {
+      width: 24%;
+    }
+    .song-list .col-quality {
+      width: 6.5rem;
+    }
+    /* Fits "Confirmed" (an availability) on one line. */
+    .song-list .col-length {
+      width: 6.25rem;
+    }
+    /* Fits a date such as 12/28/2023 on one line. */
+    .song-list .col-date {
+      width: 6.25rem;
+    }
+    .song-list .song-table :is(.song-quality, .song-length, .song-file-date, .song-leak-date) {
+      font-variant-numeric: tabular-nums;
+    }
+    .song-list .song-table time {
+      white-space: nowrap;
+    }
+    .song-list .song-table td.is-blank:not(.song-notes-cell)::after {
+      color: var(--theme-muted-text);
+      content: '—';
+      content: '—' / 'Unknown';
+    }
+    /* The availability ("OG File") is the cell's own text; the time goes on the next line. */
+    .song-list .song-length__time {
+      display: block;
+      color: var(--theme-muted-text);
+    }
+    .song-list [data-play-row]:is(:target, [data-playing='true']) > :first-child {
+      box-shadow: inset 3px 0 0 var(--theme-accent);
+    }
+    .song-list .song-group-row > th {
+      padding: var(--space-5) var(--space-3) var(--space-2);
+      border-bottom-color: var(--color-border-strong);
+    }
+    /* A song without audio or links: a dash (decorative, the audio state says it in words). */
+    .song-list .song-actions:empty::before {
+      display: inline-grid;
+      min-width: 2rem;
+      height: 2rem;
+      place-items: center;
+      color: var(--theme-muted-text);
+      content: '—';
+      content: '—' / '';
+    }
+  }
+  /* Narrower tables: tighter meta columns leave the notes a usable width. */
+  @media (min-width: 56.3125rem) and (max-width: 75rem) {
+    .song-list .col-title {
+      width: 22%;
+    }
+    .song-list .col-quality {
+      width: 5.5rem;
+    }
+    .song-list .col-length {
+      width: 4.75rem;
+    }
+    .song-list .col-date {
+      width: 5.5rem;
+    }
+    .song-list .song-table :is(.song-quality, .song-length, .song-file-date, .song-leak-date) {
+      font-size: var(--font-size-xs);
+    }
+  }
+
+  /* ---- Compact list (phones and tablets): one row per song, the column headers stay for screen readers ----
+     Line 1: title, then the play button or the audio state. Line 2: quality · length · dates, then the download,
+     source and extra-links icons on the right. Then the notes, clamped to two lines. */
   @media (max-width: 56.25rem) {
+    .song-list {
+      --notes-lines: 2;
+    }
     .song-list .song-table,
     .song-list .song-table > tbody {
       display: block;
-    }
-    .song-list .song-table {
-      width: auto;
-      margin-inline: 0;
     }
     .song-list .song-table > thead {
       position: absolute;
@@ -955,157 +1334,159 @@ if (firstGroup?.label && firstOffset > 0 && eraIdValue !== null) {
       border: 0;
       white-space: nowrap;
     }
-    .song-list .song-group-row,
+    /* Sub-era headers stay on top while their songs scroll by. */
+    .song-list .song-group-row {
+      position: sticky;
+      z-index: var(--z-sticky);
+      top: 0;
+      display: block;
+      margin-inline: calc(-1 * var(--row-inset));
+      padding-inline: var(--row-inset);
+      background: var(--color-bg);
+    }
     .song-list .song-group-row > th {
       display: block;
-    }
-    .song-list .song-table .song-group-row > th {
-      margin: 1rem 0 0.5rem;
-      padding: 0.4rem 0.2rem;
-      border: 0;
-      border-bottom: 2px solid var(--theme-accent);
-      background: transparent;
+      padding: var(--space-4) 0 var(--space-2);
+      border-bottom: 1px solid var(--color-border-strong);
     }
     .song-list [data-play-row] {
-      --row-bg: var(--theme-surface);
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 0.55rem 0.9rem;
-      margin: 0 0 0.6rem;
-      padding: 0.75rem 0.85rem;
-      border: 1px solid var(--song-line);
-      border-radius: 0.75rem;
+      /* Anchors the extra-links menu, so it stays on the row instead of running off a phone's screen. */
+      position: relative;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--space-1) var(--space-2);
+      margin-inline: calc(-1 * var(--row-inset));
+      padding: var(--space-3) var(--row-inset);
+      border-bottom: 1px solid var(--color-border);
       background: var(--row-bg);
-      scroll-margin-top: 1rem;
+    }
+    /* Ends line 1. Its negative margin takes back the row gap the empty line would add. */
+    .song-list [data-play-row]::after {
+      flex-basis: 100%;
+      order: 3;
+      margin-top: calc(-1 * var(--space-1));
+      content: '';
+    }
+    .song-list [data-play-row]:is(:target, [data-playing='true']) {
+      box-shadow: inset 3px 0 0 var(--theme-accent);
     }
     .song-list .song-table [data-play-row] > :is(th, td) {
       display: block;
       min-width: 0;
       padding: 0;
       border: 0;
-      background: transparent;
       text-align: left;
-    }
-    .song-list .song-table [data-play-row] > .song-actions-cell {
-      /* Anchors the "more links" menu, so it spans the card instead of running off a phone's screen. */
-      position: relative;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.35rem 0.75rem;
-      grid-column: 1 / -1;
-      order: -1;
-    }
-    .song-list .song-title-cell {
-      grid-column: 1 / -1;
-      order: -2;
-    }
-    .song-list .song-notes-cell {
-      grid-column: 1 / -1;
     }
     .song-list .song-table [data-play-row] > td.is-blank {
       display: none;
     }
-    /* Card labels. The generated text is hidden from assistive technology, which gets the column headers. */
-    .song-list [data-play-row] > :is(.song-notes-cell, .song-quality, .song-length, .song-file-date, .song-leak-date)::before {
-      display: block;
-      margin-bottom: 0.1rem;
-      color: var(--theme-muted-text);
-      font-size: 0.68rem;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
+    /* The actions become items of the row itself, so each can go to its own line. */
+    .song-list .song-table [data-play-row] > .song-actions-cell,
+    .song-list .song-actions {
+      display: contents;
     }
-    .song-list .song-notes-cell::before {
-      content: 'Notes';
-      content: 'Notes' / '';
+    .song-list .song-title-cell {
+      flex: 1 1 0;
+      order: 1;
     }
-    .song-list .song-quality::before {
-      content: 'Quality';
-      content: 'Quality' / '';
+    .song-list :is(.song-action--play, .song-state) {
+      order: 2;
     }
-    .song-list .song-length::before {
-      content: 'Length';
-      content: 'Length' / '';
+    .song-list .song-action--play {
+      min-width: 2.5rem;
+      height: 2.5rem;
     }
-    .song-list .song-file-date::before {
-      content: 'File date';
-      content: 'File date' / '';
-    }
-    .song-list .song-leak-date::before {
-      content: 'Leak date';
-      content: 'Leak date' / '';
+    .song-list .song-action--play::before {
+      width: 1.25rem;
+      height: 1.25rem;
     }
     .song-list .song-state {
       position: static;
-      flex: 1 1 10rem;
+      flex: 0 1 auto;
       width: auto;
+      max-width: 40%;
       height: auto;
       margin: 0;
       overflow: visible;
       clip-path: none;
       color: var(--theme-muted-text);
-      font-size: 0.8rem;
+      font-size: var(--font-size-xs);
+      line-height: var(--line-height-snug);
+      text-align: right;
+      text-wrap: balance;
       white-space: normal;
     }
-    /* The state text says it in words here. */
-    .song-list .song-actions:empty {
-      display: none;
+    .song-list [data-play-row] > :is(.song-quality, .song-length, .song-file-date, .song-leak-date) {
+      order: 4;
+      color: var(--theme-muted-text);
+      font-size: var(--font-size-xs);
+      font-variant-numeric: tabular-nums;
+      line-height: var(--line-height-snug);
+    }
+    /* A middle dot after each meta value that another one follows: a wrapped line starts with a value. */
+    .song-list
+      [data-play-row]
+      > :is(.song-quality, .song-length, .song-file-date):not(.is-blank):has(~ td:not(.is-blank))::after {
+      margin-left: var(--space-2);
+      content: '·';
+      content: '·' / '';
+    }
+    /* Leading spaces collapse at the start of a line: a space only when the availability text precedes the time. */
+    .song-list .song-length__time::before {
+      content: ' ';
+    }
+    .song-list .song-file-date time::before {
+      content: 'File ';
+      content: 'File ' / '';
+    }
+    .song-list .song-leak-date time::before {
+      content: 'Leaked ';
+      content: 'Leaked ' / '';
+    }
+    .song-list :is(.song-action--download, .song-action--source, .more-links) {
+      order: 5;
+    }
+    /* The secondary icons go to the right end of the meta line. */
+    .song-list .song-actions > :is(.song-action--download, .song-action--source:first-child) {
+      margin-left: auto;
+    }
+    .song-list .song-notes-cell {
+      flex-basis: 100%;
+      order: 6;
+      margin-top: var(--space-1);
+      color: var(--theme-muted-text);
+      font-size: var(--font-size-sm);
     }
     .song-list .more-links {
       position: static;
     }
     .song-list .more-links > ul {
-      max-width: min(22rem, 100%);
-    }
-    .song-list [data-play-row]:is(:target, [data-playing='true']) {
-      border-color: var(--theme-accent);
-      box-shadow: inset 4px 0 0 var(--theme-accent);
-    }
-    .song-list [data-play-row]:is(:target, [data-playing='true']) > :first-child {
-      box-shadow: none;
+      top: auto;
+      right: var(--row-inset);
+      left: auto;
+      max-width: calc(100% - 2 * var(--row-inset));
+      margin-top: var(--space-1);
     }
   }
-
-  /* Narrow tables: tighter meta columns leave the notes a usable width. */
-  @media (min-width: 56.3125rem) and (max-width: 70rem) {
-    .song-list .song-table :is(th, td) {
-      padding-inline: 0.45rem;
+  /* Touch: full-size targets that take only 2rem of the meta line, so the rows stay short. */
+  @media (max-width: 56.25rem) and (pointer: coarse) {
+    .song-list :is(.song-action--download, .song-action--source, .more-links > summary) {
+      margin-block: -0.375rem;
     }
-    .song-list .col-meta {
-      width: 5.75rem;
+    .song-list .song-action--play {
+      min-width: var(--tap-size);
+      height: var(--tap-size);
     }
-    .song-list :is(.song-quality, .song-length, .song-file-date, .song-leak-date) {
-      font-size: 0.8rem;
+    /* The ring is drawn 2rem tall inside the transparent 44px border, like the plain icons beside it. */
+    .song-list .more-links > summary,
+    .song-list .more-links > summary:hover {
+      border: 0.375rem solid transparent;
+      background-clip: padding-box;
+      box-shadow: inset 0 0 0 1px var(--color-border-strong);
     }
-  }
-
-  /* Narrower screens: the search field gets its own row, the selects and buttons share the next one. */
-  @media (max-width: 64rem) {
-    .song-list .song-search__field--query {
-      flex-basis: 100%;
-    }
-  }
-
-  @media (max-width: 40rem) {
-    .song-list .song-search__field:not(.song-search__field--query) {
-      flex: 1 1 10rem;
-    }
-    .song-list .song-search select {
-      min-width: 0;
-      max-width: none;
-    }
-    .song-list .song-search__buttons {
-      flex: 1 1 100%;
-    }
-    .song-list .song-search__submit {
-      flex: 1 1 auto;
-    }
-  }
-
-  @media (max-width: 30rem) {
-    .song-list [data-play-row] {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+    .song-list .more-links[open] > summary {
+      box-shadow: inset 0 0 0 1px var(--theme-accent);
     }
   }
 </style>

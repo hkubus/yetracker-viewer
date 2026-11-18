@@ -1,7 +1,7 @@
 /**
  * Client behavior of the era song list (components/SongList.astro): instant filtering of the rendered page,
- * clamped notes with "More" toggles, the "more links" menus, clean search URLs, focus after a search, and centering
- * of a deep-linked song (`#song-123`).
+ * clamped notes with "More" toggles, the "more links" menus and the Filters panel, clean search URLs, focus after a
+ * search, and centering of a deep-linked song (`#song-123`).
  *
  * With the ClientRouter this module is evaluated once per document. Each page that contains a song list is set up
  * on `astro:page-load` (and right away on the first load) and everything it registers — listeners, observers,
@@ -55,6 +55,12 @@ interface ListQuery {
 const SEARCHED_CELLS = '.song-title-cell, [data-notes-text], .song-quality, .song-length';
 /** Text inside the searched cells that the API doesn't search. */
 const UNSEARCHED_TEXT = '.sr-only, .song-length__time';
+const SEARCH_FORM = '[data-song-search-form]';
+const FILTERS_APPLY = '.song-filters__apply';
+const FILTERS_FOCUS = '.song-filters__toggle, .song-filters select';
+/** Disclosures that act as menus: the extra-links menus and the Filters panel. */
+const MENU = 'details[data-more-links], details[data-song-filters]';
+const OPEN_MENU = 'details[data-more-links][open], details[data-song-filters][open]';
 const ANNOUNCE_DELAY_MS = 700;
 const RESIZE_DELAY_MS = 150;
 /**
@@ -72,16 +78,18 @@ let navigation: NavigationKind = document.readyState === 'complete' ? 'push' : '
 let traversalScroll: ScrollPosition | null = null;
 /** The same for the document's first page (reload, or back/forward into this document). */
 const initialScroll = savedScroll();
-/** Set when the song search form started the navigation: the new page puts focus back into its search field. */
-let focusSearchOnLoad = false;
+/**
+ * Set when the song search form started the navigation: the new page puts focus back where it was — the search field
+ * after a search, the filters after "Apply" (not the field: that would pull a phone's keyboard up).
+ */
+let focusOnLoad: SearchFocus = null;
 const enhancedLists = new WeakSet<HTMLElement>();
 
 // Registered once for the whole document: they carry what the next page needs to know about its navigation.
 document.addEventListener('astro:before-preparation', (event) => {
   navigation = event.navigationType;
   traversalScroll = navigation === 'traverse' ? savedScroll() : null;
-  const source = event.sourceElement;
-  focusSearchOnLoad = source instanceof Element && source.closest('[data-song-search-form]') !== null;
+  focusOnLoad = searchFocusFor(event.sourceElement);
 });
 // Clamp the incoming page's notes before it is swapped in, so the scroll position the router restores refers to the
 // layout the page will keep.
@@ -100,8 +108,8 @@ function setUpPage(): void {
   const lists = Array.from(document.querySelectorAll<HTMLElement>('[data-song-list]')).filter(
     (list) => !enhancedLists.has(list),
   );
-  const focusSearch = focusSearchOnLoad;
-  focusSearchOnLoad = false;
+  const focus = focusOnLoad;
+  focusOnLoad = null;
   if (lists.length === 0) return;
 
   const controller = new AbortController();
@@ -109,8 +117,23 @@ function setUpPage(): void {
   const scroll = scrollIntent();
   for (const list of lists) {
     enhancedLists.add(list);
-    enhanceList(list, controller.signal, { scroll, focusSearch });
+    enhanceList(list, controller.signal, { scroll, focus });
   }
+}
+
+type SearchFocus = 'search' | 'filters' | null;
+
+/**
+ * Where a navigation started by the song search puts focus: a submission (the router's source is the submit button,
+ * which may sit outside the form, or the form itself) or its "Clear all" link focus the field, the filters' "Apply"
+ * the filters. Page links don't move focus: they must not pull a phone's keyboard up.
+ */
+function searchFocusFor(source: Element | undefined): SearchFocus {
+  if (source instanceof HTMLButtonElement || source instanceof HTMLInputElement) {
+    if (!source.form?.matches(SEARCH_FORM)) return null;
+    return source.matches(FILTERS_APPLY) ? 'filters' : 'search';
+  }
+  return source instanceof Element && source.matches(`${SEARCH_FORM}, [data-song-search-clear]`) ? 'search' : null;
 }
 
 function savedScroll(): ScrollPosition | null {
@@ -165,7 +188,7 @@ function sameQuery(a: ListQuery, b: ListQuery): boolean {
 function enhanceList(
   list: HTMLElement,
   signal: AbortSignal,
-  options: { scroll: ScrollIntent; focusSearch: boolean },
+  options: { scroll: ScrollIntent; focus: SearchFocus },
 ): void {
   const form = list.querySelector<HTMLFormElement>('[data-song-search-form]');
   const input = list.querySelector<HTMLInputElement>('[data-song-search]');
@@ -173,6 +196,7 @@ function enhanceList(
   const count = list.querySelector<HTMLElement>('[data-song-count]');
   const status = list.querySelector<HTMLElement>('[data-song-status]');
   const empty = list.querySelector<HTMLElement>('[data-song-empty]');
+  const emptyMessage = empty?.querySelector('[data-song-empty-message]')?.textContent?.trim() || 'No songs match.';
 
   const rows: Row[] = [];
   const groups: Group[] = [];
@@ -384,7 +408,7 @@ function enhanceList(
       count.textContent = active ? `${visible.toLocaleString('en-US')} of ${onPage} on this page` : defaultCount;
     const nothingFound = active && visible === 0;
     if (empty) empty.hidden = !nothingFound;
-    if (nothingFound) announce(empty?.textContent?.replace(/\s+/g, ' ').trim() ?? 'No songs match.');
+    if (nothingFound) announce(emptyMessage);
     else if (active)
       announce(`${visible.toLocaleString('en-US')} of ${onPage} on this page ${visible === 1 ? 'matches' : 'match'}.`);
     else if (lastAnnouncement) announce(`Showing all ${onPage} on this page.`);
@@ -417,15 +441,15 @@ function enhanceList(
     { signal },
   );
 
-  // ---- "More links" menus: one open at a time; Escape, a click elsewhere or leaving with Tab closes them. ----
+  // ---- "More links" menus and the Filters panel: one open at a time; Escape, a click elsewhere or leaving with Tab
+  // closes them. (Wide screens show the filters inline; the disclosure is then closed and these never apply.) ----
 
-  const openMenus = (): HTMLDetailsElement[] =>
-    Array.from(list.querySelectorAll<HTMLDetailsElement>('details[data-more-links][open]'));
+  const openMenus = (): HTMLDetailsElement[] => Array.from(list.querySelectorAll<HTMLDetailsElement>(OPEN_MENU));
   list.addEventListener(
     'toggle',
     (event) => {
       const menu = event.target;
-      if (!(menu instanceof HTMLDetailsElement) || !menu.open || !menu.matches('[data-more-links]')) return;
+      if (!(menu instanceof HTMLDetailsElement) || !menu.open || !menu.matches(MENU)) return;
       for (const other of openMenus()) if (other !== menu) other.open = false;
     },
     { capture: true, signal },
@@ -434,7 +458,7 @@ function enhanceList(
     'keydown',
     (event) => {
       if (event.key !== 'Escape' || !(event.target instanceof Element)) return;
-      const menu = event.target.closest<HTMLDetailsElement>('details[data-more-links][open]');
+      const menu = event.target.closest<HTMLDetailsElement>(OPEN_MENU);
       if (!menu) return;
       menu.open = false;
       menu.querySelector('summary')?.focus();
@@ -444,7 +468,7 @@ function enhanceList(
   list.addEventListener(
     'focusout',
     (event) => {
-      const menu = event.target instanceof Element ? event.target.closest('details[data-more-links][open]') : null;
+      const menu = event.target instanceof Element ? event.target.closest(OPEN_MENU) : null;
       if (
         menu instanceof HTMLDetailsElement &&
         !(event.relatedTarget instanceof Node && menu.contains(event.relatedTarget))
@@ -489,9 +513,13 @@ function enhanceList(
 
   // ---- Focus and scroll after navigation. ----
 
-  if (options.focusSearch && input) {
+  if (options.focus === 'search' && input) {
     input.focus({ preventScroll: true });
     input.setSelectionRange(input.value.length, input.value.length);
+  } else if (options.focus === 'filters') {
+    // The disclosure's toggle where it is shown (narrow screens), else the first filter (shown inline).
+    const target = [...list.querySelectorAll<HTMLElement>(FILTERS_FOCUS)].find((el) => el.getClientRects().length);
+    target?.focus({ preventScroll: true });
   }
 
   const { scroll } = options;

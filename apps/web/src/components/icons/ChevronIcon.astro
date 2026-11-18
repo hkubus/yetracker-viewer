@@ -1,0 +1,24 @@
+---
+/**
+ * Chevron pointing left or right (`direction`), single or double (`double`: first/last page).
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon> & { direction?: 'left' | 'right'; double?: boolean };
+
+const { direction = 'right', double = false, ...attrs } = Astro.props;
+const paths =
+  direction === 'left'
+    ? double
+      ? ['m11 17-5-5 5-5', 'm18 17-5-5 5-5']
+      : ['m15 18-6-6 6-6']
+    : double
+      ? ['m6 17 5-5-5-5', 'm13 17 5-5-5-5']
+      : ['m9 18 6-6-6-6'];
+---
+
+<SvgIcon fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {...attrs}>
+  {paths.map((d) => <path d={d} />)}
+</SvgIcon>

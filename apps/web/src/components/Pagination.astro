@@ -1,9 +1,16 @@
 ---
 /**
- * Page links for a paginated song list. Wide screens get previous/next plus numbered pages; phones get
- * first/previous/"Page n of m"/next/last. Colors come from the `--theme-*` variables of an ancestor (neutral grays
- * without one).
+ * Page links for a paginated song list.
+ *
+ * - `full` (default): a summary ("Showing 101–200 of 956 songs") and the page links. Wide screens get
+ *   previous/next plus numbered pages; phones get first/previous/"Page n of m"/next/last.
+ * - `compact`: previous/next page icons only, for a toolbar that shows the count itself. Nothing is rendered for a
+ *   single page.
+ *
+ * Colors come from the `--theme-*` variables of an ancestor (neutral tokens without one).
  */
+import ChevronIcon from './icons/ChevronIcon.astro';
+
 interface Props {
   currentPage: number;
   pageCount: number;
@@ -16,6 +23,7 @@ interface Props {
   position?: 'top' | 'bottom';
   /** Fragment added to page links so the new page opens at the list (`''` for none). */
   fragment?: string;
+  variant?: 'full' | 'compact';
 }
 
 const {
@@ -27,6 +35,7 @@ const {
   paginationId = 'song-pagination',
   position = paginationId.endsWith('-top') ? 'top' : 'bottom',
   fragment = 'songs',
+  variant = 'full',
 } = Astro.props;
 
 const wholeNumber = (value: number, fallback: number) => (Number.isFinite(value) ? Math.trunc(value) : fallback);
@@ -59,121 +68,176 @@ function pageHref(page: number): string {
 
 /** Step links; a step that goes nowhere is shown dimmed and hidden from assistive technology, not rendered as a link. */
 const steps = {
-  first: { page: 1, text: 'First page', glyph: '«', enabled: current > 1 },
-  previous: { page: current - 1, text: 'Previous', glyph: '‹', enabled: current > 1 },
-  next: { page: current + 1, text: 'Next', glyph: '›', enabled: current < pages },
-  last: { page: pages, text: 'Last page', glyph: '»', enabled: current < pages },
+  first: { page: 1, text: 'First page', enabled: current > 1 },
+  previous: { page: current - 1, text: 'Previous', enabled: current > 1 },
+  next: { page: current + 1, text: 'Next', enabled: current < pages },
+  last: { page: pages, text: 'Last page', enabled: current < pages },
 } as const;
 ---
 
-<nav id={paginationId} class="pagination" aria-label={label}>
-  <p class="pagination__summary">{summary}</p>
-  {
+{
+  variant === 'compact' ? (
     pages > 1 && (
-      <ul class="pagination__list">
-        <li class="pagination__item pagination__item--compact" aria-hidden={steps.first.enabled ? undefined : 'true'}>
-          {steps.first.enabled ? (
-            <a class="pagination__link pagination__link--icon" href={pageHref(steps.first.page)}>
-              <span aria-hidden="true">{steps.first.glyph}</span>
-              <span class="sr-only">{steps.first.text}</span>
-            </a>
-          ) : (
-            <span class="pagination__link pagination__link--icon is-disabled">{steps.first.glyph}</span>
-          )}
-        </li>
-        <li class="pagination__item" aria-hidden={steps.previous.enabled ? undefined : 'true'}>
-          {steps.previous.enabled ? (
-            <a
-              class="pagination__link pagination__link--step"
-              href={pageHref(steps.previous.page)}
-              rel="prev"
-              data-astro-prefetch
-            >
-              <span aria-hidden="true">{steps.previous.glyph}</span>
-              <span class="pagination__step-text">{steps.previous.text}</span>
-            </a>
-          ) : (
-            <span class="pagination__link pagination__link--step is-disabled">
-              <span>{steps.previous.glyph}</span>
-              <span class="pagination__step-text">{steps.previous.text}</span>
-            </span>
-          )}
-        </li>
-        {numbered.map((page, index) => (
-          <>
-            {index > 0 && page - numbered[index - 1] > 1 && (
-              <li class="pagination__item pagination__item--wide pagination__gap" aria-hidden="true">
-                …
-              </li>
-            )}
-            <li class="pagination__item pagination__item--wide">
+      <nav id={paginationId} class="pagination pagination--compact" aria-label={label}>
+        <ul class="pagination__list">
+          <li class="pagination__item" aria-hidden={steps.previous.enabled ? undefined : 'true'}>
+            {steps.previous.enabled ? (
               <a
-                class="pagination__link"
-                href={pageHref(page)}
-                aria-current={page === current ? 'page' : undefined}
+                class="pagination__link pagination__link--icon"
+                href={pageHref(steps.previous.page)}
+                rel="prev"
+                title="Previous page"
+                data-astro-prefetch
               >
-                <span class="sr-only">Page </span>
-                {page}
+                <ChevronIcon direction="left" class="pagination__icon" />
+                <span class="sr-only">Previous page</span>
               </a>
-            </li>
-          </>
-        ))}
-        <li class="pagination__item pagination__item--compact pagination__status">
-          Page {current} of {pages}
-        </li>
-        <li class="pagination__item" aria-hidden={steps.next.enabled ? undefined : 'true'}>
-          {steps.next.enabled ? (
-            <a
-              class="pagination__link pagination__link--step"
-              href={pageHref(steps.next.page)}
-              rel="next"
-              data-astro-prefetch
-            >
-              <span class="pagination__step-text">{steps.next.text}</span>
-              <span aria-hidden="true">{steps.next.glyph}</span>
-            </a>
-          ) : (
-            <span class="pagination__link pagination__link--step is-disabled">
-              <span class="pagination__step-text">{steps.next.text}</span>
-              <span>{steps.next.glyph}</span>
-            </span>
-          )}
-        </li>
-        <li class="pagination__item pagination__item--compact" aria-hidden={steps.last.enabled ? undefined : 'true'}>
-          {steps.last.enabled ? (
-            <a class="pagination__link pagination__link--icon" href={pageHref(steps.last.page)}>
-              <span aria-hidden="true">{steps.last.glyph}</span>
-              <span class="sr-only">{steps.last.text}</span>
-            </a>
-          ) : (
-            <span class="pagination__link pagination__link--icon is-disabled">{steps.last.glyph}</span>
-          )}
-        </li>
-      </ul>
+            ) : (
+              <span class="pagination__link pagination__link--icon is-disabled">
+                <ChevronIcon direction="left" class="pagination__icon" />
+              </span>
+            )}
+          </li>
+          <li class="pagination__item" aria-hidden={steps.next.enabled ? undefined : 'true'}>
+            {steps.next.enabled ? (
+              <a
+                class="pagination__link pagination__link--icon"
+                href={pageHref(steps.next.page)}
+                rel="next"
+                title="Next page"
+                data-astro-prefetch
+              >
+                <ChevronIcon class="pagination__icon" />
+                <span class="sr-only">Next page</span>
+              </a>
+            ) : (
+              <span class="pagination__link pagination__link--icon is-disabled">
+                <ChevronIcon class="pagination__icon" />
+              </span>
+            )}
+          </li>
+        </ul>
+      </nav>
     )
-  }
-</nav>
+  ) : (
+    <nav id={paginationId} class="pagination" aria-label={label}>
+      <p class="pagination__summary">{summary}</p>
+      {pages > 1 && (
+        <ul class="pagination__list">
+          <li class="pagination__item pagination__item--compact" aria-hidden={steps.first.enabled ? undefined : 'true'}>
+            {steps.first.enabled ? (
+              <a class="pagination__link pagination__link--icon" href={pageHref(steps.first.page)}>
+                <ChevronIcon direction="left" double class="pagination__icon" />
+                <span class="sr-only">{steps.first.text}</span>
+              </a>
+            ) : (
+              <span class="pagination__link pagination__link--icon is-disabled">
+                <ChevronIcon direction="left" double class="pagination__icon" />
+              </span>
+            )}
+          </li>
+          <li class="pagination__item" aria-hidden={steps.previous.enabled ? undefined : 'true'}>
+            {steps.previous.enabled ? (
+              <a
+                class="pagination__link pagination__link--step"
+                href={pageHref(steps.previous.page)}
+                rel="prev"
+                data-astro-prefetch
+              >
+                <ChevronIcon direction="left" class="pagination__icon" />
+                <span class="pagination__step-text">{steps.previous.text}</span>
+              </a>
+            ) : (
+              <span class="pagination__link pagination__link--step is-disabled">
+                <ChevronIcon direction="left" class="pagination__icon" />
+                <span class="pagination__step-text">{steps.previous.text}</span>
+              </span>
+            )}
+          </li>
+          {numbered.map((page, index) => (
+            <>
+              {index > 0 && page - (numbered[index - 1] ?? 0) > 1 && (
+                <li class="pagination__item pagination__item--wide pagination__gap" aria-hidden="true">
+                  …
+                </li>
+              )}
+              <li class="pagination__item pagination__item--wide">
+                <a
+                  class="pagination__link pagination__link--page"
+                  href={pageHref(page)}
+                  aria-current={page === current ? 'page' : undefined}
+                >
+                  <span class="sr-only">Page </span>
+                  {page}
+                </a>
+              </li>
+            </>
+          ))}
+          <li class="pagination__item pagination__item--compact pagination__status">
+            Page {current} of {pages}
+          </li>
+          <li class="pagination__item" aria-hidden={steps.next.enabled ? undefined : 'true'}>
+            {steps.next.enabled ? (
+              <a
+                class="pagination__link pagination__link--step"
+                href={pageHref(steps.next.page)}
+                rel="next"
+                data-astro-prefetch
+              >
+                <span class="pagination__step-text">{steps.next.text}</span>
+                <ChevronIcon class="pagination__icon" />
+              </a>
+            ) : (
+              <span class="pagination__link pagination__link--step is-disabled">
+                <span class="pagination__step-text">{steps.next.text}</span>
+                <ChevronIcon class="pagination__icon" />
+              </span>
+            )}
+          </li>
+          <li class="pagination__item pagination__item--compact" aria-hidden={steps.last.enabled ? undefined : 'true'}>
+            {steps.last.enabled ? (
+              <a class="pagination__link pagination__link--icon" href={pageHref(steps.last.page)}>
+                <ChevronIcon double class="pagination__icon" />
+                <span class="sr-only">{steps.last.text}</span>
+              </a>
+            ) : (
+              <span class="pagination__link pagination__link--icon is-disabled">
+                <ChevronIcon double class="pagination__icon" />
+              </span>
+            )}
+          </li>
+        </ul>
+      )}
+    </nav>
+  )
+}
 
 <style>
   .pagination {
+    --pagination-size: 2.5rem;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem 1rem;
-    margin: 0.75rem 0;
-    color: var(--theme-text, #f2f2f2);
+    gap: var(--space-3) var(--space-4);
+    margin: var(--space-5) 0 var(--space-4);
+    color: var(--theme-text, var(--color-text));
+  }
+  .pagination--compact {
+    display: block;
+    margin: 0;
   }
   .pagination__summary {
     margin: 0;
-    color: var(--theme-muted-text, #b3b3b3);
-    font-size: 0.9rem;
+    color: var(--theme-muted-text, var(--color-text-muted));
+    font-size: var(--font-size-sm);
+    font-variant-numeric: tabular-nums;
   }
   .pagination__list {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-1);
     margin: 0;
     padding: 0;
     list-style: none;
@@ -185,52 +249,91 @@ const steps = {
     display: none;
   }
   .pagination__gap {
-    padding-inline: 0.15rem;
-    color: var(--theme-muted-text, #b3b3b3);
+    min-width: 1.5rem;
+    justify-content: center;
+    color: var(--theme-muted-text, var(--color-text-muted));
   }
   .pagination__link {
     box-sizing: border-box;
     display: inline-flex;
-    min-width: 2.5rem;
-    min-height: 2.5rem;
+    min-width: var(--pagination-size);
+    min-height: var(--pagination-size);
     align-items: center;
     justify-content: center;
-    gap: 0.35rem;
-    padding: 0.4rem 0.7rem;
-    border: 2px solid var(--theme-accent, #8c8c8c);
-    border-radius: 0.55rem;
+    gap: var(--space-1);
+    padding: 0 var(--space-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
     color: inherit;
+    font-size: var(--font-size-sm);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
     text-decoration: none;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
   }
-  a.pagination__link:hover {
-    background: var(--theme-surface, #303030);
+  .pagination__link--step,
+  .pagination__link--icon {
+    border-color: var(--color-border-strong);
+  }
+  .pagination__link--icon {
+    padding: 0;
+  }
+  .pagination__link--step {
+    padding-inline: var(--space-3) var(--space-4);
+  }
+  .pagination__link--step:has(.pagination__step-text:first-child) {
+    padding-inline: var(--space-4) var(--space-3);
+  }
+  .pagination :global(.pagination__icon) {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: none;
+  }
+  @media (hover: hover) {
+    a.pagination__link:hover {
+      border-color: var(--color-border-strong);
+      background: var(--color-surface);
+    }
+  }
+  a.pagination__link:active {
+    background: var(--color-surface-raised);
   }
   a.pagination__link[aria-current='page'] {
-    color: var(--theme-on-accent, #111111);
-    background: var(--theme-accent, #8c8c8c);
+    border-color: var(--theme-accent, var(--color-accent));
+    color: var(--theme-on-accent, var(--color-on-accent));
+    background: var(--theme-accent, var(--color-accent));
     font-weight: 700;
   }
   a.pagination__link:focus-visible {
-    outline: 2px solid var(--theme-focus-ring, #ffffff);
+    outline: 2px solid var(--theme-focus-ring, var(--focus-ring-color));
     outline-offset: 2px;
-  }
-  .pagination__link--step {
-    min-width: 6.25rem;
   }
   /* Dimmed through the border only: the label keeps the muted text contrast. */
   .pagination__link.is-disabled {
     border-style: dashed;
-    border-color: color-mix(in srgb, var(--theme-accent, #8c8c8c) 45%, transparent);
-    color: var(--theme-muted-text, #b3b3b3);
+    border-color: var(--color-border);
+    color: var(--theme-muted-text, var(--color-text-muted));
   }
 
-  /* Phones: first / previous / "Page n of m" / next / last. */
-  @media (max-width: 40rem) {
+  @media (pointer: coarse) {
     .pagination {
+      --pagination-size: var(--tap-size);
+    }
+  }
+
+  /* Phones: first / previous / "Page n of m" / next / last under the summary. */
+  @media (max-width: 40rem) {
+    .pagination:not(.pagination--compact) {
       flex-direction: column;
       align-items: stretch;
+      --pagination-size: var(--tap-size);
     }
-    .pagination__list {
+    .pagination__summary {
+      text-align: center;
+    }
+    .pagination:not(.pagination--compact) .pagination__list {
       flex-wrap: nowrap;
     }
     .pagination__item--wide {
@@ -244,23 +347,13 @@ const steps = {
       flex: 1 1 auto;
       min-width: 0;
       justify-content: center;
-      color: var(--theme-muted-text, #b3b3b3);
-      font-size: 0.9rem;
-      line-height: 1.25;
+      color: var(--theme-muted-text, var(--color-text-muted));
+      font-size: var(--font-size-sm);
+      font-variant-numeric: tabular-nums;
+      line-height: var(--line-height-tight);
       text-align: center;
       text-wrap: balance;
     }
-    .pagination__link {
-      min-width: 2.75rem;
-      min-height: 2.75rem;
-    }
-    .pagination__link--step {
-      min-width: 2.75rem;
-    }
-  }
-
-  /* The smallest phones keep the step arrows only (the links keep their names). */
-  @media (max-width: 26rem) {
     .pagination__step-text {
       position: absolute;
       width: 1px;
@@ -272,8 +365,9 @@ const steps = {
       border: 0;
       white-space: nowrap;
     }
-    .pagination__link {
-      padding-inline: 0.5rem;
+    .pagination__link--step,
+    .pagination__link--step:has(.pagination__step-text:first-child) {
+      padding: 0;
     }
   }
 </style>

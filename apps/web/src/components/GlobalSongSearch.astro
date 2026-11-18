@@ -2,13 +2,18 @@
 /**
  * Search across the whole catalog, with an era range and a "playable only" switch. The behaviour lives in
  * `src/scripts/global-search.ts`; this renders the controls pre-filled from the URL (`?q=&eraFrom=&eraTo=&playable=`)
- * and the empty results region the script fills in.
+ * and the empty results region the script fills in. On phones the filters fold behind a "Filters" button (open
+ * from the start when the URL sets one); without scripting they are always shown.
  */
-import { hasActiveFilters, parseSearchState } from '../utils/globalSearchState';
+import { activeFilterCount, parseSearchState, searchMode } from '../utils/globalSearchState';
 import { MAX_QUERY_LENGTH } from '../utils/search';
 import { countLabel } from '../utils/songRow';
+import CoverImage from './CoverImage.astro';
+import AlertIcon from './icons/AlertIcon.astro';
 import CheckIcon from './icons/CheckIcon.astro';
+import ChevronDownIcon from './icons/ChevronDownIcon.astro';
 import CloseIcon from './icons/CloseIcon.astro';
+import FilterIcon from './icons/FilterIcon.astro';
 import PauseIcon from './icons/PauseIcon.astro';
 import PlayIcon from './icons/PlayIcon.astro';
 import SearchIcon from './icons/SearchIcon.astro';
@@ -24,21 +29,21 @@ interface SearchEra {
 interface Props {
   /** Main eras in catalog order; the era range is disabled when there are fewer than two. */
   eras: SearchEra[];
-  /** Number of songs in the catalog, or null when unknown. */
-  songsCount: number | null;
   /** Browser-facing API base URL. */
   apiBaseUrl: string;
   /** Songs per era page, to link results to the page that contains them. */
   eraPageSize: number;
 }
 
-const { eras, songsCount, apiBaseUrl, eraPageSize } = Astro.props;
+const { eras, apiBaseUrl, eraPageSize } = Astro.props;
 const eraIds = eras.map((era) => era.id);
 const state = parseSearchState(Astro.url.searchParams, eraIds);
 const lastIndex = Math.max(eras.length - 1, 0);
 const showRange = eras.length > 1;
-const idleCount = songsCount === null ? '' : countLabel(songsCount, 'song');
-const clearable = state.q !== '' || hasActiveFilters(state, eras.length);
+const activeFilters = activeFilterCount(state, eras.length);
+// The URL asks for a search (a shared link, a reload): its results area is laid out from the first paint.
+const searchPending = eras.length > 0 && searchMode(state, eras.length) === 'search';
+const clearable = state.q !== '' || activeFilters > 0;
 const fromName = eras[state.from]?.name ?? '';
 const toName = eras[state.to]?.name ?? '';
 const rangeStatus =
@@ -56,20 +61,34 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
 ---
 
 <section
-  class="global-search"
+  class="global-search home-section"
   aria-labelledby="global-search-heading"
   data-global-song-search
   data-api-base-url={apiBaseUrl}
   data-era-page-size={eraPageSize}
-  data-idle-count={idleCount}
   data-eras={JSON.stringify(eraData)}
+  data-filters-open={activeFilters > 0 ? '' : undefined}
+  data-search-pending={searchPending ? '' : undefined}
 >
   <form class="global-search__form" role="search" action="/" method="get" autocomplete="off" data-global-search-form>
-    <div class="global-search__header">
-      <h2 class="global-search__heading" id="global-search-heading">
+    <div class="home-section__head global-search__head">
+      <h2 class="home-section__title" id="global-search-heading">
         <label for="global-song-search">Find a track</label>
       </h2>
-      <p class="global-search__count" data-global-search-count>{idleCount}</p>
+      <button
+        type="button"
+        class="global-search__toggle"
+        aria-expanded={activeFilters > 0 ? 'true' : 'false'}
+        aria-controls="global-search-filters"
+        data-filters-toggle
+      >
+        <FilterIcon />
+        <span>Filters</span>
+        <span class="global-search__badge" data-filters-badge hidden={activeFilters === 0}>
+          <span data-filters-count>{activeFilters}</span><span class="sr-only"> active</span>
+        </span>
+        <ChevronDownIcon class="global-search__chevron" />
+      </button>
     </div>
 
     <div class="global-search__field">
@@ -93,7 +112,13 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
       Results update as you type. Press Enter to go to the results, and the up and down arrow keys to move between them.
     </p>
 
-    <div class="global-search__filters" role="group" aria-label="Search filters">
+    <div
+      class="global-search__filters"
+      id="global-search-filters"
+      role="group"
+      aria-label="Search filters"
+      data-global-search-filters
+    >
       {
         showRange ? (
           <div class="global-search__timeline" role="group" aria-labelledby="global-search-range-label">
@@ -138,17 +163,19 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
         ) : null
       }
 
-      <label class="global-search__playable">
-        <input type="checkbox" name="playable" value="true" checked={state.playable} data-playable-filter />
-        <span class="global-search__checkmark" aria-hidden="true">
-          <CheckIcon />
-        </span>
-        <span>Playable only</span>
-      </label>
-      <button type="button" class="global-search__clear" disabled={!clearable} data-search-clear>
-        <CloseIcon />
-        <span>Clear<span class="sr-only"> search and filters</span></span>
-      </button>
+      <div class="global-search__switches">
+        <label class="global-search__playable">
+          <input type="checkbox" name="playable" value="true" checked={state.playable} data-playable-filter />
+          <span class="global-search__checkmark" aria-hidden="true">
+            <CheckIcon />
+          </span>
+          <span>Playable only</span>
+        </label>
+        <button type="button" class="global-search__clear" disabled={!clearable} data-search-clear>
+          <CloseIcon />
+          <span>Clear<span class="sr-only"> search and filters</span></span>
+        </button>
+      </div>
     </div>
   </form>
 
@@ -160,11 +187,27 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     data-global-search-results
     hidden
   >
-    <h3 class="sr-only" id="global-search-results-heading">Search results</h3>
-    <ul class="global-search__list" data-global-search-list data-play-scope></ul>
+    <div class="global-search__results-head">
+      <h3 class="sr-only" id="global-search-results-heading">Search results</h3>
+      <p class="global-search__count" data-global-search-count>{searchPending ? 'Searching…' : null}</p>
+    </div>
+    <div class="global-search__skeleton" aria-hidden="true" data-global-search-skeleton hidden>
+      <span></span><span></span><span></span>
+    </div>
+    <ul class="global-search__list" role="list" data-global-search-list data-play-scope></ul>
     <div class="global-search__message" data-global-search-message hidden>
-      <p data-global-search-message-text></p>
-      <button type="button" class="global-search__button" data-global-search-retry hidden>Try again</button>
+      <span class="global-search__message-icon" aria-hidden="true">
+        <SearchIcon class="global-search__icon-search" />
+        <AlertIcon class="global-search__icon-alert" />
+      </span>
+      <p class="global-search__message-text" data-global-search-message-text></p>
+      <p class="global-search__message-hint" data-global-search-message-hint hidden></p>
+      <div class="global-search__message-actions">
+        <button type="button" class="global-search__button" data-global-search-retry hidden>Try again</button>
+        <button type="button" class="global-search__button" data-global-search-reset-filters hidden>
+          Reset filters
+        </button>
+      </div>
     </div>
     <div class="global-search__more" data-global-search-more hidden>
       <button type="button" class="global-search__button" data-global-search-more-button>Show more</button>
@@ -173,6 +216,10 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
   </section>
   <p class="sr-only" role="status" data-global-search-status></p>
   <template data-global-search-play-icon><PlayIcon class="play-icon" /><PauseIcon class="pause-icon" /></template>
+  {/* Cloned for each result's era cover: the copies keep CoverImage's styles (see the client-update notes there). */}
+  <template data-global-search-cover>
+    <CoverImage eraId={0} eraName="" hasCover={true} size={96} apiBaseUrl={apiBaseUrl} />
+  </template>
   <noscript>
     <p class="global-search__noscript">Search needs JavaScript. The eras below work without it.</p>
   </noscript>
@@ -194,110 +241,195 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     initial-value: #cfcfcf;
   }
   .global-search {
-    margin: clamp(0.75rem, 1.5vw, 1.5rem);
-    margin-bottom: 0;
-    padding: clamp(1rem, 1.6vw, 1.35rem);
-    border: 1px solid #414141;
-    border-radius: 1rem;
-    box-shadow:
-      0 1px 0 rgb(255 255 255 / 4%) inset,
-      0 14px 35px rgb(0 0 0 / 16%);
-    color: #f3f3f3;
-    background: #202020;
+    color: var(--color-text);
   }
-  .global-search__header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
+  .global-search__head {
     justify-content: space-between;
-    gap: 0.25rem 1rem;
-    margin-bottom: 0.8rem;
-  }
-  .global-search__heading {
-    margin: 0;
-    font-size: clamp(1.1rem, 1.7vw, 1.35rem);
-    letter-spacing: -0.025em;
-  }
-  .global-search__count {
-    margin: 0;
-    color: #a8a8a8;
-    font-size: 0.8rem;
-    font-variant-numeric: tabular-nums;
+    align-items: center;
   }
 
+  /* The phone-only "Filters" disclosure button (wider screens always show the filters). */
+  .global-search__toggle {
+    display: none;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 2.25rem;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--color-text);
+    background: var(--color-surface);
+    font: inherit;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
+  }
+  .global-search__toggle :global(svg) {
+    flex: none;
+    width: 1.1rem;
+    height: 1.1rem;
+  }
+  .global-search__toggle :global(.global-search__chevron) {
+    width: 1rem;
+    height: 1rem;
+    color: var(--color-text-secondary);
+    transition: transform var(--duration-base) var(--ease-standard);
+  }
+  .global-search__toggle[aria-expanded='true'] {
+    border-color: var(--color-border-control);
+    background: var(--color-surface-raised);
+  }
+  .global-search__toggle[aria-expanded='true'] :global(.global-search__chevron) {
+    transform: rotate(180deg);
+  }
+  .global-search__toggle:active {
+    background: var(--color-surface-hover);
+  }
+  @media (hover: hover) {
+    .global-search__toggle:hover {
+      border-color: var(--color-border-control);
+      background: var(--color-surface-hover);
+    }
+  }
+  .global-search__badge {
+    display: inline-grid;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    box-sizing: border-box;
+    place-items: center;
+    padding: 0 0.3rem;
+    border-radius: var(--radius-pill);
+    color: var(--color-on-accent);
+    background: var(--color-accent);
+    font-size: var(--font-size-2xs);
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .global-search__badge[hidden] {
+    display: none;
+  }
+
+  /* The hero: a large field with an always-visible outline (≥ 3:1). */
   .global-search__field {
     display: flex;
     align-items: center;
-    gap: 0.7rem;
-    min-height: 3.2rem;
+    gap: var(--space-3);
+    min-height: 3.25rem;
     box-sizing: border-box;
-    padding: 0 0.95rem;
-    border: 1px solid #5c5c5c;
-    border-radius: 0.75rem;
-    background: #161616;
+    padding: 0 var(--space-4);
+    border: 1px solid var(--color-border-control);
+    border-radius: var(--radius-lg);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-sm);
+    transition:
+      border-color var(--duration-fast) var(--ease-standard),
+      background-color var(--duration-fast) var(--ease-standard);
+  }
+  @media (hover: hover) {
+    .global-search__field:hover {
+      border-color: var(--color-text-muted);
+    }
   }
   /* The input's own outline is replaced by this equally visible one around the whole field. */
   .global-search__field:focus-within {
-    border-color: #d7d7d7;
-    outline: 2px solid var(--focus-ring-color, #fff);
+    border-color: var(--color-text-secondary);
+    background: var(--color-surface-raised);
+    outline: 2px solid var(--focus-ring-color);
     outline-offset: 2px;
   }
   .global-search__field :global(svg) {
     flex: none;
-    width: 1.15rem;
-    height: 1.15rem;
-    color: #a0a0a0;
+    width: 1.25rem;
+    height: 1.25rem;
+    color: var(--color-text-muted);
   }
   .global-search__field input {
     flex: 1;
     min-width: 0;
     box-sizing: border-box;
-    padding: 0.78rem 0;
+    padding: var(--space-3) 0;
     border: 0;
     outline: none;
-    color: #fff;
+    color: var(--color-text);
     background: transparent;
     font: inherit;
-    font-size: 1rem;
+    font-size: var(--font-size-md);
+    /* The placeholder is cut short on 320px screens; an ellipsis shows it goes on. */
+    text-overflow: ellipsis;
   }
   .global-search__field input::placeholder {
-    color: #8f8f8f;
+    color: var(--color-text-muted);
     opacity: 1;
   }
 
+  /* Filters: inline under the field on wide screens, a panel behind the "Filters" button on phones. */
   .global-search__filters {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    gap: 0.8rem;
-    margin-top: 0.65rem;
-    padding: 0.75rem 0.85rem;
-    border: 1px solid #3e3e3e;
-    border-radius: 0.75rem;
-    background: #181818;
+    gap: var(--space-3) var(--space-5);
+    margin-top: var(--space-3);
+    padding: var(--space-2) var(--space-1) 0;
   }
+  .global-search__switches {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  @media (scripting: enabled) and (max-width: 39.99rem) {
+    .global-search__toggle {
+      display: inline-flex;
+    }
+    .global-search:not([data-filters-open]) .global-search__filters {
+      display: none;
+    }
+  }
+  @media (max-width: 39.99rem) {
+    .global-search__filters {
+      grid-template-columns: minmax(0, 1fr);
+      padding: var(--space-3) var(--space-4) var(--space-3);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg);
+      background: var(--color-surface);
+    }
+  }
+  @media (pointer: coarse) {
+    .global-search__toggle {
+      min-height: var(--tap-size);
+    }
+  }
+
   .global-search__timeline {
     --thumb: 1.5rem;
     min-width: 0;
+  }
+  @media (pointer: coarse) {
+    /* A full-size touch target around the same small knob. */
+    .global-search__timeline {
+      --thumb: var(--tap-size);
+    }
   }
   .global-search__timeline-heading {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 0.1rem;
+    gap: var(--space-4);
   }
   .global-search__range-label {
-    color: #a8a8a8;
-    font-size: 0.68rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
   }
   .global-search__range-status {
-    color: #c8c8c8;
-    font-size: 0.72rem;
-    font-weight: 600;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
   }
   .global-search__range {
     --range-start: 0%;
@@ -307,8 +439,8 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     cursor: pointer;
     touch-action: pan-y;
     transition:
-      --range-start-color 180ms ease-out,
-      --range-end-color 180ms ease-out;
+      --range-start-color var(--duration-base) ease-out,
+      --range-end-color var(--duration-base) ease-out;
   }
   /* The track spans the thumb centres, so percentages line up with the thumbs. */
   .global-search__range-track {
@@ -317,8 +449,8 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     right: calc(var(--thumb) / 2);
     left: calc(var(--thumb) / 2);
     height: 4px;
-    border-radius: 999px;
-    background: #4c4c4c;
+    border-radius: var(--radius-pill);
+    background: var(--color-border-control);
   }
   .global-search__range-track span {
     position: absolute;
@@ -367,7 +499,8 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     border: 0;
     background: transparent;
   }
-  /* A 24px target with an ~19px visible knob. */
+  /* The thumb is the whole target (24 px, 44 px on touch screens); the knob drawn in it stays 19 px, and the focus
+     ring around it fits inside the smaller target. */
   .global-search__range input::-webkit-slider-thumb {
     width: var(--thumb);
     height: var(--thumb);
@@ -375,10 +508,10 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     border-radius: 50%;
     background: radial-gradient(
       circle closest-side,
-      var(--thumb-color) 50%,
-      #202020 54% 71%,
-      #e4e4e4 74% 79%,
-      transparent 82%
+      var(--thumb-color) 0 5.5px,
+      var(--color-surface) 6px 7px,
+      #e4e4e4 7.5px 9.5px,
+      transparent 10px
     );
     appearance: none;
     cursor: grab;
@@ -392,10 +525,10 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     border-radius: 50%;
     background: radial-gradient(
       circle closest-side,
-      var(--thumb-color) 50%,
-      #202020 54% 71%,
-      #e4e4e4 74% 79%,
-      transparent 82%
+      var(--thumb-color) 0 5.5px,
+      var(--color-surface) 6px 7px,
+      #e4e4e4 7.5px 9.5px,
+      transparent 10px
     );
     cursor: grab;
     pointer-events: auto;
@@ -407,21 +540,33 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     cursor: grabbing;
   }
   .global-search__range input:focus-visible::-webkit-slider-thumb {
-    box-shadow:
-      0 0 0 2px #fff,
-      0 0 0 4px #000;
+    background: radial-gradient(
+      circle closest-side,
+      var(--thumb-color) 0 5.5px,
+      var(--color-surface) 6px 7px,
+      #e4e4e4 7.5px 9.5px,
+      #000000 10px,
+      #ffffff 10.5px 11.5px,
+      transparent 12px
+    );
   }
   .global-search__range input:focus-visible::-moz-range-thumb {
-    box-shadow:
-      0 0 0 2px #fff,
-      0 0 0 4px #000;
+    background: radial-gradient(
+      circle closest-side,
+      var(--thumb-color) 0 5.5px,
+      var(--color-surface) 6px 7px,
+      #e4e4e4 7.5px 9.5px,
+      #000000 10px,
+      #ffffff 10.5px 11.5px,
+      transparent 12px
+    );
   }
   .global-search__range-names {
     position: relative;
     height: 1.1rem;
     margin-inline: calc(var(--thumb) / 2);
-    color: #dadada;
-    font-size: 0.72rem;
+    color: var(--color-text);
+    font-size: var(--font-size-xs);
     font-weight: 600;
     line-height: 1.1rem;
   }
@@ -449,25 +594,36 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     top: 1.1rem;
   }
 
+  /* "Playable only": a checkbox drawn as a chip. */
   .global-search__playable {
     position: relative;
-    display: flex;
-    justify-self: start;
+    display: inline-flex;
     align-items: center;
-    gap: 0.55rem;
+    gap: var(--space-2);
     box-sizing: border-box;
-    min-height: 2.75rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid #4c4c4c;
-    border-radius: 0.65rem;
-    color: #e2e2e2;
-    background: #202020;
-    font-size: 0.8rem;
-    font-weight: 700;
+    min-height: 2.25rem;
+    padding: 0 var(--space-3) 0 var(--space-2);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--color-text);
+    background: var(--color-surface);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    white-space: nowrap;
     cursor: pointer;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
   }
-  .global-search__playable:hover {
-    border-color: #707070;
+  @media (hover: hover) {
+    .global-search__playable:hover {
+      border-color: var(--color-border-control);
+      background: var(--color-surface-hover);
+    }
+  }
+  .global-search__playable:has(> input:checked) {
+    border-color: var(--color-text-secondary);
+    background: var(--color-surface-raised);
   }
   .global-search__playable > input {
     position: absolute;
@@ -480,34 +636,37 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
   .global-search__checkmark {
     display: grid;
     flex: none;
-    width: 1.15rem;
-    height: 1.15rem;
+    width: 1.125rem;
+    height: 1.125rem;
     box-sizing: border-box;
     place-items: center;
-    border: 1px solid #8c8c8c;
-    border-radius: 0.3rem;
-    color: #151515;
-    background: #151515;
+    border: 1.5px solid var(--color-border-control);
+    border-radius: var(--radius-pill);
+    color: var(--color-on-accent);
+    background: transparent;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
   }
   .global-search__checkmark :global(svg) {
-    width: 0.85rem;
-    height: 0.85rem;
+    width: 0.8rem;
+    height: 0.8rem;
     opacity: 0;
   }
   .global-search__playable > input:checked + .global-search__checkmark {
-    border-color: #e6e6e6;
-    background: #e6e6e6;
+    border-color: var(--color-accent);
+    background: var(--color-accent);
   }
   .global-search__playable > input:checked + .global-search__checkmark :global(svg) {
     opacity: 1;
   }
   .global-search__playable:has(> input:focus-visible) {
-    outline: 2px solid var(--focus-ring-color, #fff);
+    outline: 2px solid var(--focus-ring-color);
     outline-offset: 2px;
   }
   @supports not selector(:has(*)) {
     .global-search__playable > input:focus-visible + .global-search__checkmark {
-      outline: 2px solid var(--focus-ring-color, #fff);
+      outline: 2px solid var(--focus-ring-color);
       outline-offset: 2px;
     }
   }
@@ -516,59 +675,134 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.3rem;
-    min-height: 2.75rem;
-    padding: 0 0.7rem;
-    border: 1px solid transparent;
-    border-radius: 0.6rem;
-    color: #b8b8b8;
+    gap: var(--space-1);
+    min-height: 2.25rem;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--radius-pill);
+    color: var(--color-text-secondary);
     background: transparent;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--font-size-sm);
     font-weight: 600;
     cursor: pointer;
   }
   .global-search__clear :global(svg) {
-    width: 0.95rem;
-    height: 0.95rem;
+    width: 1rem;
+    height: 1rem;
   }
-  .global-search__clear:hover:not(:disabled) {
-    color: #fff;
-    background: #2b2b2b;
+  @media (hover: hover) {
+    .global-search__clear:hover:not(:disabled) {
+      color: var(--color-text);
+      background: var(--color-surface-hover);
+    }
   }
-  .global-search__clear:focus-visible {
-    outline: 2px solid var(--focus-ring-color, #fff);
-    outline-offset: 2px;
+  .global-search__clear:active:not(:disabled) {
+    background: var(--color-surface-raised);
   }
   .global-search__clear:disabled {
     cursor: default;
-    opacity: 0.45;
+    opacity: 0.5;
+  }
+  @media (pointer: coarse) {
+    .global-search__playable,
+    .global-search__clear {
+      min-height: var(--tap-size);
+    }
   }
 
+  /* Results. */
   .global-search__results {
-    margin-top: 0.85rem;
-    padding-top: 0.85rem;
-    border-top: 1px solid #444;
+    margin-top: var(--space-4);
   }
   .global-search__results:focus-visible {
-    outline: 2px solid var(--focus-ring-color, #fff);
+    outline: 2px solid var(--focus-ring-color);
     outline-offset: 4px;
-    border-radius: 0.5rem;
+    border-radius: var(--radius-sm);
   }
   .global-search__results[hidden],
+  .global-search__skeleton[hidden],
   .global-search__message[hidden],
   .global-search__more[hidden],
-  .global-search__button[hidden] {
+  .global-search__button[hidden],
+  .global-search__message-hint[hidden] {
     display: none;
   }
-  .global-search__results[aria-busy='true'] .global-search__list {
-    opacity: 0.6;
-    transition: opacity 120ms 150ms;
+  /* A search from the URL shows its results area with the skeleton from the first paint (the sections under it wait
+     for the results, see index.astro), so nothing jumps when they arrive. The script drops the attribute once the
+     first search settles. `!important`: both elements are rendered `hidden` (for browsers without scripts), and the
+     layout's global `[hidden]` rule is `!important` too. */
+  @media (scripting: enabled) {
+    .global-search[data-search-pending] .global-search__results {
+      display: block !important;
+    }
+    .global-search[data-search-pending] .global-search__skeleton {
+      display: grid !important;
+    }
   }
+  .global-search__results-head {
+    display: flex;
+    align-items: baseline;
+    min-height: 1.25rem;
+    margin-bottom: var(--space-2);
+  }
+  .global-search__count {
+    margin: 0;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .global-search__results[aria-busy='true'] .global-search__list {
+    opacity: 0.55;
+    transition: opacity var(--duration-fast) 150ms;
+  }
+
+  /* Loading placeholders, shown only when a search takes a moment and there is nothing else to show. */
+  .global-search__skeleton {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+    gap: var(--space-2);
+    animation: global-search-fade-in var(--duration-base) var(--ease-standard);
+  }
+  /* A result's outline: cover, title, era and note bars. */
+  .global-search__skeleton span {
+    --bar: var(--color-surface-raised);
+    position: relative;
+    height: 5rem;
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background:
+      linear-gradient(var(--bar) 0 0) var(--space-2) var(--space-2) / 3rem 3rem no-repeat,
+      linear-gradient(var(--bar) 0 0) 4.25rem 0.75rem / min(60%, 14rem) 0.75rem no-repeat,
+      linear-gradient(var(--bar) 0 0) 4.25rem 1.85rem / min(30%, 6rem) 0.625rem no-repeat,
+      linear-gradient(var(--bar) 0 0) 4.25rem 3.1rem / min(70%, 18rem) 0.625rem no-repeat,
+      var(--color-surface);
+  }
+  /* The shimmer moves on the compositor (transform), not by repainting the background. */
+  .global-search__skeleton span::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgb(255 255 255 / 5%) 50%, transparent 80%);
+    transform: translateX(-100%);
+    animation: global-search-shimmer 1.4s var(--ease-standard) infinite;
+  }
+  @keyframes global-search-shimmer {
+    to {
+      transform: translateX(100%);
+    }
+  }
+  @keyframes global-search-fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
   .global-search__list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 21rem), 1fr));
-    gap: 0.5rem;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+    gap: var(--space-2);
     margin: 0;
     padding: 0;
     list-style: none;
@@ -576,112 +810,74 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
   .global-search__list:empty {
     display: none;
   }
-  /* Result rows are created by the script, so their rules are global (scoped under the list). */
+  /* Result rows are created by the script, so their rules are global (scoped under the list). They match the
+     "Recently leaked" cards: the era cover (the play button when the song plays) and the title, era and note. */
   .global-search__list :global(.global-search__result) {
     position: relative;
-    display: grid;
-    grid-template-areas:
-      'title play'
-      'era play'
-      'details details'
-      'notes notes';
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-content: start;
-    gap: 0.15rem 0.6rem;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
     box-sizing: border-box;
     min-width: 0;
-    padding: 0.65rem 0.75rem;
-    border: 1px solid color-mix(in srgb, var(--result-accent) 45%, var(--result-surface));
-    border-left: 3px solid var(--result-accent);
-    border-radius: 0.55rem;
-    color: var(--result-text);
-    background: var(--result-background);
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    color: var(--color-text);
+    background: var(--color-surface);
     transition:
-      border-color 120ms ease,
-      background-color 120ms ease;
+      border-color var(--duration-fast) var(--ease-standard),
+      background-color var(--duration-fast) var(--ease-standard);
   }
-  .global-search__list :global(.global-search__result:hover),
   .global-search__list :global(.global-search__result:focus-within),
   .global-search__list :global(.global-search__result[data-playing='true']) {
     border-color: var(--result-accent);
-    background: var(--result-surface);
+    background: var(--result-background);
   }
-  .global-search__list :global(.global-search__result-title) {
-    grid-area: title;
-    min-width: 0;
-    color: inherit;
-    font-weight: 700;
-    line-height: 1.3;
-    text-decoration: none;
-    overflow-wrap: anywhere;
+  @media (hover: hover) {
+    .global-search__list :global(.global-search__result:hover) {
+      border-color: color-mix(in srgb, var(--result-accent) 60%, transparent);
+      background: var(--result-background);
+    }
   }
-  /* The title link covers the whole card; the play button sits above it. */
-  .global-search__list :global(a.global-search__result-title::after) {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: 0.55rem;
-  }
-  .global-search__list :global(a.global-search__result-title:focus-visible) {
-    outline: none;
-  }
-  .global-search__list :global(a.global-search__result-title:focus-visible::after) {
-    outline: 2px solid var(--focus-ring-color, #fff);
-    outline-offset: 2px;
-  }
-  .global-search__list :global(.global-search__result-era) {
-    grid-area: era;
-    min-width: 0;
-    color: var(--result-accent-text);
-    font-size: 0.8rem;
-    font-weight: 600;
-    overflow-wrap: anywhere;
-  }
-  .global-search__list :global(.global-search__result-details) {
-    grid-area: details;
-    min-width: 0;
-    color: var(--result-muted-text);
-    font-size: 0.8rem;
-    line-height: 1.35;
-    overflow-wrap: anywhere;
-  }
-  .global-search__list :global(.global-search__result-notes) {
-    display: -webkit-box;
-    grid-area: notes;
-    margin: 0.2rem 0 0;
-    overflow: hidden;
-    color: var(--result-muted-text);
-    font-size: 0.82rem;
-    line-height: 1.35;
-    overflow-wrap: anywhere;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-  }
+  .global-search__list :global(.global-search__result-thumb),
   .global-search__list :global(.global-search__result-play) {
     position: relative;
+    flex: none;
+    width: 3rem;
+    height: 3rem;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: var(--result-surface);
+  }
+  .global-search__list :global(.global-search__result-thumb .cover-image),
+  .global-search__list :global(.global-search__result-play .cover-image) {
+    width: 100%;
+    height: 100%;
+  }
+  .global-search__list :global(.global-search__result-play) {
     z-index: 1;
-    display: inline-grid;
-    grid-area: play;
-    align-self: center;
-    width: 2.25rem;
-    height: 2.25rem;
-    place-items: center;
+    display: block;
     padding: 0;
     border: 0;
-    border-radius: 999px;
-    color: var(--result-on-accent);
-    background: var(--result-accent);
     cursor: pointer;
   }
-  .global-search__list :global(.global-search__result-play svg) {
-    width: 1.05rem;
-    height: 1.05rem;
+  .global-search__list :global(.global-search__result-play-icon) {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #ffffff;
+    background: radial-gradient(circle, rgb(0 0 0 / 62%) 0 34%, rgb(0 0 0 / 22%) 72%);
+    transition: background-color var(--duration-fast) var(--ease-standard);
   }
-  /* The player sets aria-pressed="true" on the current song's button while it plays. */
+  .global-search__list :global(.global-search__result-play svg) {
+    width: 1.1rem;
+    height: 1.1rem;
+  }
   .global-search__list :global(.global-search__result-play .play-icon) {
     margin-left: 0.1rem;
   }
+  /* The player sets aria-pressed="true" on the current song's button while it plays. */
   .global-search__list :global(.global-search__result-play .pause-icon),
   .global-search__list :global(.global-search__result-play[aria-pressed='true'] .play-icon) {
     display: none;
@@ -689,90 +885,219 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
   .global-search__list :global(.global-search__result-play[aria-pressed='true'] .pause-icon) {
     display: block;
   }
-  .global-search__list :global(.global-search__result-play:hover) {
-    color: var(--result-background);
-    background: var(--result-text);
+  .global-search__list :global(.global-search__result-play[aria-pressed='true'] .global-search__result-play-icon) {
+    color: var(--result-on-accent);
+    background: color-mix(in srgb, var(--result-accent) 88%, transparent);
+  }
+  @media (hover: hover) {
+    .global-search__list :global(.global-search__result-play:hover .global-search__result-play-icon) {
+      background-color: rgb(0 0 0 / 30%);
+    }
+  }
+  .global-search__list :global(.global-search__result-play:active) {
+    transform: scale(0.96);
   }
   .global-search__list :global(.global-search__result-play:focus-visible) {
-    outline: 2px solid var(--focus-ring-color, #fff);
+    outline: 2px solid var(--focus-ring-color);
     outline-offset: 2px;
   }
+  .global-search__list :global(.global-search__result-text) {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-width: 0;
+    padding-top: 0.125rem;
+  }
+  /* Two lines at most: the name and version come first, long credits are cut (the tooltip has them all). */
+  .global-search__list :global(.global-search__result-title) {
+    display: -webkit-box;
+    min-width: 0;
+    overflow: hidden;
+    color: inherit;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    line-height: var(--line-height-snug);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  .global-search__list :global(.global-search__result-credits) {
+    color: var(--color-text-muted);
+    font-weight: 400;
+  }
+  /* The title link covers the whole card; the play button sits above it. */
+  .global-search__list :global(a.global-search__result-title::after) {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-lg);
+  }
+  .global-search__list :global(a.global-search__result-title:focus-visible) {
+    outline: none;
+  }
+  .global-search__list :global(a.global-search__result-title:focus-visible::after) {
+    outline: 2px solid var(--focus-ring-color);
+    outline-offset: 2px;
+  }
+  @media (hover: hover) {
+    .global-search__list :global(a.global-search__result-title:hover) {
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 0.15em;
+    }
+  }
+  .global-search__list :global(.global-search__result-meta) {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: var(--line-height-snug);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .global-search__list :global(.global-search__result-era) {
+    color: var(--result-accent-text);
+    font-weight: 600;
+  }
+  .global-search__list :global(.global-search__result-notes) {
+    display: -webkit-box;
+    margin: 0.125rem 0 0;
+    overflow: hidden;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: var(--line-height-normal);
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
 
+  /* Messages: no matches, nothing to search for, failures. */
   .global-search__message {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 0.5rem 0.75rem;
-    margin-top: 0.35rem;
-    color: #c8c8c8;
+    gap: var(--space-2);
+    padding: var(--space-5) var(--space-4);
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-secondary);
     text-align: center;
   }
-  .global-search__message p {
+  .global-search__message-icon {
+    display: grid;
+    width: 2.5rem;
+    height: 2.5rem;
+    place-items: center;
+    border-radius: var(--radius-pill);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-raised);
+  }
+  .global-search__message-icon :global(svg) {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .global-search__message :global(.global-search__icon-alert),
+  .global-search__message[data-kind='error'] :global(.global-search__icon-search) {
+    display: none;
+  }
+  .global-search__message[data-kind='error'] :global(.global-search__icon-alert) {
+    display: block;
+    color: var(--color-danger-text);
+  }
+  .global-search__message-text {
     margin: 0;
+    color: var(--color-text);
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    text-wrap: balance;
+  }
+  .global-search__message-hint {
+    max-width: 32rem;
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    text-wrap: pretty;
+  }
+  .global-search__message-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-2);
+  }
+  .global-search__message-actions:not(:has(> :not([hidden]))) {
+    display: none;
   }
   .global-search__more {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 0.5rem 0.9rem;
-    margin-top: 0.8rem;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
   }
   .global-search__more-progress {
     margin: 0;
-    color: #a8a8a8;
-    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
     text-align: center;
+    text-wrap: pretty;
   }
   .global-search__button {
+    min-width: 10rem;
     min-height: 2.5rem;
-    padding: 0 1rem;
-    border: 1px solid #6c6c6c;
-    border-radius: 0.6rem;
-    color: #f3f3f3;
-    background: #2a2a2a;
+    padding: 0 var(--space-5);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--color-text);
+    background: var(--color-surface-raised);
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--font-size-sm);
     font-weight: 600;
     cursor: pointer;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
   }
-  .global-search__button:hover {
-    border-color: #8c8c8c;
-    background: #333;
+  @media (hover: hover) {
+    .global-search__button:hover {
+      border-color: var(--color-border-control);
+      background: var(--color-surface-hover);
+    }
+  }
+  .global-search__button:active {
+    background: var(--color-surface);
   }
   .global-search__button:focus-visible {
-    outline: 2px solid var(--focus-ring-color, #fff);
+    outline: 2px solid var(--focus-ring-color);
     outline-offset: 2px;
   }
   .global-search__button[aria-busy='true'] {
     cursor: progress;
-    opacity: 0.75;
+    opacity: 0.7;
+  }
+  @media (pointer: coarse) {
+    .global-search__button {
+      min-height: var(--tap-size);
+    }
   }
   .global-search__noscript {
-    margin: 0.75rem 0 0;
-    color: #c8c8c8;
-    font-size: 0.85rem;
+    margin: var(--space-3) 0 0;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
   }
 
-  @media (max-width: 40rem) {
-    .global-search {
-      padding: 0.9rem;
-    }
-    .global-search__filters {
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.6rem 0.5rem;
-      padding: 0.75rem;
-    }
-    .global-search__timeline {
-      grid-column: 1 / -1;
-    }
-  }
   @media (prefers-reduced-motion: reduce) {
     .global-search__range,
     .global-search__list :global(.global-search__result),
     .global-search__results[aria-busy='true'] .global-search__list {
       transition: none;
+    }
+    .global-search__skeleton span::after {
+      display: none;
     }
   }
   @media (forced-colors: active) {
@@ -802,8 +1127,10 @@ const eraData = eras.map(({ id, name, dominantColor, hasCover, coverVersion }) =
     .global-search__playable > input:checked + .global-search__checkmark :global(svg) {
       color: HighlightText;
     }
-    .global-search__list :global(.global-search__result-play) {
-      border: 1px solid ButtonText;
+    .global-search__list :global(.global-search__result),
+    .global-search__playable,
+    .global-search__toggle {
+      border-color: CanvasText;
     }
   }
 </style>

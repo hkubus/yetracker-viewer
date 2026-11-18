@@ -9,6 +9,7 @@ import {
   isPlayable,
   linkLabel,
   linkNotes,
+  listCountText,
   playbackLength,
   songLength,
   songLinks,
@@ -183,4 +184,19 @@ test('countLabel pluralizes and groups digits', () => {
   assert.equal(countLabel(0, 'song'), '0 songs');
   assert.equal(countLabel(9650, 'song'), '9,650 songs');
   assert.equal(countLabel(2, 'match', 'matches'), '2 matches');
+});
+
+test('listCountText gives one count for the page, the range, the filter or an unknown total', () => {
+  const count = (onPage: number, total: number | null, offset = 0, filtered = false) =>
+    listCountText({ onPage, total, offset, filtered });
+  assert.equal(count(90, 90), '90 songs');
+  assert.equal(count(1, 1), '1 song');
+  assert.equal(count(0, 0), '0 songs');
+  assert.equal(count(100, 956), '1–100 of 956 songs');
+  assert.equal(count(56, 956, 900), '901–956 of 956 songs');
+  assert.equal(count(1, 1201, 1200), '1,201 of 1,201 songs');
+  assert.equal(count(12, 12, 0, true), '12 matching songs');
+  assert.equal(count(100, 230, 100, true), '101–200 of 230 matching songs');
+  assert.equal(count(0, 230, 300, true), '230 matching songs');
+  assert.equal(count(90, null), '90 songs on this page');
 });

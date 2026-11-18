@@ -39,13 +39,17 @@ of them are also described in the repo-root `.env.example`.
 
 ## Pages
 
-- `/` — `pages/index.astro`: catalog counts and "Updated … ago" (from `GET /status`), the era grid with an instant
-  era filter, recently leaked playable songs, and the song search. `/eras`, the recent leaks and `/status` are fetched
+- `/` — `pages/index.astro`: a compact header with the catalog counts and "Updated … ago" (from `GET /status`), the
+  song search, recently leaked playable songs (a horizontal scroll-snap rail on phones, a grid from 40rem) and the era
+  grid (cover cards, two columns on phones) with an instant era filter. `/eras`, the recent leaks and `/status` are fetched
   in parallel; if one fails the page says so and is sent with `Cache-Control: no-store` (a `404` from `/status`, as
   from an older API, doesn't count as a failure). Without the era list the page is only an apology, so it answers
   `503` with `Retry-After` (the API's, else 30 s); the friendly page and its "Try again" link still render.
-- `/eras/:id` — `pages/eras/[id].astro`: era header (cover, subtitle, collapsible description), the song list (100
-  songs per page, `?page=&q=&category=&sort=`), pagination and previous/next era links. A malformed id or unknown era
+- `/eras/:id` — `pages/eras/[id].astro`: a top bar (back to all eras, previous/next era: names where there's room,
+  arrows with accessible names on phones), the era header (cover, name, subtitle and the years of its timeline; the
+  description and the timeline parsed from the era notes sit behind an "About this era" disclosure below 64rem and are
+  always shown above it), the song list (100 songs per page, `?page=&q=&category=&sort=`; compact previous/next page
+  arrows next to the count, the full pagination below the list). A malformed id or unknown era
   → 404, a bad parameter → 400 page, a page past the end → `302` to the last page, an unreachable or failing API →
   503 with `Retry-After`. With a same-origin `PUBLIC_API_URL` and no `SITE_URL`, a page with a cover builds its
   Open Graph image URL from the request and is sent `private, max-age=60`.
@@ -63,6 +67,14 @@ category markers (⭐ ✨ 🏆 🏅 🗑️ 🤖, sent to the API, which filters
 nothing. Results are also kept in `sessionStorage` (`yt:global-search`, 30 minutes) so back/forward restores them,
 including extra pages and the scroll position.
 
+On phones (below 40rem, with scripting) the era range and playable filters sit behind a "Filters" button that shows
+how many are active; it starts open when the URL sets filters. Without JavaScript they stay visible. Results show the
+era cover (the play button, for playable songs) and the title with its credits (`feat.`, `prod.`, …) muted. A
+request still running after 300 ms shows a skeleton; no matches with filters set offers "Reset filters", a failed
+request "Try again". A search in the URL (`data-search-pending`, set by the server) shows its skeleton from the first
+paint and keeps the sections under it hidden until the first search settles (at most 3 s, in case the script never
+runs), so loading a search link shifts nothing.
+
 ## Source layout
 
 ```text
@@ -72,30 +84,41 @@ src/
   config.ts              server-only: runtime env, SSR API client (fetchApi/fetchJson, typed errors, 5 s timeout),
                          requestOrigin / isSecureRequest / originDependentCacheControl, PAGE_CACHE_CONTROL
   middleware.ts          CSP, security headers, HSTS for HTTPS requests, Cache-Control for pages, status lines
-  layouts/Layout.astro   <head> (meta, <meta name="yt-api-url">, font), skip link, <main tabindex="-1">, global
-                         CSS, footer, the player
+  layouts/Layout.astro   <head> (meta, manifest, <meta name="yt-api-url">, font), skip link, <main tabindex="-1">,
+                         global CSS, footer, the player
   pages/                 routes (above)
   components/            Era, SongList, Pagination, GlobalSongSearch, RecentLeaks, Player, CoverImage, BackButton,
                          SiteFooter, ErrorPage, icons/ (inline SVG components)
   scripts/               client modules (below)
   utils/                 pure helpers, each with a *.test.ts next to it
   songSorts.ts, songCategories.ts   sort and category options of the song list; categoryMarkersIn() (+ test)
-public/                  favicons, apple-touch-icon.png
+  styles/tokens.css      design tokens (colors, spacing, type scale, radii, shadows, motion), imported by the layout
+public/                  favicons, apple-touch-icon.png, manifest.webmanifest + its icons (icon-{192,512}.png,
+                         icon-maskable-{192,512}.png: the mark on a full-bleed #181818 square, inside the safe zone)
 ```
 
 Fonts: self-hosted Be Vietnam Pro (latin + latin-ext) through Astro's `<Font />`, weights 400, 600 and 700 only,
 `font-display: optional` (a face that isn't there for the first render is not swapped in, so fonts never shift the
-layout) and no preload.
+layout). The layout preloads the three latin faces only (`<Font preload={[{ subset: 'latin' }]} />`): the local font
+provider doesn't record a face's subset, so `localWithSubsets()` in `astro.config.mjs` adds it. Latin-ext faces load
+when a page needs them.
+
+Layout: `themeColor` sets `<meta name="theme-color">` (default `#181818`, the site background). The manifest makes the
+site installable (`display: standalone`; every page has its own way back). Global CSS in the layout sets the base text
+color, `scrollbar-gutter: stable`, no tap highlight, `touch-action: manipulation` on controls (no double-tap zoom), and
+makes `[hidden]` win over any component `display`; a page can tint text selection with `--selection-color`.
 
 Shared helpers in `src/utils/`: `search.ts` (`fold`, `tokens`, `matchesAllTokens` — the TS twin of the API's folding,
 keep them identical; `normalizeQuery`/`clampQuery` for every query read from a URL or a search box: control characters
 dropped, whitespace collapsed, the 100-character limit), `dates.ts` (catalog dates with day/month/year precision, always
 UTC; relative times), `duration.ts`, `color.ts` (`themeFor`: contrast-safe colors from an era's dominant color for any
 input), `cover.ts` (cover URLs, initials), `songRow.ts` and `songDisplay.ts` (turning API songs into rows, links,
-play-button attributes), `globalSearchState.ts` (home search URL/API parameters, search terms incl. category markers),
-`era-page.ts` (era page URLs, page math), `shared-api.ts` + `cache.ts` (server-only cached `/eras`, `/status` and recent leaks), `api-base-url.ts` (client-side API
-URL from the meta tag), `back-navigation.ts` (back links that act like the browser's Back button). `env.test.ts` tests
-`../../env.mjs`.
+play-button attributes; `listCountText` for the song list's one count), `globalSearchState.ts` (home search URL/API
+parameters, search terms incl. category markers, the active-filter count), `songTitle.ts` (`splitCredits`: a title's
+credits, shown muted on the home page), `era-page.ts` (era page URLs, page math, `parseTimeline`/`timelineYears` for
+the era notes), `shared-api.ts` + `cache.ts` (server-only cached `/eras`, `/status` and recent leaks), `api-base-url.ts`
+(client-side API URL from the meta tag), `back-navigation.ts` (back links that act like the browser's Back button).
+`env.test.ts` tests `../../env.mjs`.
 
 ## Client scripts
 
@@ -109,7 +132,9 @@ With the ClientRouter each module runs once per document. Page scripts (`song-li
 listeners, observers, timers, fetches — on `astro:before-swap` through one `AbortController` per page.
 
 - `song-list.ts` — the era song list: instant filtering of the rendered page, clamped notes with "More" toggles, the
-  extra-links menus, clean search URLs, focus after a search, centering of a deep-linked `#song-<id>` row on fresh
+  extra-links menus and the Filters panel (one open at a time; Escape, a click elsewhere or tabbing out closes them),
+  clean search URLs, focus on the search field after a search or "Clear all" (not after a page link, which would pull
+  up a phone's keyboard), centering of a deep-linked `#song-<id>` row on fresh
   navigations and after a same-page `#song-<id>` link (e.g. the player's era link). The instant filter matches like
   the API's era search: every folded word must occur in the song's own text (title cell, notes, quality,
   availability, sub-era — not the era's name), and typed category markers must all be in the title. Typing the
@@ -117,13 +142,14 @@ listeners, observers, timers, fetches — on `astro:before-swap` through one `Ab
 - `global-search.ts` — the home page search: debounced requests with timeouts and aborts, URL state (normalized on
   load), "Show more" (a superseded request never leaves it stuck), keyboard navigation (Enter, arrows, Escape), the
   era-range slider, the result cache.
-- `home.ts` — the era filter and the "Updated … ago" refresh.
+- `home.ts` — the era filter ("5 of 43 eras", a "No eras match" state with a button that clears it) and the
+  "Updated … ago" refresh.
 - `skip-link.ts` — "Skip to main content" focuses `<main>` instead of navigating to `#main-content` (no fetch, no
   hash, no history entry); one capture-phase listener for the whole session.
 - `player/` — the site-wide player. `components/Player.astro` holds the markup and styles and is persisted across
   navigations (`transition:persist`), so playback continues from page to page. `index.ts` (entry, runs once),
   `controller.ts` (playback, queue, failure recovery, resume), `view.ts` (DOM, theme, live announcements),
-  `targets.ts` (the DOM contract below), `track.ts` (track model, attribute and payload parsing), `queue.ts` (queue
+  `sheet.ts` (the expanded view on narrow screens), `targets.ts` (the DOM contract below), `track.ts` (track model, attribute and payload parsing), `queue.ts` (queue
   and continuation paging), `probe.ts` (`HEAD` probes that classify failures, `startStream()` to start a transcode,
   `waitForStream()` to wait until a live transcode reaches a position or is cached), `storage.ts` (`localStorage`
   keys `yetracker:quality|volume|muted|player`), `media-session.ts`, `keyboard.ts`, `capabilities.ts`, `format.ts`;
@@ -132,12 +158,40 @@ listeners, observers, timers, fetches — on `astro:before-swap` through one `Ab
 The era song list (`components/SongList.astro`) groups rows by sub-era; when a page starts in the middle of a
 sub-era, its first header reads "… (continued)" (decided by one extra SSR request for the song before the page,
 `limit=1`, 1.5 s timeout, only in catalog order after the first page). Row icons are CSS masks on the buttons and
-links (no inline SVG per row). Notes are clamped to three lines from the first layout where scripts run
-(`@media (scripting: enabled)`); browsers without that media feature clamp once `song-list.ts` marks the list
+links (no inline SVG per row). Notes are clamped to three lines (two on phones) from the first layout where scripts
+run (`@media (scripting: enabled)`); browsers without that media feature clamp once `song-list.ts` marks the list
 `data-enhanced`.
+
+Its toolbar is one `<form>`: the search field with its submit button (the form's default button, so Enter searches),
+then a "Filters" `<details>` (category and sort, an "Apply" button, a badge with the number of active choices). Below
+64rem the panel opens over the list; from 64rem the filters are shown inline (`::details-content` forced open, behind
+`@supports`; without it the disclosure stays). Without JavaScript the disclosure still opens and every button submits.
+One count line follows ("1–100 of 956 songs", "6 matching songs"; the instant filter rewrites it), a "Clear all" link
+when a search, category or sort is set, and the `pager` slot (the era page puts the compact pagination there). The
+table (from 56.3125rem) has a sticky header, hairline rows and the playing or targeted row tinted with the era's
+surface color and an accent bar. Below that each row is a compact block — title with the play button or the
+availability state on the right, one meta line (quality, length, file and leak dates), the link icons, the clamped
+notes — and sub-era headers stick to the top while their rows scroll.
+
+`components/Pagination.astro` has two variants: `full` (a summary and numbered pages; first/previous/"Page n of
+m"/next/last on phones) and `compact` (previous/next arrows with accessible names; nothing for a single page).
+`components/BackButton.astro` takes `label`, `accessibleLabel`, `href` and `class` and acts like the browser's Back
+button when the previous page is the same target (`utils/back-navigation.ts`).
 
 ### Player behavior
 
+- Layout (one element, CSS only): from 48rem up a bar docked to the bottom edge (track info | play controls over the
+  seek bar | volume, quality, close; the volume slider from 64rem up). Narrower screens get a one-row mini player
+  (cover, title and era, play/pause, next, a progress line along the top edge). Its info area is a button
+  (`aria-expanded`) that expands the same element into a full-screen "now playing" view: large cover, title, era link,
+  seek bar with times, previous/play/next, volume (where the browser can set it), quality, "Close player". The
+  chevron, Escape, any navigation (the era link included) and a viewport growing past 48rem collapse it; focus
+  returns to the expand button (after a navigation the new page starts focus at its top, as for any link: the
+  router doesn't restore focus into the persisted player). While it is open the rest of the page is `inert` and doesn't scroll; history is
+  never touched. `--player-height` keeps the mini bar's height meanwhile, so the page underneath never reflows.
+- Loading and buffering show a turning ring around the play button (the controls stay usable); errors appear in a
+  row above the controls (with Retry), so the controls don't move; notices float above the bar (below the header of
+  the expanded view).
 - Quality: 128 kbps Opus transcodes by default when the browser plays Ogg Opus, otherwise the original file (and the
   quality control is hidden). When a transcode fails the player retries once after `Retry-After` if the API was busy,
   and otherwise switches this song to the original file with a short notice (the stored preference stays).

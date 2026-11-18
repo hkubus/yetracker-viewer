@@ -4,6 +4,12 @@
  * the page that renders this (`Astro.response.status`), before rendering starts.
  */
 import Layout from '../layouts/Layout.astro';
+import AlertIcon from './icons/AlertIcon.astro';
+import ArrowLeftIcon from './icons/ArrowLeftIcon.astro';
+import CloudOffIcon from './icons/CloudOffIcon.astro';
+import LinkIcon from './icons/LinkIcon.astro';
+import RefreshIcon from './icons/RefreshIcon.astro';
+import SearchIcon from './icons/SearchIcon.astro';
 
 type ErrorStatus = 400 | 404 | 500 | 503;
 
@@ -39,23 +45,43 @@ const COPY: Record<ErrorStatus, { heading: string; message: string }> = {
     message: 'The page could not load its data from the catalog service. It should be back in a moment.',
   },
 };
+const ICONS = { 400: LinkIcon, 404: SearchIcon, 500: AlertIcon, 503: CloudOffIcon } as const;
 
 const { status, heading, message, detail, retryHref = '', secondaryAction } = Astro.props;
 const copy = COPY[status];
 const title = heading ?? copy.heading;
 const canRetry = status >= 500;
+const Icon = ICONS[status];
 ---
 
 <Layout title={`${title} | Ye Tracker`} description={message ?? copy.message} noindex>
   <div class="error-page">
-    <p class="error-page__code"><span class="sr-only">Error </span>{status}</p>
+    <span class="error-page__icon" aria-hidden="true"><Icon size="1.75rem" /></span>
+    <p class="error-page__code">Error {status}</p>
     <h1>{title}</h1>
     <p class="error-page__message">{message ?? copy.message}</p>
     {detail && <p class="error-page__detail">{detail}</p>}
     <p class="error-page__actions">
-      {canRetry && <a class="error-page__action error-page__action--primary" href={retryHref}>Try again</a>}
-      {secondaryAction && <a class="error-page__action" href={secondaryAction.href}>{secondaryAction.label}</a>}
+      {
+        canRetry && (
+          <a class="error-page__action error-page__action--primary" href={retryHref}>
+            <RefreshIcon class="error-page__action-icon" />
+            Try again
+          </a>
+        )
+      }
+      {
+        secondaryAction && (
+          <a
+            class:list={['error-page__action', { 'error-page__action--primary': !canRetry }]}
+            href={secondaryAction.href}
+          >
+            {secondaryAction.label}
+          </a>
+        )
+      }
       <a class:list={['error-page__action', { 'error-page__action--primary': !canRetry && !secondaryAction }]} href="/">
+        <ArrowLeftIcon class="error-page__action-icon" />
         Back to all eras
       </a>
     </p>
@@ -64,70 +90,122 @@ const canRetry = status >= 500;
 
 <style>
   .error-page {
-    display: grid;
+    display: flex;
     box-sizing: border-box;
-    min-height: 70vh;
-    place-content: center;
-    justify-items: center;
-    gap: 0.6rem;
-    padding: 2rem 1.25rem;
-    color: #f3f3f3;
+    width: 100%;
+    max-width: 36rem;
+    /* Centered on the first screen, but never taller than a phone's: the actions stay within reach. */
+    min-height: min(70vh, 36rem);
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    margin-inline: auto;
+    padding: var(--space-7) var(--page-gutter) var(--space-6);
+    color: var(--color-text);
     text-align: center;
   }
+  .error-page__icon {
+    display: grid;
+    width: 3.5rem;
+    height: 3.5rem;
+    place-items: center;
+    margin-bottom: var(--space-4);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+  }
   .error-page__code {
-    margin: 0;
-    color: #9a9a9a;
-    font-size: clamp(3rem, 10vw, 6rem);
-    font-weight: 700;
-    letter-spacing: -0.05em;
-    line-height: 1;
+    margin: 0 0 var(--space-2);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
   h1 {
     margin: 0;
-    font-size: clamp(1.25rem, 3vw, 1.75rem);
+    font-size: var(--font-size-2xl);
+    font-weight: 700;
+    line-height: var(--line-height-tight);
   }
-  .error-page__message,
-  .error-page__detail {
-    max-width: 34rem;
-    margin: 0;
-    color: #c4c4c4;
-    line-height: 1.5;
+  .error-page__message {
+    margin: var(--space-3) 0 0;
+    color: var(--color-text-secondary);
+    line-height: var(--line-height-normal);
+    text-wrap: pretty;
   }
   .error-page__detail {
-    color: #e6e6e6;
-    font-weight: 600;
+    box-sizing: border-box;
+    width: 100%;
+    margin: var(--space-4) 0 0;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    color: var(--color-text);
+    background: var(--color-surface);
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-normal);
+    text-wrap: pretty;
   }
   .error-page__actions {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 0.75rem;
-    margin: 1rem 0 0;
+    gap: var(--space-3);
+    margin: var(--space-5) 0 0;
   }
   .error-page__action {
     display: inline-flex;
-    min-height: 2.75rem;
     box-sizing: border-box;
+    min-height: var(--tap-size);
     align-items: center;
-    padding: 0.5rem 1.1rem;
-    border: 2px solid #8a8a8a;
-    border-radius: 0.6rem;
-    color: #f3f3f3;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    color: var(--color-text);
+    background: var(--color-surface-raised);
+    font-size: var(--font-size-md);
     font-weight: 600;
+    line-height: var(--line-height-tight);
     text-decoration: none;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      transform var(--duration-fast) var(--ease-standard);
   }
   .error-page__action--primary {
-    border-color: #f3f3f3;
-    color: #181818;
-    background: #f3f3f3;
+    border-color: var(--color-accent);
+    color: var(--color-on-accent);
+    background: var(--color-accent);
   }
-  .error-page__action:hover {
-    border-color: #ffffff;
-    background: #2a2a2a;
-    color: #ffffff;
+  .error-page__action :global(.error-page__action-icon) {
+    flex: none;
+    width: 1.125em;
+    height: 1.125em;
   }
-  .error-page__action--primary:hover {
-    background: #ffffff;
-    color: #181818;
+  @media (hover: hover) {
+    .error-page__action:hover {
+      border-color: var(--color-border-control);
+      background: var(--color-surface-hover);
+    }
+    .error-page__action--primary:hover {
+      border-color: var(--color-text);
+      background: var(--color-text);
+    }
+  }
+  .error-page__action:active {
+    transform: scale(0.98);
+  }
+  /* Phones: full-width buttons, stacked, the primary one first. */
+  @media (max-width: 30rem) {
+    .error-page__actions {
+      width: 100%;
+      flex-direction: column;
+    }
+    .error-page__action {
+      width: 100%;
+    }
   }
 </style>

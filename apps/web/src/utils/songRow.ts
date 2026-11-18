@@ -95,12 +95,15 @@ export function downloadStateOf(song: SongPayload): DownloadState {
   return song.downloaded === null || song.downloaded === undefined ? 'unsupported' : 'pending';
 }
 
-/** Why a song has no play button, for everything but `downloaded`. */
+/**
+ * Why a song has no play button, for everything but `downloaded`. Short: phones show it in the song's meta line, next
+ * to the source link (when there is one).
+ */
 export const DOWNLOAD_STATE_LABELS: Readonly<Record<Exclude<DownloadState, 'downloaded'>, string>> = {
   none: 'No audio file',
-  unsupported: 'Source can’t be downloaded here — open the source',
+  unsupported: 'Only at the source',
   pending: 'Not downloaded yet',
-  failed: 'Download failed — open the source',
+  failed: 'Download failed',
 };
 
 export interface SongLength {
@@ -184,4 +187,28 @@ export function linkNotes(notes: string, links: readonly NotesLink[] | null | un
 /** `1 song`, `2 songs`, `1,234 songs`. */
 export function countLabel(count: number, singular: string, plural = `${singular}s`): string {
   return `${count.toLocaleString('en-US')} ${count === 1 ? singular : plural}`;
+}
+
+export interface ListCount {
+  /** Songs rendered on this page. */
+  onPage: number;
+  /** Songs on all pages (the API's `X-Total-Count`); null when unknown. */
+  total: number | null;
+  /** Position of this page's first song in the whole list, 0-based. */
+  offset: number;
+  /** The list is narrowed by a search or a category. */
+  filtered: boolean;
+}
+
+/**
+ * The song list's one count: `90 songs`, `101–200 of 956 songs`, `12 matching songs`, `1–100 of 230 matching songs`;
+ * `90 songs on this page` without a total (older APIs).
+ */
+export function listCountText({ onPage, total, offset, filtered }: ListCount): string {
+  if (total === null) return `${countLabel(onPage, 'song')} on this page`;
+  const all = countLabel(total, filtered ? 'matching song' : 'song');
+  if (onPage === 0 || (offset === 0 && onPage >= total)) return all;
+  const first = (offset + 1).toLocaleString('en-US');
+  const last = (offset + onPage).toLocaleString('en-US');
+  return `${first === last ? first : `${first}–${last}`} of ${all}`;
 }

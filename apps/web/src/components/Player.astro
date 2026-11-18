@@ -1,12 +1,17 @@
 ---
 /**
- * The site-wide audio player bar. Rendered once by the layout and persisted across ClientRouter navigations
+ * The site-wide audio player. Rendered once by the layout and persisted across ClientRouter navigations
  * (`transition:persist`), so playback continues from page to page. Behaviour lives in `src/scripts/player/`; song
  * lists talk to it only through the `data-play-*` attributes and the `yt:player-state` event (SPEC §6.2).
+ *
+ * One element, three layouts (CSS only): a bar docked to the bottom edge from 48rem up; below that a one-row mini
+ * player whose info area expands the same element into a full-screen "now playing" view (`data-expanded`, see
+ * `scripts/player/sheet.ts`, which shares the breakpoint).
  */
 import { ERA_PAGE_SIZE } from '../config';
 import { themeStyle } from '../utils/color';
 import CoverImage from './CoverImage.astro';
+import ChevronDownIcon from './icons/ChevronDownIcon.astro';
 import CloseIcon from './icons/CloseIcon.astro';
 import MuteIcon from './icons/MuteIcon.astro';
 import NextIcon from './icons/NextIcon.astro';
@@ -33,6 +38,7 @@ const qualities = [
 
 <section
   class="player"
+  id="audio-player"
   aria-label="Audio player"
   data-player-root
   data-api-base-url={apiBaseUrl}
@@ -44,18 +50,47 @@ const qualities = [
   transition:animate="none"
 >
   <audio preload="metadata" data-player-audio></audio>
+  <div class="player__line" aria-hidden="true"><span class="player__line-fill" data-player-line></span></div>
+  <div class="player__error" data-player-error hidden>
+    <p data-player-error-text></p>
+    <button type="button" class="player__retry" data-player-retry>Retry</button>
+  </div>
+  <button
+    type="button"
+    class="player__button player__collapse"
+    data-player-collapse
+    aria-expanded="false"
+    aria-controls="audio-player"
+    title="Collapse player"
+  >
+    <ChevronDownIcon />
+    <span class="player__sr">Collapse player</span>
+  </button>
   <div class="player__info">
-    <CoverImage eraId={0} eraName="" hasCover={false} size={96} class="player__cover" data-player-cover />
+    <span class="player__art">
+      <CoverImage eraId={0} eraName="" hasCover={false} size={96} class="player__cover" data-player-cover />
+    </span>
     <div class="player__meta">
       <p class="player__state" data-player-state>Paused</p>
       <p class="player__title" data-player-title></p>
       <a class="player__era" data-player-era hidden></a>
+      <p class="player__era-text" data-player-era-text hidden></p>
     </div>
+    <button
+      type="button"
+      class="player__expand"
+      data-player-expand
+      aria-expanded="false"
+      aria-controls="audio-player"
+      title="Expand player"
+    >
+      <span class="player__sr">Expand player</span>
+    </button>
   </div>
   <div class="player__controls" role="group" aria-label="Playback controls" data-player-controls>
     <button
       type="button"
-      class="player__button"
+      class="player__button player__skip player__previous"
       data-player-previous
       aria-label="Previous track"
       title="Previous track"
@@ -69,7 +104,7 @@ const qualities = [
     </button>
     <button
       type="button"
-      class="player__button"
+      class="player__button player__skip"
       data-player-next
       aria-label="Next track"
       title="Next track"
@@ -77,6 +112,23 @@ const qualities = [
     >
       <NextIcon />
     </button>
+  </div>
+  <div class="player__progress">
+    <span class="player__time player__time--elapsed" data-player-elapsed aria-hidden="true">0:00</span>
+    <input
+      type="range"
+      class="player__range player__seek"
+      data-player-seek
+      min="0"
+      max="0"
+      step="1"
+      value="0"
+      aria-label="Position"
+      aria-valuetext="0:00"
+    />
+    <span class="player__time player__time--duration" data-player-duration aria-hidden="true">—</span>
+  </div>
+  <div class="player__options">
     <div class="player__volume" data-player-volume-group>
       <button type="button" class="player__button" data-player-mute aria-label="Mute" aria-pressed="false" title="Mute">
         <VolumeIcon class="player__volume-icon" />
@@ -84,7 +136,7 @@ const qualities = [
       </button>
       <input
         type="range"
-        class="player__volume-slider"
+        class="player__range player__volume-slider"
         data-player-volume
         min="0"
         max="100"
@@ -96,32 +148,17 @@ const qualities = [
     </div>
     <label class="player__quality" data-player-quality-control>
       <span class="player__quality-label">Quality</span>
-      <select data-player-quality>
-        {qualities.map(({ value, label }) => <option value={value}>{label}</option>)}
-      </select>
+      <span class="player__select">
+        <select data-player-quality>
+          {qualities.map(({ value, label }) => <option value={value}>{label}</option>)}
+        </select>
+        <ChevronDownIcon class="player__select-icon" />
+      </span>
     </label>
-  </div>
-  <button type="button" class="player__button player__close" data-player-close aria-label="Close player" title="Close player">
-    <CloseIcon />
-  </button>
-  <div class="player__progress">
-    <span class="player__time" data-player-elapsed aria-hidden="true">0:00</span>
-    <input
-      type="range"
-      class="player__seek"
-      data-player-seek
-      min="0"
-      max="0"
-      step="1"
-      value="0"
-      aria-label="Position"
-      aria-valuetext="0:00"
-    />
-    <span class="player__time" data-player-duration aria-hidden="true">—</span>
-  </div>
-  <div class="player__error" data-player-error hidden>
-    <p data-player-error-text></p>
-    <button type="button" class="player__retry" data-player-retry>Retry</button>
+    <button type="button" class="player__button player__close" data-player-close title="Close player">
+      <CloseIcon />
+      <span class="player__close-label">Close player</span>
+    </button>
   </div>
   <p class="player__notice" data-player-notice hidden></p>
   <div class="player__sr" aria-live="polite" data-player-announcer></div>
@@ -133,40 +170,55 @@ const qualities = [
 </script>
 
 <style>
+  /*
+   * Layouts: `.player` is a grid whose areas move per layout.
+   * - Bar (≥ 48rem): docked to the bottom edge, info | controls over the seek bar | options.
+   * - Mini (< 48rem): one row, info | play + next, a thin progress line along the top edge.
+   * - Expanded (< 48rem, [data-expanded]): the same element as a full-screen "now playing" view.
+   * The 48rem breakpoint is shared with scripts/player/sheet.ts (COMPACT_QUERY).
+   */
   .player[hidden] {
     display: none;
   }
 
   .player {
-    /* Minimum hit area of the smaller controls: 24px (WCAG 2.5.8), 44px on touch screens. */
+    /* Hit areas: 36px buttons with a pointer (WCAG 2.5.8 needs 24), 44px on touch screens. */
     --player-target: 2.25rem;
-    --player-toggle: 2.75rem;
+    --player-toggle: 2.5rem;
+    /* Unfilled slider tracks: ≥ 3:1 on the bar and on the expanded view's backdrop. */
+    --player-track: var(--color-border-control);
     position: fixed;
-    z-index: 10;
-    left: 50%;
-    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    z-index: var(--z-player);
+    right: 0;
+    bottom: 0;
+    left: 0;
     box-sizing: border-box;
     display: grid;
     grid-template-areas:
-      'info controls close'
-      'progress progress progress'
-      'error error error';
-    grid-template-columns: minmax(0, 1fr) auto auto;
+      'error error error'
+      'info controls options'
+      'info progress options';
+    grid-template-columns: minmax(0, 1fr) minmax(18rem, 1.4fr) minmax(0, 1fr);
     align-items: center;
-    gap: 0.35rem 1rem;
-    width: min(64rem, calc(100vw - 2rem));
-    padding: 0.75rem 0.75rem 0.6rem 1rem;
-    transform: translateX(-50%);
-    border: 1px solid var(--player-accent);
-    border-radius: 1rem;
-    box-shadow: 0 1rem 3rem rgb(0 0 0 / 45%);
+    column-gap: var(--space-5);
+    /* The content lines up with the page column on wide screens; the safe-area insets stay clear. */
+    --player-inline: max(var(--page-gutter), (100% - var(--page-max-width)) / 2);
+    padding: var(--space-2) max(var(--player-inline), env(safe-area-inset-right))
+      calc(var(--space-2) + env(safe-area-inset-bottom)) max(var(--player-inline), env(safe-area-inset-left));
+    border-top: 1px solid var(--color-border);
+    box-shadow: 0 -0.75rem 2rem rgb(0 0 0 / 35%);
     color: var(--player-text);
-    background: var(--player-surface);
+    /* Neutral (≤ the era themes' surfaces, so every --player-* text color keeps its contrast); the era is the
+       accent. */
+    background: var(--color-surface);
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-snug);
   }
 
   @media (pointer: coarse) {
     .player {
-      --player-target: 2.75rem;
+      --player-target: var(--tap-size);
+      --player-toggle: var(--tap-size);
     }
   }
 
@@ -175,116 +227,177 @@ const qualities = [
     outline-offset: 2px;
   }
 
-  /* Track info */
-  .player__info {
-    grid-area: info;
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .player__cover {
-    flex: 0 0 auto;
-    width: 3rem;
-    border-radius: 0.6rem;
-  }
-
-  .player__meta {
-    min-width: 0;
-  }
-
-  .player__state,
-  .player__title {
+  .player p {
     margin: 0;
+  }
+
+  .player__sr,
+  .player__state,
+  .player__close-label,
+  .player__quality-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    /* One line each, so a state change never resizes the bar. */
+    clip-path: inset(50%);
+    border: 0;
     white-space: nowrap;
   }
 
-  .player__state {
-    color: var(--player-muted-text);
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+  /* ---- Track info ---- */
+
+  .player__info {
+    grid-area: info;
+    position: relative;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .player__art {
+    display: block;
+    flex: none;
+    width: 3.5rem;
+  }
+
+  .player__cover {
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .player__meta {
+    display: grid;
+    min-width: 0;
+    gap: 0.125rem;
+  }
+
+  .player__title,
+  .player__era,
+  .player__era-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* One line each, so a long title never resizes the bar (the tooltip shows the whole title). */
+    white-space: nowrap;
   }
 
   .player__title {
+    font-size: var(--font-size-sm);
     font-weight: 600;
   }
 
   .player__era {
-    display: inline-block;
+    justify-self: start;
     max-width: 100%;
-    overflow: hidden;
-    vertical-align: top;
+    /* A 24 px tall target (WCAG 2.5.8) without growing the row. */
+    padding-block: var(--space-1);
+    margin-block: calc(-1 * var(--space-1));
     color: var(--player-accent-text);
-    font-size: 0.8rem;
-    line-height: 1.5rem;
+    font-size: var(--font-size-xs);
     text-decoration: none;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    text-underline-offset: 0.2em;
   }
 
-  .player__era[hidden] {
-    display: none;
-  }
-
-  .player__era:hover,
   .player__era:focus-visible {
     text-decoration: underline;
   }
 
-  /* Controls */
-  .player__controls {
-    grid-area: controls;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
+  @media (hover: hover) {
+    .player__era:hover {
+      text-decoration: underline;
+    }
   }
+
+  /* Parts of the other layouts. */
+  .player__era[hidden],
+  .player__era-text,
+  .player .player__expand,
+  .player .player__collapse,
+  .player__line {
+    display: none;
+  }
+
+  .player__era-text {
+    color: var(--player-muted-text);
+    font-size: var(--font-size-xs);
+  }
+
+  /* ---- Buttons ---- */
 
   .player__button {
     display: inline-grid;
-    flex: 0 0 auto;
+    flex: none;
     box-sizing: border-box;
     width: var(--player-target);
     height: var(--player-target);
     padding: 0;
     place-items: center;
     border: 0;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     color: var(--player-text);
     background: transparent;
     cursor: pointer;
-    font-size: 1.2rem;
-    transition: background-color 150ms ease;
+    font: inherit;
+    font-size: 1.125rem;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      transform var(--duration-fast) var(--ease-standard),
+      opacity var(--duration-fast) var(--ease-standard);
+    -webkit-tap-highlight-color: transparent;
   }
 
-  .player__button:hover {
-    background: color-mix(in srgb, var(--player-text) 14%, transparent);
+  @media (hover: hover) {
+    .player__button:hover {
+      background: color-mix(in srgb, var(--player-text) 12%, transparent);
+    }
+  }
+
+  .player__button:active {
+    background: color-mix(in srgb, var(--player-text) 18%, transparent);
+    transform: scale(0.94);
   }
 
   .player__button[aria-disabled='true'] {
     cursor: default;
-    opacity: 0.4;
+    opacity: 0.38;
   }
 
-  .player__button[aria-disabled='true']:hover {
+  .player__button[aria-disabled='true']:is(:hover, :active) {
     background: transparent;
+    transform: none;
+  }
+
+  /* ---- Transport ---- */
+
+  .player__controls {
+    grid-area: controls;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
   }
 
   .player__toggle {
+    position: relative;
     width: var(--player-toggle);
     height: var(--player-toggle);
     color: var(--player-on-accent);
     background: var(--player-accent);
-    font-size: 1.35rem;
+    font-size: 1.25rem;
   }
 
-  .player__toggle:hover {
-    background: color-mix(in srgb, var(--player-accent) 82%, var(--player-text));
+  @media (hover: hover) {
+    .player__toggle:hover {
+      background: var(--player-accent);
+      transform: scale(1.06);
+    }
+  }
+
+  .player__toggle:active {
+    background: var(--player-accent);
+    transform: scale(0.94);
   }
 
   .player__toggle .player__play-icon {
@@ -304,23 +417,179 @@ const qualities = [
     display: block;
   }
 
-  .player__volume {
-    display: flex;
-    align-items: center;
-    gap: 0.15rem;
+  /* Loading and buffering: a ring turns around the play button (the controls stay usable). */
+  .player__toggle::after {
+    content: '';
+    position: absolute;
+    inset: -0.25rem;
+    border: 2px solid transparent;
+    border-top-color: var(--player-accent);
+    border-right-color: var(--player-accent);
+    border-radius: 50%;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-base) var(--ease-standard);
   }
 
-  .player__volume-slider,
-  .player__seek {
+  .player__controls[aria-busy='true'] .player__toggle::after {
+    opacity: 1;
+    animation: player-spin 0.8s linear infinite;
+  }
+
+  @keyframes player-spin {
+    to {
+      rotate: 1turn;
+    }
+  }
+
+  /* ---- Sliders (position and volume) ---- */
+
+  .player__range {
+    --player-fill: 0%;
     min-width: 0;
     height: 1.5rem;
     margin: 0;
-    accent-color: var(--player-accent);
+    padding: 0;
+    appearance: none;
+    border-radius: var(--radius-pill);
+    background: transparent;
     cursor: pointer;
+    touch-action: pan-y;
+  }
+
+  .player__range::-webkit-slider-runnable-track {
+    height: 0.25rem;
+    border-radius: var(--radius-pill);
+    background: linear-gradient(
+      to right,
+      var(--player-accent) var(--player-fill),
+      var(--player-track) var(--player-fill)
+    );
+  }
+
+  .player__range::-moz-range-track {
+    height: 0.25rem;
+    border-radius: var(--radius-pill);
+    background: var(--player-track);
+  }
+
+  .player__range::-moz-range-progress {
+    height: 0.25rem;
+    border-radius: var(--radius-pill);
+    background: var(--player-accent);
+  }
+
+  .player__range::-webkit-slider-thumb {
+    width: 0.875rem;
+    height: 0.875rem;
+    margin-top: -0.3125rem;
+    appearance: none;
+    border: 0;
+    border-radius: 50%;
+    background: var(--player-text);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 50%);
+    transition: transform var(--duration-fast) var(--ease-standard);
+  }
+
+  .player__range::-moz-range-thumb {
+    width: 0.875rem;
+    height: 0.875rem;
+    border: 0;
+    border-radius: 50%;
+    background: var(--player-text);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 50%);
+    transition: transform var(--duration-fast) var(--ease-standard);
+  }
+
+  @media (hover: hover) {
+    .player__range:hover::-webkit-slider-thumb {
+      transform: scale(1.25);
+    }
+
+    .player__range:hover::-moz-range-thumb {
+      transform: scale(1.25);
+    }
+  }
+
+  .player__range:active::-webkit-slider-thumb {
+    transform: scale(1.25);
+  }
+
+  .player__range:active::-moz-range-thumb {
+    transform: scale(1.25);
+  }
+
+  .player__range:disabled {
+    cursor: default;
+  }
+
+  /* Forced colors drop the tracks' backgrounds: paint them with system colors instead. */
+  @media (forced-colors: active) {
+    .player__range {
+      --player-accent: Highlight;
+      --player-track: GrayText;
+      --player-text: CanvasText;
+      forced-color-adjust: none;
+    }
+  }
+
+  /* ---- Position ---- */
+
+  .player__progress {
+    grid-area: progress;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--player-muted-text);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .player__time {
+    flex: none;
+    min-width: 2.5rem;
+  }
+
+  .player__time--elapsed {
+    text-align: end;
+  }
+
+  .player__seek {
+    flex: 1;
+  }
+
+  @media (pointer: coarse) {
+    .player__range {
+      height: var(--tap-size);
+    }
+
+    /* The taller touch target overlaps the padding instead of growing the bar. */
+    .player__seek {
+      margin-block: -0.625rem;
+    }
+  }
+
+  /* ---- Options: volume, quality, close ---- */
+
+  .player__options {
+    grid-area: options;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .player__volume {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-1);
   }
 
   .player__volume-slider {
-    width: 5.5rem;
+    width: 6rem;
   }
 
   .player__volume-slider[hidden] {
@@ -329,80 +598,76 @@ const qualities = [
 
   .player__quality {
     display: flex;
+    flex: none;
     align-items: center;
-    gap: 0.45rem;
-    margin-inline-start: 0.35rem;
+    gap: var(--space-2);
     color: var(--player-muted-text);
-    font-size: 0.68rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-size: var(--font-size-xs);
   }
 
   .player__quality[hidden] {
     display: none;
   }
 
-  .player__quality select {
+  .player__select {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    color: var(--player-text);
+  }
+
+  .player__select select {
     box-sizing: border-box;
     min-height: var(--player-target);
-    padding: 0 0.45rem;
-    border: 1px solid var(--player-muted-text);
-    border-radius: 0.6rem;
-    color: var(--player-text);
-    background: var(--player-background);
+    padding: 0 1.75rem 0 var(--space-3);
+    appearance: none;
+    border: 1px solid var(--color-border-control);
+    border-radius: var(--radius-md);
+    color: inherit;
+    background: transparent;
     cursor: pointer;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--font-size-xs);
     font-weight: 600;
-    letter-spacing: 0;
-    text-transform: none;
+    transition: background-color var(--duration-fast) var(--ease-standard);
+  }
+
+  .player__select option {
+    color: var(--color-text);
+    background: var(--color-surface);
+  }
+
+  @media (hover: hover) {
+    .player__select select:hover {
+      background: color-mix(in srgb, var(--player-text) 10%, transparent);
+    }
+  }
+
+  .player__select-icon {
+    position: absolute;
+    right: var(--space-2);
+    color: var(--player-muted-text);
+    font-size: 0.875rem;
+    pointer-events: none;
   }
 
   .player__close {
-    grid-area: close;
-    font-size: 1.1rem;
+    font-size: 1.125rem;
   }
 
-  /* Position */
-  .player__progress {
-    grid-area: progress;
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    color: var(--player-muted-text);
-    font-size: 0.75rem;
-    font-variant-numeric: tabular-nums;
-  }
+  /* ---- Messages ---- */
 
-  .player__seek {
-    flex: 1;
-  }
-
-  @media (pointer: coarse) {
-    .player__seek,
-    .player__volume-slider {
-      height: 2.75rem;
-    }
-
-    /* The taller touch target overlaps the row gaps instead of growing the bar. */
-    .player__seek {
-      margin-block: -0.5rem;
-    }
-  }
-
-  /* Messages */
+  /* Above the controls, so they don't move when it appears (the bar grows upwards). */
   .player__error {
     grid-area: error;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    margin-top: 0.25rem;
-    padding: 0.4rem 0.4rem 0.4rem 0.75rem;
-    border-left: 3px solid #ff8a80;
-    border-radius: 0.5rem;
-    background: var(--player-background);
-    font-size: 0.85rem;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+    padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--color-danger-text) 14%, var(--color-surface));
+    font-size: var(--font-size-sm);
   }
 
   .player__error[hidden] {
@@ -411,110 +676,478 @@ const qualities = [
 
   .player__error p {
     flex: 1;
-    margin: 0;
+    min-width: 0;
+  }
+
+  .player__error p::before {
+    content: '';
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    margin-inline-end: var(--space-2);
+    border-radius: 50%;
+    background: var(--color-danger-text);
+    vertical-align: 0.0625rem;
   }
 
   .player__retry {
-    flex: 0 0 auto;
+    flex: none;
     box-sizing: border-box;
     min-height: var(--player-target);
-    padding: 0 1rem;
+    padding: 0 var(--space-4);
     border: 1px solid var(--player-text);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     color: var(--player-text);
     background: transparent;
     cursor: pointer;
     font: inherit;
-    font-weight: 700;
+    font-weight: 600;
   }
 
-  .player__retry:hover {
-    background: color-mix(in srgb, var(--player-text) 14%, transparent);
+  @media (hover: hover) {
+    .player__retry:hover {
+      background: color-mix(in srgb, var(--player-text) 12%, transparent);
+    }
   }
 
   /* Brief notices float above the bar, so they never resize it. */
   .player__notice {
     position: absolute;
-    bottom: calc(100% + 0.5rem);
+    bottom: calc(100% + var(--space-2));
     left: 50%;
     box-sizing: border-box;
     width: max-content;
-    max-width: min(36rem, calc(100vw - 2rem));
-    margin: 0;
-    padding: 0.5rem 0.9rem;
-    transform: translateX(-50%);
-    border: 1px solid var(--player-accent);
-    border-radius: 0.75rem;
-    box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 40%);
+    max-width: min(36rem, calc(100vw - 2 * var(--page-gutter)));
+    padding: var(--space-2) var(--space-4);
+    translate: -50% 0;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
     color: var(--player-text);
-    background: var(--player-surface);
-    font-size: 0.85rem;
+    background: var(--color-surface);
+    font-size: var(--font-size-sm);
     pointer-events: none;
+    text-wrap: pretty;
+    animation: player-fade-in var(--duration-base) var(--ease-standard);
   }
 
   .player__notice[hidden] {
     display: none;
   }
 
-  .player__sr {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    border: 0;
-    white-space: nowrap;
+  @keyframes player-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(0.375rem);
+    }
   }
 
-  /* Phones, tablets and narrow windows: title row on top, controls below, full width at the bottom edge. */
-  @media (max-width: 59.99rem) {
+  /* Bar between 48rem and 64rem: more room for the title, none for the volume slider (the mute button stays;
+     tablets have volume buttons). */
+  @media (max-width: 63.99rem) {
     .player {
-      bottom: 0;
-      left: 0;
-      grid-template-areas:
-        'info close'
-        'controls controls'
-        'progress progress'
-        'error error';
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.4rem 0.5rem;
-      width: 100%;
-      padding: 0.6rem max(0.75rem, env(safe-area-inset-right)) calc(0.5rem + env(safe-area-inset-bottom))
-        max(0.75rem, env(safe-area-inset-left));
-      transform: none;
-      border-width: 1px 0 0;
-      border-radius: 1rem 1rem 0 0;
+      grid-template-columns: minmax(0, 1fr) minmax(16rem, 1.2fr) minmax(0, 1fr);
+      column-gap: var(--space-4);
     }
 
-    .player__close {
-      align-self: start;
-    }
-
-    .player__volume {
-      margin-inline-start: auto;
-    }
-  }
-
-  /* Phones: volume via the hardware buttons (the mute button stays), compact quality menu. */
-  @media (max-width: 29.99rem) {
     .player__volume-slider {
       display: none;
     }
+  }
 
-    .player__quality {
-      margin-inline-start: 0;
+  /* ---- Mini player (< 48rem) ---- */
+
+  @media (max-width: 47.99rem) {
+    .player {
+      grid-template-areas:
+        'error error'
+        'info controls';
+      grid-template-columns: minmax(0, 1fr) auto;
+      column-gap: var(--space-2);
+      padding: var(--space-2) max(var(--space-2), env(safe-area-inset-right))
+        calc(var(--space-2) + env(safe-area-inset-bottom)) max(var(--space-2), env(safe-area-inset-left));
     }
 
-    .player__quality-label {
+    .player__art {
+      width: 3rem;
+    }
+
+    .player__cover {
+      border-radius: var(--radius-xs);
+    }
+
+    .player__era {
+      display: none;
+    }
+
+    .player__era-text:not([hidden]) {
+      display: block;
+    }
+
+    /* The whole info area (cover, title, era) is the expand button. */
+    .player .player__expand {
       position: absolute;
-      width: 1px;
-      height: 1px;
-      margin: -1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
+      inset: calc(-1 * var(--space-2)) 0 calc(-1 * var(--space-2)) calc(-1 * var(--space-2));
+      display: block;
+      padding: 0;
+      border: 0;
+      border-radius: var(--radius-md);
+      background: transparent;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
     }
+
+    .player__expand:active {
+      background: color-mix(in srgb, var(--player-text) 8%, transparent);
+    }
+
+    @media (hover: hover) {
+      .player__expand:hover {
+        background: color-mix(in srgb, var(--player-text) 6%, transparent);
+      }
+    }
+
+    .player .player__expand:focus-visible {
+      outline-offset: -2px;
+    }
+
+    .player__controls {
+      gap: var(--space-1);
+    }
+
+    .player__previous,
+    .player__progress,
+    .player__options {
+      display: none;
+    }
+
+    .player__toggle,
+    .player__skip {
+      width: var(--tap-size);
+      height: var(--tap-size);
+    }
+
+    .player__line {
+      position: absolute;
+      top: -1px;
+      right: 0;
+      left: 0;
+      display: block;
+      height: 2px;
+      overflow: hidden;
+      background: color-mix(in srgb, var(--player-text) 14%, transparent);
+    }
+
+    .player__line-fill {
+      display: block;
+      height: 100%;
+      transform: scaleX(0);
+      transform-origin: left;
+      background: var(--player-accent);
+    }
+  }
+
+  /* ---- Expanded "now playing" view (< 48rem) ---- */
+
+  @media (max-width: 47.99rem) {
+    .player[data-expanded='true'] {
+      --player-target: var(--tap-size);
+      top: 0;
+      z-index: calc(var(--z-skip-link) - 1);
+      grid-template-areas:
+        'collapse state .'
+        'art art art'
+        'title title title'
+        'era era era'
+        'error error error'
+        'progress progress progress'
+        'controls controls controls'
+        'options options options';
+      grid-template-columns: var(--tap-size) minmax(0, 1fr) var(--tap-size);
+      grid-template-rows: auto minmax(8rem, 1fr);
+      /* Text rows are sized to their content: `auto` rows may shrink to 0 for clipped items (the clamped title) when
+         the screen is short; the view scrolls instead. */
+      grid-auto-rows: min-content;
+      align-content: start;
+      column-gap: var(--space-2);
+      /* Content at most 30rem wide, centred. */
+      --player-inline: max(var(--space-5), (100% - 30rem) / 2);
+      padding: max(var(--space-2), env(safe-area-inset-top)) max(var(--player-inline), env(safe-area-inset-right))
+        max(var(--space-5), env(safe-area-inset-bottom)) max(var(--player-inline), env(safe-area-inset-left));
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      border: 0;
+      box-shadow: none;
+      /* The era's dark background fading into the page's darkest neutral: every --player-* color keeps its
+         contrast on both. */
+      background: linear-gradient(to bottom, var(--player-background), var(--color-bg-sunken) 75%);
+      animation: player-sheet-in var(--duration-slow) var(--ease-standard);
+    }
+
+    .player[data-expanded='true'] :is(.player__info, .player__meta) {
+      display: contents;
+    }
+
+    .player[data-expanded='true'] .player__expand,
+    .player[data-expanded='true'] .player__era-text,
+    .player[data-expanded='true'] .player__line {
+      display: none;
+    }
+
+    .player[data-expanded='true'] .player__collapse {
+      grid-area: collapse;
+      display: inline-grid;
+      font-size: 1.5rem;
+    }
+
+    .player[data-expanded='true'] .player__state {
+      grid-area: state;
+      position: static;
+      width: auto;
+      height: auto;
+      margin: 0;
+      overflow: hidden;
+      min-height: min-content;
+      clip-path: none;
+      color: var(--player-muted-text);
+      font-size: var(--font-size-sm);
+      font-weight: 600;
+      text-align: center;
+      text-overflow: ellipsis;
+    }
+
+    /* The cover takes the height left over (square, as large as fits). Stretched rather than `height: 100%`, so its
+       margins stay inside the row instead of pushing it into the title on short screens. */
+    .player[data-expanded='true'] .player__art {
+      grid-area: art;
+      display: grid;
+      align-self: stretch;
+      width: auto;
+      height: auto;
+      min-height: 0;
+      margin-block: var(--space-4) var(--space-5);
+      place-items: center;
+      container-type: size;
+    }
+
+    .player[data-expanded='true'] .player__cover {
+      width: min(100cqw, 100cqh);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+    }
+
+    .player[data-expanded='true'] .player__title {
+      grid-area: title;
+      /* Painted above the cover's shadow, which would otherwise dim the first line. */
+      position: relative;
+      display: -webkit-box;
+      overflow: hidden;
+      font-size: var(--font-size-xl);
+      font-weight: 700;
+      line-height: var(--line-height-tight);
+      text-wrap: balance;
+      white-space: normal;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+      line-clamp: 3;
+    }
+
+    .player[data-expanded='true'] .player__era {
+      grid-area: era;
+      position: relative;
+      display: inline-flex;
+      margin-block: 0;
+      align-items: center;
+      min-height: var(--tap-size);
+      font-size: var(--font-size-md);
+    }
+
+    .player[data-expanded='true'] .player__era[hidden] {
+      display: none;
+    }
+
+    .player[data-expanded='true'] .player__error {
+      margin: var(--space-3) 0 0;
+    }
+
+    .player[data-expanded='true'] .player__progress {
+      display: grid;
+      grid-template-areas:
+        'seek seek'
+        'elapsed duration';
+      margin-top: var(--space-3);
+      gap: 0;
+    }
+
+    .player[data-expanded='true'] .player__seek {
+      grid-area: seek;
+      margin: 0;
+    }
+
+    .player[data-expanded='true'] .player__time--elapsed {
+      grid-area: elapsed;
+      text-align: start;
+    }
+
+    .player[data-expanded='true'] .player__time--duration {
+      grid-area: duration;
+      text-align: end;
+    }
+
+    .player[data-expanded='true'] .player__controls {
+      justify-content: space-evenly;
+      margin-block: var(--space-2) var(--space-4);
+    }
+
+    .player[data-expanded='true'] .player__previous {
+      display: inline-grid;
+    }
+
+    .player[data-expanded='true'] .player__skip {
+      width: 3.5rem;
+      height: 3.5rem;
+      font-size: 1.75rem;
+    }
+
+    .player[data-expanded='true'] .player__toggle {
+      width: 4.5rem;
+      height: 4.5rem;
+      font-size: 2rem;
+    }
+
+    .player[data-expanded='true'] .player__options {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: var(--space-3) var(--space-2);
+    }
+
+    .player[data-expanded='true'] .player__volume[data-slider='true'] {
+      flex: 1 1 100%;
+    }
+
+    .player[data-expanded='true'] .player__volume-slider:not([hidden]) {
+      display: block;
+      flex: 1;
+      width: auto;
+    }
+
+    /* Icons and the close label line up with the content edges (their hit areas reach into the padding). */
+    .player[data-expanded='true'] .player__collapse {
+      margin-inline-start: calc((1.5rem - var(--tap-size)) / 2);
+    }
+
+    .player[data-expanded='true'] [data-player-mute] {
+      margin-inline-start: calc((1.125rem - var(--tap-size)) / 2);
+    }
+
+    /* The label once there is room for it next to the select and the close button. */
+    @media (min-width: 23rem) {
+      .player[data-expanded='true'] .player__quality-label {
+        position: static;
+        width: auto;
+        height: auto;
+        margin: 0;
+        overflow: visible;
+        clip-path: none;
+      }
+    }
+
+    .player[data-expanded='true'] .player__close {
+      display: inline-flex;
+      width: auto;
+      gap: var(--space-2);
+      margin-inline: auto calc(-1 * var(--space-3));
+      padding: 0 var(--space-3);
+      font-size: var(--font-size-sm);
+      font-weight: 600;
+    }
+
+    .player[data-expanded='true'] .player__close svg {
+      font-size: 1.125rem;
+    }
+
+    .player[data-expanded='true'] .player__close-label {
+      position: static;
+      width: auto;
+      height: auto;
+      margin: 0;
+      overflow: visible;
+      clip-path: none;
+    }
+
+    /* Notices appear under the header instead of above the (now full-screen) element. */
+    .player[data-expanded='true'] .player__notice {
+      position: fixed;
+      top: calc(max(var(--space-2), env(safe-area-inset-top)) + var(--tap-size) + var(--space-2));
+      bottom: auto;
+    }
+
+    /* Landscape phones: cover on the left, everything else on the right. */
+    @media (orientation: landscape) {
+      .player[data-expanded='true'] {
+        grid-template-areas:
+          'collapse state state'
+          'art title title'
+          'art era era'
+          'art error error'
+          'art progress progress'
+          'art controls controls'
+          'art options options';
+        grid-template-columns: minmax(0, 0.8fr) var(--tap-size) minmax(0, 1fr);
+        grid-template-rows: auto;
+        grid-auto-rows: min-content;
+        align-content: safe center;
+        column-gap: var(--space-5);
+        --player-inline: max(var(--space-5), (100% - 44rem) / 2);
+      }
+
+      .player[data-expanded='true'] .player__art {
+        height: auto;
+        margin: 0;
+        align-self: stretch;
+      }
+
+      .player[data-expanded='true'] .player__collapse {
+        justify-self: start;
+      }
+
+      .player[data-expanded='true'] .player__title {
+        font-size: var(--font-size-lg);
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      .player[data-expanded='true'] .player__controls {
+        margin-block: 0;
+      }
+
+      .player[data-expanded='true'] .player__toggle {
+        width: 3.5rem;
+        height: 3.5rem;
+        font-size: 1.5rem;
+      }
+
+      /* One row of options: the hardware buttons set the volume. */
+      .player[data-expanded='true'] .player__volume-slider:not([hidden]) {
+        display: none;
+      }
+
+      .player[data-expanded='true'] .player__volume[data-slider='true'] {
+        flex: none;
+      }
+    }
+  }
+
+  @keyframes player-sheet-in {
+    from {
+      opacity: 0;
+      transform: translateY(2rem);
+    }
+  }
+
+  /* While the expanded view covers the page, the page underneath doesn't scroll. */
+  :global(html[data-player-expanded]) {
+    overflow: hidden;
   }
 </style>

@@ -103,6 +103,21 @@ const labelTile = !showImage && alt.trim().length > 0;
     color: var(--cover-fg);
     background: linear-gradient(135deg, var(--cover-bg), var(--cover-bg-end));
   }
+  /* A hairline edge over the art: dark covers would otherwise melt into dark surfaces. */
+  .cover-image::after {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--color-border);
+    pointer-events: none;
+  }
+  /* While a cover loads, the tile is just the era's gradient: initials that the art then covers would only flash.
+     A broken image still shows them (its ::after, below). */
+  .cover-image:has(> :global(img)) > :global([data-cover-initials]) {
+    visibility: hidden;
+  }
   .cover-image :global([data-cover-initials]),
   .cover-image :global(img)::after {
     position: absolute;

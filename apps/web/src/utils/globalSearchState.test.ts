@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+  activeFilterCount,
   apiSearchParams,
   defaultSearchState,
   hasActiveFilters,
@@ -64,6 +65,15 @@ describe('searchMode', () => {
     assert.equal(searchMode({ ...idle, q: '???', to: 3 }, eraIds.length), 'search');
     assert.equal(hasActiveFilters({ ...idle, to: 3 }, eraIds.length), true);
     assert.equal(hasActiveFilters(idle, eraIds.length), false);
+  });
+
+  test('counts the active filters', () => {
+    assert.equal(activeFilterCount(idle, eraIds.length), 0);
+    assert.equal(activeFilterCount({ ...idle, q: 'glory' }, eraIds.length), 0, 'the query is not a filter');
+    assert.equal(activeFilterCount({ ...idle, from: 1 }, eraIds.length), 1);
+    assert.equal(activeFilterCount({ ...idle, from: 1, to: 3 }, eraIds.length), 1, 'the range counts once');
+    assert.equal(activeFilterCount({ ...idle, playable: true }, eraIds.length), 1);
+    assert.equal(activeFilterCount({ ...idle, to: 0, playable: true }, eraIds.length), 2);
   });
 });
 

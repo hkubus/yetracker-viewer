@@ -5,6 +5,7 @@ import Player from '../components/Player.astro';
 import SiteFooter from '../components/SiteFooter.astro';
 import { publicApiBaseUrl, publicApiOrigin, siteUrl } from '../config';
 import { API_URL_META_NAME } from '../utils/api-base-url';
+import '../styles/tokens.css';
 
 interface Props {
   /** Full document title. */
@@ -21,9 +22,15 @@ interface Props {
   ogImageAlt?: string;
   /** Adds `<meta name="robots" content="noindex">` (error pages). */
   noindex?: boolean;
+  /**
+   * Color of the browser chrome (`theme-color`: Android's address bar, Safari's tab bar, the installed app's title
+   * bar), e.g. an era's background. Default: the site background. Should stay dark, the site is dark only.
+   */
+  themeColor?: string;
 }
 
 const SITE_NAME = 'Ye Tracker';
+const DEFAULT_THEME_COLOR = '#181818';
 const {
   title = SITE_NAME,
   description = 'Browse Ye Tracker eras — unreleased Kanye West music organized by era.',
@@ -31,6 +38,7 @@ const {
   ogImage = null,
   ogImageAlt,
   noindex = false,
+  themeColor = DEFAULT_THEME_COLOR,
 } = Astro.props;
 
 const canonicalUrl = siteUrl && !noindex ? new URL(canonicalPath, `${siteUrl}/`).href : null;
@@ -47,8 +55,17 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
     <meta name="description" content={description} />
     {canonicalUrl && <link rel="canonical" href={canonicalUrl} />}
     {noindex && <meta name="robots" content="noindex" />}
-    <meta name="theme-color" content="#181818" />
+    <meta name="theme-color" content={themeColor} />
     <meta name="color-scheme" content="dark" />
+    {/* iOS would turn digit runs in notes and dates ("5/22/2018", ids) into phone links. */}
+    <meta name="format-detection" content="telephone=no" />
+    {/* Installable: public/manifest.webmanifest (standalone: every page has its own way back). The apple-* tags are
+        for iOS versions that predate manifest support. */}
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content={SITE_NAME} />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta property="og:site_name" content={SITE_NAME} />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
@@ -67,8 +84,9 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     {preconnectOrigin && <link rel="preconnect" href={preconnectOrigin} />}
-    {/* Preloaded: found only through the CSS, the faces would miss the first render (`display: optional`). */}
-    <Font cssVariable="--font-body" preload />
+    {/* Preloaded: found only through the CSS, the faces would miss the first render (`display: optional`). Only the
+        latin files: latin-ext characters are rare, and those three files only competed with the page for bandwidth. */}
+    <Font cssVariable="--font-body" preload={[{ subset: 'latin' }]} />
     <ClientRouter />
   </head>
   <body>
@@ -98,22 +116,29 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
   .site-main:focus {
     outline: none;
   }
+  /* Off screen until focused; then a pill over the top left corner (it covers the page instead of pushing it down). */
   .skip-link {
     position: absolute;
-    z-index: 100;
+    z-index: var(--z-skip-link);
     top: -100%;
-    left: 0.75rem;
-    padding: 0.6rem 1rem;
-    border-radius: 0.5rem;
-    color: #181818;
-    background: #fff;
+    left: max(var(--space-3), env(safe-area-inset-left));
+    display: inline-flex;
+    box-sizing: border-box;
+    min-height: var(--tap-size);
+    align-items: center;
+    padding: var(--space-2) var(--space-5);
+    border-radius: var(--radius-pill);
+    color: var(--color-on-accent);
+    background: var(--color-accent);
+    box-shadow: var(--shadow-md);
+    font-size: var(--font-size-sm);
     font-weight: 700;
     text-decoration: none;
   }
   .skip-link:focus-visible {
-    top: max(0.75rem, env(safe-area-inset-top));
-    outline: 3px solid #fff;
-    outline-offset: 2px;
+    top: max(var(--space-3), env(safe-area-inset-top));
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
   }
 </style>
 
@@ -122,11 +147,15 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
   /* The fixed audio player publishes its height (bar + bottom gap, safe-area inset included) as --player-height on
      <html> while it is visible. */
   :root {
-    --sidebar-color: #111111;
-    --bg-color: #181818;
+    /* Older names, kept as aliases of the tokens (styles/tokens.css). */
+    --sidebar-color: var(--color-bg-sunken);
+    --bg-color: var(--color-bg);
     /* Default focus ring: white on the site's dark surfaces (≥ 3:1 on every background the site uses). */
     --focus-ring-color: #ffffff;
     color-scheme: dark;
+    /* Quiet scrollbars (inherited by every scroller; overlay scrollbars on phones and macOS ignore it). The thumb
+       keeps the 3:1 of controls. */
+    scrollbar-color: var(--color-border-control) transparent;
   }
   html {
     min-height: 100%;
@@ -134,8 +163,12 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
     /* Anchored targets (#song-…) stay clear of the edges and of the fixed player. */
     scroll-padding-top: 1rem;
     scroll-padding-bottom: calc(var(--player-height, 0px) + 1rem);
+    /* Classic scrollbars: the page doesn't jump sideways between pages that scroll and pages that don't. */
+    scrollbar-gutter: stable;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+    /* Pressed states are styled; the grey flash on tap would only cover them (focus rings are unaffected). */
+    -webkit-tap-highlight-color: transparent;
   }
   body {
     display: flex;
@@ -143,13 +176,38 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
     min-height: 100vh;
     min-height: 100dvh;
     margin: 0;
+    color: var(--color-text);
     background-color: var(--bg-color);
     font-family: var(--font-body);
+    /* Light text on dark surfaces: macOS's subpixel smoothing makes it look heavier than it is. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
-  /* Reserve room for the fixed player so it never covers the last rows or the footer (11rem until it has measured
+  /* Reserve room for the fixed player so it never covers the last rows or the footer (5rem until it has measured
      itself). */
   body:has(> .player:not([hidden])) {
-    padding-bottom: calc(var(--player-height, 11rem) + 1rem);
+    padding-bottom: calc(var(--player-height, 5rem) + 1rem);
+  }
+
+  /* Base element defaults. Zero specificity (:where), so any component rule wins. */
+  :where(h1, h2, h3, h4, h5, h6) {
+    text-wrap: balance;
+  }
+  :where(img) {
+    max-width: 100%;
+    height: auto;
+  }
+  /* No double-tap zoom on controls (a quick second tap on Next would zoom the page); pinch zoom still works. */
+  :where(a, button, input, select, textarea, label, summary, [role='button']) {
+    touch-action: manipulation;
+  }
+  /* `hidden` hides, whatever display a component gives the element. */
+  [hidden]:not([hidden='until-found']) {
+    display: none !important;
+  }
+  ::selection {
+    color: var(--color-text);
+    background: var(--selection-color, rgb(255 255 255 / 28%));
   }
 
   .sr-only {
@@ -175,6 +233,12 @@ const preconnectOrigin = publicApiOrigin && publicApiOrigin !== Astro.url.origin
       outline: 2px solid Highlight !important;
       outline-offset: 2px !important;
     }
+  }
+
+  /* Page navigations (ClientRouter): a shorter cross-fade than the browser's 250 ms; the page can't be clicked while
+     it runs. */
+  ::view-transition-group(root) {
+    animation-duration: var(--duration-base);
   }
 
   @media (prefers-reduced-motion: reduce) {

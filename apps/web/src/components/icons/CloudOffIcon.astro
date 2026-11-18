@@ -1,0 +1,22 @@
+---
+/**
+ * Cloud off: a cloud crossed out (a service that cannot be reached).
+ * Decorative (aria-hidden). Props: see SvgIcon.astro (size, class, any SVG attribute).
+ */
+import type { ComponentProps } from 'astro/types';
+import SvgIcon from './SvgIcon.astro';
+
+type Props = ComponentProps<typeof SvgIcon>;
+---
+
+<SvgIcon
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  {...Astro.props}
+>
+  <path d="M8.5 6.4A6 6 0 0 1 17.7 10H18a4 4 0 0 1 2.4 7.2M17 19H7a4.5 4.5 0 0 1-1.6-8.7" />
+  <path d="m3 3 18 18" />
+</SvgIcon>

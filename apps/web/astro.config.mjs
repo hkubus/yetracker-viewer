@@ -59,6 +59,45 @@ const LATIN_EXT = [
  */
 const fontFile = (subset, weight) => `@fontsource/be-vietnam-pro/files/be-vietnam-pro-${subset}-${weight}-normal.woff2`;
 
+/**
+ * The faces of the three weights, each split into the latin and latin-ext ranges. Every face carries its `subset`,
+ * which `<Font preload>` filters on (see `localWithSubsets`).
+ *
+ * @param {number} weight
+ */
+const fontVariants = (weight) =>
+  /** @type {const} */ ([
+    { weight, style: 'normal', unicodeRange: LATIN, src: [fontFile('latin', weight)], subset: 'latin' },
+    { weight, style: 'normal', unicodeRange: LATIN_EXT, src: [fontFile('latin-ext', weight)], subset: 'latin-ext' },
+  ]);
+
+/**
+ * `fontProviders.local()` plus each variant's `subset` as the face's `meta.subset`, the field `<Font preload>` filters
+ * on: the layout preloads the latin faces only. Latin-ext characters are rare in the catalog, and its three files
+ * (40 KB) otherwise compete with the page itself on every first visit.
+ *
+ * @returns {import('astro').FontProvider<{ variants: ReturnType<typeof fontVariants>[number][] }>}
+ */
+function localWithSubsets() {
+  const local = fontProviders.local();
+  return {
+    ...local,
+    name: 'local-subsets',
+    async resolveFont(options) {
+      const resolved = await local.resolveFont(/** @type {any} */ (options));
+      if (!resolved) return resolved;
+      const variants = options.options?.variants ?? [];
+      // The local provider returns one face per variant, in order.
+      return {
+        fonts: resolved.fonts.map((font, index) => ({
+          ...font,
+          meta: { ...font.meta, subset: variants[index]?.subset },
+        })),
+      };
+    },
+  };
+}
+
 // https://astro.build/config
 export default defineConfig({
   adapter: node({
@@ -87,23 +126,16 @@ export default defineConfig({
   // Rendered by <Font cssVariable="--font-body" /> in the layout, with a metric-adjusted local fallback derived from
   // the font files. Only the weights the styles use (400, 600, 700). `optional`: a face that isn't there for the first
   // render is not swapped in for that page, so a late font never shifts the layout (cached faces render from the start).
-  // The layout preloads the faces, so a first visit gets them in time too.
+  // The layout preloads the latin faces, so a first visit on a fast connection gets them in time too.
   fonts: [
     {
-      provider: fontProviders.local(),
+      provider: localWithSubsets(),
       name: 'Be Vietnam Pro',
       cssVariable: '--font-body',
       display: 'optional',
       fallbacks: ['system-ui', 'sans-serif'],
       options: {
-        variants: [
-          { weight: 400, style: 'normal', unicodeRange: LATIN, src: [fontFile('latin', 400)] },
-          { weight: 400, style: 'normal', unicodeRange: LATIN_EXT, src: [fontFile('latin-ext', 400)] },
-          { weight: 600, style: 'normal', unicodeRange: LATIN, src: [fontFile('latin', 600)] },
-          { weight: 600, style: 'normal', unicodeRange: LATIN_EXT, src: [fontFile('latin-ext', 600)] },
-          { weight: 700, style: 'normal', unicodeRange: LATIN, src: [fontFile('latin', 700)] },
-          { weight: 700, style: 'normal', unicodeRange: LATIN_EXT, src: [fontFile('latin-ext', 700)] },
-        ],
+        variants: [...fontVariants(400), ...fontVariants(600), ...fontVariants(700)],
       },
     },
   ],

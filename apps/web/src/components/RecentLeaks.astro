@@ -1,8 +1,10 @@
 ---
 /**
- * "Recently leaked": the newest playable songs, each with a play button for the player (see the play-button
- * attributes in `utils/songDisplay.ts`). The page fetches the songs and passes them in, so a failure can mark the
- * whole response uncacheable before rendering starts.
+ * "Recently leaked": the newest playable songs. Each card's era cover is its play button for the player (see the
+ * play-button attributes in `utils/songDisplay.ts`); the title links to the song's row on its era page. On phones
+ * the cards form a horizontal rail of two rows (so the eras stay close to the top); on wider screens, a grid.
+ * The page fetches the songs and passes them in, so a failure can mark the whole response uncacheable before
+ * rendering starts.
  */
 import { themeStyle } from '../utils/color';
 import { formatCatalogDate, isoDate } from '../utils/dates';
@@ -15,6 +17,9 @@ import {
   songHref,
   songTextLines,
 } from '../utils/songDisplay';
+import { splitCredits } from '../utils/songTitle';
+import CoverImage from './CoverImage.astro';
+import AlertIcon from './icons/AlertIcon.astro';
 import PauseIcon from './icons/PauseIcon.astro';
 import PlayIcon from './icons/PlayIcon.astro';
 
@@ -25,9 +30,11 @@ interface Props {
   /** Era data by id, for payloads that lack their era's name, color or cover fields. */
   eras?: ReadonlyMap<number, EraDisplayInfo>;
   eraPageSize?: number;
+  /** Browser-facing API base URL (covers). */
+  apiBaseUrl?: string;
 }
 
-const { songs, failed = false, eras, eraPageSize = DEFAULT_ERA_PAGE_SIZE } = Astro.props;
+const { songs, failed = false, eras, eraPageSize = DEFAULT_ERA_PAGE_SIZE, apiBaseUrl } = Astro.props;
 
 const items = songs.flatMap((song) => {
   const eraId = positiveInteger(song.eraId);
@@ -42,9 +49,11 @@ const items = songs.flatMap((song) => {
     {
       id: play['data-id'],
       title,
+      ...splitCredits(title),
       details: details.join(' · '),
       fullName: [title, ...details].join(' · '),
       href: songHref(song, eraPageSize),
+      eraId,
       eraName,
       leakDate,
       leakDateText: leakDate ? formatCatalogDate(song.leakDate, song.leakDatePrecision) : 'Leak date unknown',
@@ -57,173 +66,164 @@ const items = songs.flatMap((song) => {
 
 {
   failed || items.length > 0 ? (
-    <section class="recent" aria-labelledby="recent-heading">
-      <div class="recent__head">
-        <h2 id="recent-heading">Recently leaked</h2>
-        {items.length > 0 ? <p>Newest tracks you can play right now.</p> : null}
+    <section class="recent home-section" aria-labelledby="recent-heading">
+      <div class="home-section__head">
+        <h2 class="home-section__title" id="recent-heading">
+          Recently leaked
+        </h2>
+        {items.length > 0 ? <p class="home-section__meta">Newest tracks you can play right now</p> : null}
       </div>
       {items.length > 0 ? (
-        <ul class="recent__list" data-play-scope>
-          {items.map((item) => (
-            <li class="recent__item" data-play-row data-song-id={item.id} style={item.style}>
-              <div class="recent__text">
-                {item.href ? (
-                  <a class="recent__title" href={item.href} title={item.fullName}>
-                    {item.title}
-                  </a>
-                ) : (
-                  <span class="recent__title" title={item.fullName}>
-                    {item.title}
+        <div class="recent__scroller" data-scroll-x>
+          <ul class="recent__list" role="list" data-play-scope>
+            {items.map((item) => (
+              <li class="recent__item" data-play-row data-song-id={item.id} style={item.style}>
+                <button class="recent__play" type="button" {...item.play} aria-label={`Play ${item.title}`}>
+                  <CoverImage
+                    class="recent__cover"
+                    eraId={item.eraId ?? 0}
+                    eraName={item.eraName}
+                    hasCover={item.eraId !== null && item.play['data-has-cover'] === 'true'}
+                    coverVersion={item.play['data-cover-version']}
+                    dominantColor={item.play['data-dominant-color']}
+                    size={96}
+                    apiBaseUrl={apiBaseUrl}
+                  />
+                  <span class="recent__play-icon" aria-hidden="true">
+                    <PlayIcon class="play-icon" />
+                    <PauseIcon class="pause-icon" />
                   </span>
-                )}
-                {item.details ? (
-                  <p class="recent__details" title={item.details}>
-                    {item.details}
+                </button>
+                <div class="recent__text">
+                  {item.href ? (
+                    <a class="recent__title" href={item.href} title={item.fullName}>
+                      {item.main}
+                      {item.credits ? <span class="recent__credits"> {item.credits}</span> : null}
+                    </a>
+                  ) : (
+                    <span class="recent__title" title={item.fullName}>
+                      {item.main}
+                      {item.credits ? <span class="recent__credits"> {item.credits}</span> : null}
+                    </span>
+                  )}
+                  {item.details ? <p class="recent__details">{item.details}</p> : null}
+                  <p class="recent__meta">
+                    <span class="recent__era">{item.eraName}</span>
+                    <span aria-hidden="true">·</span>
+                    <time class="recent__date" datetime={item.leakDate}>
+                      {item.leakDateText}
+                    </time>
                   </p>
-                ) : null}
-                <p class="recent__meta">
-                  <span class="recent__era" title={item.eraName}>
-                    {item.eraName}
-                  </span>
-                  <span aria-hidden="true">·</span>
-                  <time class="recent__date" datetime={item.leakDate}>
-                    {item.leakDateText}
-                  </time>
-                </p>
-              </div>
-              <button class="recent__play" type="button" {...item.play} aria-label={`Play ${item.title}`}>
-                <PlayIcon class="play-icon" />
-                <PauseIcon class="pause-icon" />
-              </button>
-            </li>
-          ))}
-        </ul>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : (
-        <p class="recent__unavailable">Recently leaked tracks couldn’t be loaded right now.</p>
+        <p class="recent__unavailable">
+          <AlertIcon />
+          Recently leaked tracks couldn’t be loaded right now.
+        </p>
       )}
     </section>
   ) : null
 }
 
 <style>
-  .recent {
-    margin: clamp(0.75rem, 1.5vw, 1.5rem);
-    margin-bottom: 0;
+  .recent__scroller {
+    /* Phones: the rail runs edge to edge under the page gutter, and snaps to the gutter. */
+    margin-inline: calc(-1 * var(--page-gutter));
+    padding: var(--space-1) var(--page-gutter);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-padding-inline: var(--page-gutter);
+    scroll-snap-type: x mandatory;
   }
-  .recent__head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.25rem 0.75rem;
-    flex-wrap: wrap;
-    margin-bottom: 0.6rem;
-  }
-  .recent__head h2 {
-    margin: 0;
-    font-size: 1.1rem;
-    letter-spacing: -0.02em;
-  }
-  .recent__head p,
-  .recent__unavailable {
-    margin: 0;
-    color: #a3a3a3;
-    font-size: 0.8rem;
+  @media (pointer: coarse) {
+    .recent__scroller {
+      scrollbar-width: none;
+    }
+    .recent__scroller::-webkit-scrollbar {
+      display: none;
+    }
   }
   .recent__list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
-    gap: 0.5rem;
+    grid-auto-columns: min(84%, 21rem);
+    grid-auto-flow: column;
+    grid-template-rows: repeat(2, auto);
+    gap: var(--space-2);
     margin: 0;
     padding: 0;
     list-style: none;
   }
+  /* One card: hover and the playing state light up the era's color; the whole card opens the song through the
+     title link's ::after, and the cover button sits above it. */
   .recent__item {
+    position: relative;
     display: flex;
     box-sizing: border-box;
     min-width: 0;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.55rem 0.6rem 0.55rem 0.7rem;
-    border: 1px solid color-mix(in srgb, var(--leak-accent) 40%, var(--leak-surface));
-    border-left: 4px solid var(--leak-accent);
-    border-radius: 0.6rem;
-    color: var(--leak-text);
-    background: var(--leak-background);
+    gap: var(--space-3);
+    padding: var(--space-2);
+    padding-right: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    color: var(--color-text);
+    background: var(--color-surface);
+    scroll-snap-align: start;
+    transition:
+      border-color var(--duration-fast) var(--ease-standard),
+      background-color var(--duration-fast) var(--ease-standard);
   }
   .recent__item[data-playing='true'] {
     border-color: var(--leak-accent);
-    background: var(--leak-surface);
+    background: var(--leak-background);
   }
-  .recent__text {
-    min-width: 0;
+  @media (hover: hover) {
+    .recent__item:hover {
+      border-color: color-mix(in srgb, var(--leak-accent) 60%, transparent);
+      background: var(--leak-background);
+    }
   }
-  .recent__title {
-    display: -webkit-box;
-    overflow: hidden;
-    color: var(--leak-text);
-    font-size: 0.92rem;
-    font-weight: 600;
-    line-height: 1.3;
-    text-decoration: none;
-    overflow-wrap: anywhere;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-  }
-  a.recent__title:hover {
-    text-decoration: underline;
-  }
-  a.recent__title:focus-visible {
-    outline: 2px solid var(--focus-ring-color, #fff);
-    outline-offset: 2px;
-    border-radius: 2px;
-  }
-  .recent__details,
-  .recent__meta {
-    margin: 0.15rem 0 0;
-    overflow: hidden;
-    font-size: 0.76rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .recent__details {
-    color: var(--leak-muted-text);
-  }
-  .recent__meta {
-    display: flex;
-    gap: 0.35rem;
-    color: var(--leak-muted-text);
-  }
-  .recent__era {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--leak-accent-text);
-    text-overflow: ellipsis;
-  }
-  .recent__date {
-    flex: none;
-  }
+
   .recent__play {
-    display: inline-grid;
+    position: relative;
+    z-index: 1;
+    display: block;
     flex: none;
-    width: 2.25rem;
-    height: 2.25rem;
-    place-items: center;
+    width: 3rem;
+    height: 3rem;
     padding: 0;
+    overflow: hidden;
     border: 0;
-    border-radius: 999px;
-    color: var(--leak-on-accent);
-    background: var(--leak-accent);
+    border-radius: var(--radius-sm);
+    background: var(--leak-surface);
     cursor: pointer;
   }
-  .recent__play :global(svg) {
-    width: 1.05rem;
-    height: 1.05rem;
+  .recent__play :global(.recent__cover) {
+    width: 100%;
+    height: 100%;
   }
-  /* The player sets aria-pressed="true" on the current song's button while it plays. */
-  .recent__play :global(.play-icon) {
+  /* A scrim behind the icon keeps it visible on any cover art. */
+  .recent__play-icon {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #ffffff;
+    background: radial-gradient(circle, rgb(0 0 0 / 62%) 0 34%, rgb(0 0 0 / 22%) 72%);
+    transition: background-color var(--duration-fast) var(--ease-standard);
+  }
+  .recent__play-icon :global(svg) {
+    width: 1.1rem;
+    height: 1.1rem;
+  }
+  .recent__play-icon :global(.play-icon) {
     margin-left: 0.1rem;
   }
+  /* The player sets aria-pressed="true" on the current song's button while it plays. */
   .recent__play :global(.pause-icon),
   .recent__play[aria-pressed='true'] :global(.play-icon) {
     display: none;
@@ -231,17 +231,134 @@ const items = songs.flatMap((song) => {
   .recent__play[aria-pressed='true'] :global(.pause-icon) {
     display: block;
   }
-  .recent__play:hover {
-    color: var(--leak-background);
-    background: var(--leak-text);
+  .recent__play[aria-pressed='true'] .recent__play-icon {
+    color: var(--leak-on-accent);
+    background: color-mix(in srgb, var(--leak-accent) 88%, transparent);
+  }
+  @media (hover: hover) {
+    .recent__play:hover .recent__play-icon {
+      background-color: rgb(0 0 0 / 30%);
+    }
+  }
+  .recent__play:active {
+    transform: scale(0.96);
   }
   .recent__play:focus-visible {
-    outline: 2px solid var(--focus-ring-color, #fff);
+    outline: 2px solid var(--focus-ring-color);
     outline-offset: 2px;
   }
+
+  .recent__text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-width: 0;
+  }
+  .recent__title {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    line-height: var(--line-height-snug);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  .recent__credits {
+    color: var(--color-text-muted);
+    font-weight: 400;
+  }
+  a.recent__title::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  a.recent__title:focus-visible {
+    outline: none;
+  }
+  a.recent__title:focus-visible::after {
+    border-radius: var(--radius-lg);
+    outline: 2px solid var(--focus-ring-color);
+    outline-offset: 2px;
+  }
+  @media (hover: hover) {
+    a.recent__title:hover {
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 0.15em;
+    }
+  }
+  .recent__details,
+  .recent__meta {
+    margin: 0;
+    overflow: hidden;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: var(--line-height-snug);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .recent__meta {
+    display: flex;
+    gap: 0.35em;
+  }
+  .recent__era {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--leak-accent-text);
+    font-weight: 600;
+    text-overflow: ellipsis;
+  }
+  .recent__date {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .recent__unavailable {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    padding: var(--space-3) var(--space-4);
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+  }
+  .recent__unavailable :global(svg) {
+    flex: none;
+    width: 1.1rem;
+    height: 1.1rem;
+    color: var(--color-danger-text);
+  }
+
+  @media (min-width: 40rem) {
+    .recent__scroller {
+      margin-inline: 0;
+      padding: 0;
+      overflow: visible;
+    }
+    /* Two columns on tablets, three at ~1024px, four (eight cards = two even rows) on wide screens; narrower cards
+       would cut the titles and era names short. */
+    .recent__list {
+      grid-auto-flow: row;
+      grid-template-columns: repeat(auto-fill, minmax(max(17rem, (100% - 3 * var(--space-3)) / 4), 1fr));
+      grid-template-rows: none;
+      gap: var(--space-3);
+    }
+  }
   @media (forced-colors: active) {
-    .recent__play {
-      border: 1px solid ButtonText;
+    .recent__item {
+      border-color: CanvasText;
+    }
+    .recent__play-icon {
+      forced-color-adjust: none;
+      color: ButtonText;
+      background: ButtonFace;
     }
   }
 </style>

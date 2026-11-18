@@ -1,6 +1,8 @@
 ---
 import EraCard from '../components/Era.astro';
 import GlobalSongSearch from '../components/GlobalSongSearch.astro';
+import AlertIcon from '../components/icons/AlertIcon.astro';
+import SearchIcon from '../components/icons/SearchIcon.astro';
 import RecentLeaks from '../components/RecentLeaks.astro';
 import {
   ApiNotFoundError,
@@ -17,6 +19,9 @@ import { formatCatalogDate, formatRelativeTime } from '../utils/dates';
 import { loadEras, loadRecentLeaks, loadStatus, RECENT_LEAKS_LIMIT } from '../utils/shared-api';
 import type { EraDisplayInfo, SearchSongPayload } from '../utils/songDisplay';
 import { countLabel } from '../utils/songRow';
+
+/** Era covers loaded eagerly with high priority: about the first row of the grid on a wide screen. */
+const PRIORITY_COVERS = 6;
 
 type Failure = 'timeout' | 'unreachable' | 'server' | 'invalid' | 'missing';
 type Loaded<T> = { ok: true; data: T } | { ok: false; failure: Failure; status?: number; retryAfter?: number };
@@ -189,12 +194,15 @@ const description =
 
 <Layout title="Ye Tracker" description={description}>
   <div class="home" data-home>
-    <header class="site-header">
-      <div class="site-header__intro">
+    <header class="home-header">
+      <div class="home-header__brand">
+        <svg class="home-header__mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+          <path d="M7 16h8l4 7.5 4-7.5h8l-8.5 16v16h-7V32zM35 16h22v7h-7.5v25h-7V23H35z"></path>
+        </svg>
         <h1>Ye Tracker</h1>
-        <p class="site-header__tagline">Unreleased Kanye West music, organized by era.</p>
+        <p class="home-header__tagline">Unreleased Kanye West music, organized by era.</p>
       </div>
-      <p class="site-header__meta">
+      <p class="home-header__meta">
         {stats ? <span>{stats}</span> : null}
         {
           updated ? (
@@ -207,13 +215,16 @@ const description =
             </span>
           ) : null
         }
-        <span>Data from <a href="https://yetracker.net">yetracker.net</a></span>
+        <span>
+          Data from <a href="https://yetracker.net">yetracker.net</a>
+        </span>
       </p>
     </header>
 
     {
       outage ? (
         <div class="notice" role="alert">
+          <AlertIcon class="notice__icon" />
           <p>
             <strong>{outage.title}</strong> {outage.body}
           </p>
@@ -224,46 +235,47 @@ const description =
       ) : null
     }
 
-    <GlobalSongSearch eras={eras} songsCount={songsCount} apiBaseUrl={publicApiBaseUrl} eraPageSize={ERA_PAGE_SIZE} />
+    <GlobalSongSearch eras={eras} apiBaseUrl={publicApiBaseUrl} eraPageSize={ERA_PAGE_SIZE} />
 
     <RecentLeaks
       songs={recentSongs}
       failed={!recentResult.ok && erasResult.ok}
       eras={eraInfo}
       eraPageSize={ERA_PAGE_SIZE}
+      apiBaseUrl={publicApiBaseUrl}
     />
 
-    <section class="eras" aria-labelledby="eras-heading">
-      <div class="eras__head">
-        <h2 id="eras-heading">Eras</h2>
+    <section class="eras home-section" aria-labelledby="eras-heading">
+      <div class="home-section__head eras__head">
+        <h2 class="home-section__title" id="eras-heading">Eras</h2>
+        {eras.length > 3 ? <p class="home-section__meta" data-era-filter-count /> : null}
         {
           eras.length > 3 ? (
             <div class="eras__filter">
               <label class="sr-only" for="era-filter">
                 Filter eras by name
               </label>
+              <SearchIcon />
               <input
                 id="era-filter"
                 type="search"
                 placeholder="Filter eras…"
                 autocomplete="off"
                 spellcheck="false"
+                enterkeyhint="search"
                 data-era-filter
               />
-              <p class="eras__filter-count" data-era-filter-count>
-                {countLabel(eras.length, 'era')}
-              </p>
-              <p class="sr-only" role="status" data-era-filter-status />
             </div>
           ) : null
         }
       </div>
+      {eras.length > 3 ? <p class="sr-only" role="status" data-era-filter-status /> : null}
       {
         eras.length > 0 ? (
-          <ul class="era-grid" data-era-grid>
+          <ul class="era-grid" role="list" data-era-grid>
             {eras.map((era, index) => (
               <li data-era-filter-text={era.subtitle ? `${era.name} ${era.subtitle}` : era.name}>
-                <EraCard era={era} apiBaseUrl={publicApiBaseUrl} priority={index < 3} />
+                <EraCard era={era} apiBaseUrl={publicApiBaseUrl} priority={index < PRIORITY_COVERS} />
               </li>
             ))}
           </ul>
@@ -275,9 +287,17 @@ const description =
       }
       {
         eras.length > 3 ? (
-          <p class="eras__empty" data-era-filter-empty hidden>
-            No eras match that filter.
-          </p>
+          <div class="eras__no-match" data-era-filter-empty hidden>
+            <span class="eras__no-match-icon" aria-hidden="true">
+              <SearchIcon />
+            </span>
+            <p class="eras__no-match-text">
+              No eras match “<span data-era-filter-query />”.
+            </p>
+            <button type="button" class="eras__no-match-clear" data-era-filter-clear>
+              Clear the filter
+            </button>
+          </div>
         ) : null
       }
     </section>
@@ -289,150 +309,333 @@ const description =
 </script>
 
 <style>
-  .site-header {
+  .home {
+    display: flex;
+    flex-direction: column;
+    gap: clamp(var(--space-5), 3.5vw, var(--space-7));
+    padding: var(--space-4) var(--page-gutter) 0;
+  }
+  /* A search from the URL: the sections under it wait, hidden, until its results are in (GlobalSongSearch drops
+     the attribute), so they move while hidden instead of jumping under the reader's eyes (no layout shift). After
+     3 s they show anyway, in case the script never runs. */
+  @media (scripting: enabled) {
+    .home:has(> :global(.global-search[data-search-pending])) > :global(:is(.recent, .eras)) {
+      visibility: hidden;
+      animation: home-reveal-sections 0s 3s forwards;
+    }
+  }
+  @keyframes home-reveal-sections {
+    to {
+      visibility: visible;
+    }
+  }
+
+  /* Section headers shared by the search, "Recently leaked" and the eras: title and meta on one line. */
+  .home :global(.home-section__head) {
     display: flex;
     flex-wrap: wrap;
-    align-items: end;
-    justify-content: space-between;
-    gap: 0.5rem 1.5rem;
-    padding: clamp(0.75rem, 1.5vw, 1.5rem) clamp(0.75rem, 1.5vw, 1.5rem) 0;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-3);
+    margin-bottom: var(--space-3);
   }
-  .site-header h1 {
+  .home :global(.home-section__title) {
     margin: 0;
-    font-size: clamp(1.5rem, 2.4vw, 2rem);
+    color: var(--color-text);
+    font-size: var(--font-size-lg);
+    font-weight: 700;
+    line-height: var(--line-height-tight);
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  .home :global(.home-section__meta) {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .home :global(.home-section__meta:empty) {
+    display: none;
+  }
+
+  /* Site header: compact on phones (brand, one-line tagline, one wrapped meta line). */
+  .home-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-3) var(--space-6);
+  }
+  /* The mark sits next to the title and tagline; on phones only next to the title, so the tagline gets the full
+     width and stays on one line. */
+  .home-header__brand {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.125rem var(--space-3);
+    min-width: 0;
+  }
+  .home-header__mark {
+    grid-row: span 2;
+    width: 2.75rem;
+    height: 2.75rem;
+    padding: 0.3rem;
+    box-sizing: border-box;
+    border-radius: var(--radius-md);
+    fill: var(--color-on-accent);
+    background: var(--color-accent);
+  }
+  .home-header h1 {
+    margin: 0;
+    color: var(--color-text);
+    font-size: var(--font-size-2xl);
+    font-weight: 700;
+    line-height: var(--line-height-tight);
     letter-spacing: -0.03em;
   }
-  .site-header__tagline {
-    margin: 0.2rem 0 0;
-    color: #c2c2c2;
-    font-size: 0.95rem;
+  .home-header__tagline {
+    margin: 0;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-snug);
+    text-wrap: pretty;
   }
-  .site-header__meta {
+  .home-header__meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.25rem 1rem;
+    gap: var(--space-1) var(--space-4);
     margin: 0;
-    color: #a8a8a8;
-    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: var(--line-height-snug);
+    font-variant-numeric: tabular-nums;
   }
-  .site-header__meta a {
-    color: #e2e2e2;
-    text-underline-offset: 0.15em;
+  .home-header__meta a {
+    color: var(--color-text-secondary);
+    text-decoration: underline;
+    text-decoration-color: var(--color-border-control);
+    text-underline-offset: 0.2em;
   }
-  .site-header__meta a:hover {
-    color: #fff;
+  @media (hover: hover) {
+    .home-header__meta a:hover {
+      color: var(--color-text);
+      text-decoration-color: currentColor;
+    }
   }
+  @media (pointer: coarse) {
+    /* A taller hit area for the small inline link, without changing the line. */
+    .home-header__meta a {
+      display: inline-block;
+      margin-block: -0.875rem;
+      padding-block: 0.875rem;
+    }
+  }
+
   .notice {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem 1rem;
-    margin: clamp(0.75rem, 1.5vw, 1.5rem);
-    margin-bottom: 0;
-    padding: 0.85rem 1rem;
-    border: 1px solid #7c4a3a;
-    border-radius: 0.75rem;
-    color: #ffded4;
-    background: #2a1d19;
-    font-size: 0.9rem;
+    gap: var(--space-3) var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid color-mix(in srgb, var(--color-danger-text) 45%, transparent);
+    border-radius: var(--radius-lg);
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-danger-text) 8%, var(--color-bg));
+    font-size: var(--font-size-sm);
+  }
+  .notice :global(.notice__icon) {
+    flex: none;
+    width: 1.25rem;
+    height: 1.25rem;
+    color: var(--color-danger-text);
   }
   .notice p {
+    flex: 1 1 16rem;
     margin: 0;
+    text-wrap: pretty;
   }
   .notice a {
+    display: inline-flex;
     flex: none;
-    padding: 0.45rem 0.8rem;
-    border: 1px solid #ffded4;
-    border-radius: 0.5rem;
+    align-items: center;
+    min-height: 2.25rem;
+    padding: 0 var(--space-4);
+    border: 1px solid var(--color-border-control);
+    border-radius: var(--radius-pill);
     color: inherit;
-    font-weight: 700;
+    font-weight: 600;
     text-decoration: none;
   }
-  .notice a:hover {
-    background: #3a2821;
+  @media (hover: hover) {
+    .notice a:hover {
+      background: var(--color-surface-hover);
+    }
   }
-  .eras {
-    margin-top: clamp(1rem, 2vw, 1.75rem);
+  @media (pointer: coarse) {
+    .notice a {
+      min-height: var(--tap-size);
+    }
   }
+
   .eras__head {
-    display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem 1rem;
-    padding: 0 clamp(0.75rem, 1.5vw, 1.5rem);
-  }
-  .eras__head h2 {
-    margin: 0;
-    font-size: 1.1rem;
-    letter-spacing: -0.02em;
   }
   .eras__filter {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    margin-left: auto;
+  }
+  .eras__filter :global(svg) {
+    position: absolute;
+    left: var(--space-3);
+    width: 1rem;
+    height: 1rem;
+    color: var(--color-text-muted);
+    pointer-events: none;
   }
   .eras__filter input {
     box-sizing: border-box;
-    width: min(18rem, 60vw);
+    width: 16rem;
     min-height: 2.5rem;
-    padding: 0.5rem 0.7rem;
-    border: 1px solid #5c5c5c;
-    border-radius: 0.6rem;
-    color: #f3f3f3;
-    background: #1d1d1d;
+    padding: var(--space-2) var(--space-3) var(--space-2) 2.25rem;
+    border: 1px solid var(--color-border-control);
+    border-radius: var(--radius-pill);
+    color: var(--color-text);
+    background: var(--color-surface);
     font: inherit;
-    font-size: 1rem;
+    font-size: var(--font-size-md);
+    transition:
+      border-color var(--duration-fast) var(--ease-standard),
+      background-color var(--duration-fast) var(--ease-standard);
+  }
+  @media (hover: hover) {
+    .eras__filter input:hover {
+      border-color: var(--color-text-muted);
+    }
+  }
+  .eras__filter input:focus-visible {
+    border-color: var(--color-text-secondary);
+    background: var(--color-surface-raised);
   }
   .eras__filter input::placeholder {
-    color: #8f8f8f;
+    color: var(--color-text-muted);
     opacity: 1;
   }
-  .eras__filter-count {
-    min-width: 5.5rem;
-    margin: 0;
-    color: #a8a8a8;
-    font-size: 0.8rem;
-    text-align: right;
+  @media (pointer: coarse) {
+    .eras__filter input {
+      min-height: var(--tap-size);
+    }
   }
   .eras__empty {
-    margin: 1rem;
-    color: #a8a8a8;
+    margin: var(--space-4) 0;
+    color: var(--color-text-secondary);
     text-align: center;
   }
-  .eras__empty[hidden] {
-    display: none;
-  }
+
   /* auto-fill keeps empty columns, so a filtered grid keeps its card width instead of stretching the survivors. */
   .era-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
-    gap: clamp(0.75rem, 1vw, 1rem);
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: var(--space-4);
     margin: 0;
-    padding: clamp(0.75rem, 1.5vw, 1.5rem);
+    padding: 0;
     list-style: none;
   }
   .era-grid > [hidden] {
     display: none;
   }
-  @media (max-width: 40rem) {
-    .eras__filter {
-      width: 100%;
-    }
-    .eras__filter input {
-      flex: 1;
-      width: auto;
-      min-width: 0;
-    }
-    .eras__filter-count {
-      min-width: 0;
+
+  .eras__no-match {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-6) var(--space-4);
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius-lg);
+    text-align: center;
+  }
+  .eras__no-match[hidden] {
+    display: none;
+  }
+  .eras__no-match-icon {
+    display: grid;
+    width: 2.5rem;
+    height: 2.5rem;
+    place-items: center;
+    border-radius: var(--radius-pill);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-raised);
+  }
+  .eras__no-match-icon :global(svg) {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .eras__no-match-text {
+    max-width: 100%;
+    margin: 0;
+    color: var(--color-text);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .eras__no-match-clear {
+    min-height: 2.5rem;
+    padding: 0 var(--space-5);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--color-text);
+    background: var(--color-surface-raised);
+    font: inherit;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  @media (hover: hover) {
+    .eras__no-match-clear:hover {
+      border-color: var(--color-border-control);
+      background: var(--color-surface-hover);
     }
   }
-  @media (max-width: 30rem) {
+  .eras__no-match-clear:active {
+    background: var(--color-surface);
+  }
+  @media (pointer: coarse) {
+    .eras__no-match-clear {
+      min-height: var(--tap-size);
+    }
+  }
+
+  @media (max-width: 39.99rem) {
+    .home-header__brand {
+      row-gap: var(--space-1);
+    }
+    .home-header__mark {
+      grid-row: auto;
+      width: 2rem;
+      height: 2rem;
+      padding: 0.2rem;
+      border-radius: var(--radius-sm);
+    }
+    .home-header__tagline {
+      grid-column: 1 / -1;
+    }
+    .eras__filter {
+      flex: 1 1 100%;
+      margin-left: 0;
+    }
+    .eras__filter input {
+      width: 100%;
+    }
     .era-grid {
-      grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
-      gap: 0.75rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+    }
+  }
+  @media (forced-colors: active) {
+    .home-header__mark {
+      forced-color-adjust: none;
+      fill: Canvas;
+      background: CanvasText;
     }
   }
 </style>

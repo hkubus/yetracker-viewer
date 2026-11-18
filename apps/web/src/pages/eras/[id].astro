@@ -3,6 +3,8 @@ import type { Era, Song } from '@yetracker/types';
 import BackButton from '../../components/BackButton.astro';
 import CoverImage from '../../components/CoverImage.astro';
 import ErrorPage from '../../components/ErrorPage.astro';
+import ChevronDownIcon from '../../components/icons/ChevronDownIcon.astro';
+import ChevronIcon from '../../components/icons/ChevronIcon.astro';
 import Pagination from '../../components/Pagination.astro';
 import SongList from '../../components/SongList.astro';
 import {
@@ -24,7 +26,7 @@ import {
 import Layout from '../../layouts/Layout.astro';
 import { normalizeSongCategory, SONG_CATEGORIES } from '../../songCategories';
 import { DEFAULT_SONG_SORT, normalizeSongSort } from '../../songSorts';
-import { colorValue, themeStyle } from '../../utils/color';
+import { colorValue, themeFor, themeStyle } from '../../utils/color';
 import { coverUrl } from '../../utils/cover';
 import {
   type EraListParams,
@@ -35,8 +37,10 @@ import {
   pageCountFor,
   parseId,
   parsePageParam,
+  parseTimeline,
   parseTotalCount,
   summarize,
+  timelineYears,
 } from '../../utils/era-page';
 import { clampQuery } from '../../utils/search';
 import { type EraSummary, loadEraSummaries } from '../../utils/shared-api';
@@ -187,6 +191,9 @@ const categoryLabel = SONG_CATEGORIES.find((item) => item.id === category)?.labe
 const subtitle = era?.subtitle?.trim() || null;
 const description = era?.description?.trim() ?? '';
 const notes = era?.notes?.trim() ?? '';
+// The catalog writes an era's timeline as "(date) (event)" pairs; anything else is shown as written.
+const timeline = parseTimeline(notes);
+const years = timelineYears(timeline);
 const pageTitle = era ? eraPageTitle(era.name, { query, categoryLabel, page: currentPage }) : '';
 const metaDescription = era
   ? summarize(description || notes || `Unreleased songs from the ${era.name} era, as catalogued by Ye Tracker.`)
@@ -201,6 +208,8 @@ if (!failure && ogImage && !publicApiOrigin && !Astro.response.headers.has('Cach
 }
 const paginationBase = era ? eraPageHref(era.id, listParams) : '';
 const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${colorValue(era.dominantColor)}` : '';
+// Tints the browser chrome (mobile address bar, installed app title bar) with the era's background.
+const themeColor = era ? themeFor(era.dominantColor).background : undefined;
 ---
 
 {
@@ -220,38 +229,56 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
       canonicalPath={eraPageHref(era.id, listParams, currentPage)}
       ogImage={ogImage}
       ogImageAlt={ogImage ? `Cover art of ${era.name}` : undefined}
+      themeColor={themeColor}
     >
       <div class="era-page" style={pageStyle}>
-        <div class="era-toolbar">
+        <div class="era-topbar">
           <BackButton />
           {(previousEra || nextEra) && (
             <nav class="era-nav" aria-label="Other eras">
-              {previousEra && (
-                <a class="era-nav__link" href={`/eras/${previousEra.id}`} rel="prev" title={previousEra.name}>
-                  <span aria-hidden="true">←</span>
-                  <span class="sr-only">Previous era:</span>
+              {/* A missing neighbour keeps its place (dimmed, hidden from assistive technology): the other arrow
+                  never moves. */}
+              {previousEra ? (
+                <a
+                  class="era-nav__link era-nav__link--previous"
+                  href={`/eras/${previousEra.id}`}
+                  rel="prev"
+                  title={previousEra.name}
+                  data-astro-prefetch
+                >
+                  <ChevronIcon direction="left" class="era-nav__icon" />
+                  <span class="sr-only">Previous era: </span>
                   <span class="era-nav__name">{previousEra.name}</span>
                 </a>
+              ) : (
+                <span class="era-nav__link era-nav__link--previous is-disabled" aria-hidden="true">
+                  <ChevronIcon direction="left" class="era-nav__icon" />
+                </span>
               )}
-              {nextEra && (
+              {nextEra ? (
                 <a
                   class="era-nav__link era-nav__link--next"
                   href={`/eras/${nextEra.id}`}
                   rel="next"
                   title={nextEra.name}
+                  data-astro-prefetch
                 >
-                  <span class="sr-only">Next era:</span>
+                  <span class="sr-only">Next era: </span>
                   <span class="era-nav__name">{nextEra.name}</span>
-                  <span aria-hidden="true">→</span>
+                  <ChevronIcon class="era-nav__icon" />
                 </a>
+              ) : (
+                <span class="era-nav__link era-nav__link--next is-disabled" aria-hidden="true">
+                  <ChevronIcon class="era-nav__icon" />
+                </span>
               )}
             </nav>
           )}
         </div>
 
-        <header class="era-header">
+        <header class="era-hero">
           <CoverImage
-            class="era-header__cover"
+            class="era-hero__cover"
             eraId={era.id}
             eraName={era.name}
             hasCover={era.hasCover}
@@ -259,36 +286,50 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
             dominantColor={era.dominantColor}
             priority
           />
-          <div class="era-header__text">
+          <div class="era-hero__text">
             <h1>{era.name}</h1>
-            {subtitle && <p class="era-header__subtitle">{subtitle}</p>}
+            {(subtitle || years) && (
+              <p class="era-hero__meta">
+                {subtitle && <span>{subtitle}</span>}
+                {years && <span>{years}</span>}
+              </p>
+            )}
+            {(description || notes) && (
+              <details class="era-about">
+                <summary class="era-about__toggle">
+                  About this era
+                  <ChevronDownIcon class="era-about__chevron" />
+                </summary>
+                <div class="era-about__content">
+                  {description && <p class="era-about__description">{description}</p>}
+                  {notes && (
+                    <div class="era-about__timeline">
+                      <h2 class="era-about__heading">Timeline</h2>
+                      {timeline ? (
+                        <ol class="era-timeline">
+                          {timeline.map((entry) => (
+                            <li class:list={['era-timeline__entry', { 'is-undated': !entry.date }]}>
+                              {entry.date && (
+                                <time class="era-timeline__date" datetime={entry.iso}>
+                                  {entry.date}
+                                </time>
+                              )}
+                              <span class="era-timeline__text">{entry.text}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      ) : (
+                        <p class="era-about__notes">{notes}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </details>
+            )}
           </div>
-          {(description || notes) && (
-            <details class="era-about">
-              <summary>About this era</summary>
-              <div class="era-about__content">
-                {description && <p class="era-about__description">{description}</p>}
-                {notes && (
-                  <div class="era-about__notes">
-                    <h2 class="era-about__heading">Timeline</h2>
-                    <p>{notes}</p>
-                  </div>
-                )}
-              </div>
-            </details>
-          )}
         </header>
 
         <div class="era-songs">
-          <Pagination
-            currentPage={currentPage}
-            pageCount={pageCount}
-            totalItems={totalSongs}
-            pageSize={ERA_PAGE_SIZE}
-            basePath={paginationBase}
-            paginationId="song-pagination-top"
-            position="top"
-          />
           <SongList
             eraId={era.id}
             eraName={era.name}
@@ -303,15 +344,29 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
             sort={sort}
             total={totalSongs}
             offset={(currentPage - 1) * ERA_PAGE_SIZE}
-          />
-          <Pagination
-            currentPage={currentPage}
-            pageCount={pageCount}
-            totalItems={totalSongs}
-            pageSize={ERA_PAGE_SIZE}
-            basePath={paginationBase}
-            position="bottom"
-          />
+          >
+            <Pagination
+              slot="pager"
+              variant="compact"
+              currentPage={currentPage}
+              pageCount={pageCount}
+              totalItems={totalSongs}
+              pageSize={ERA_PAGE_SIZE}
+              basePath={paginationBase}
+              paginationId="song-pagination-top"
+              position="top"
+            />
+          </SongList>
+          {pageCount > 1 && (
+            <Pagination
+              currentPage={currentPage}
+              pageCount={pageCount}
+              totalItems={totalSongs}
+              pageSize={ERA_PAGE_SIZE}
+              basePath={paginationBase}
+              position="bottom"
+            />
+          )}
         </div>
       </div>
     </Layout>
@@ -321,171 +376,219 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
 <style>
   .era-page {
     box-sizing: border-box;
-    padding: 0.75rem 0.75rem 0;
+    padding: var(--space-3) var(--page-gutter) 0;
     color: var(--theme-text);
   }
 
-  .era-toolbar {
+  /* ---- Top bar: back to all eras, previous / next era ---- */
+  .era-topbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 0.75rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+  .era-topbar :global(.back-link) {
+    min-width: 0;
   }
   .era-nav {
     display: flex;
     min-width: 0;
     justify-content: flex-end;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .era-nav__link {
-    display: inline-flex;
     box-sizing: border-box;
-    min-width: 2.75rem;
-    max-width: 20rem;
-    min-height: 2.75rem;
+    display: inline-flex;
+    min-width: var(--tap-size);
+    max-width: 16rem;
+    min-height: var(--tap-size);
     align-items: center;
     justify-content: center;
-    gap: 0.4rem;
-    padding: 0.4rem 0.8rem;
-    border: 2px solid var(--theme-accent);
-    border-radius: 0.65rem;
+    gap: var(--space-1);
+    padding: 0 var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-pill);
     color: var(--theme-text);
-    background: var(--theme-surface);
-    font-size: 0.9rem;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    line-height: var(--line-height-tight);
     text-decoration: none;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
+  }
+  .era-nav__link--previous {
+    padding-left: var(--space-3);
+  }
+  .era-nav__link--next {
+    padding-right: var(--space-3);
+  }
+  @media (hover: hover) {
+    a.era-nav__link:hover {
+      border-color: var(--color-border-strong);
+      background: var(--color-surface);
+    }
+  }
+  a.era-nav__link:active {
+    background: var(--color-surface-raised);
+  }
+  a.era-nav__link:focus-visible {
+    outline: 2px solid var(--theme-focus-ring);
+    outline-offset: 2px;
+  }
+  /* Dimmed through the border only: the arrow keeps the muted text contrast. */
+  .era-nav__link.is-disabled {
+    border-style: dashed;
+    color: var(--theme-muted-text);
   }
   .era-nav__name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .era-nav__link:hover {
-    border-color: var(--theme-focus-ring);
-    background: var(--theme-background);
-  }
-  .era-nav__link:focus-visible {
-    outline: 2px solid var(--theme-focus-ring);
-    outline-offset: 2px;
+  .era-nav :global(.era-nav__icon) {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: none;
   }
 
-  .era-header {
+  /* ---- Hero: cover, name, subtitle and years; the description and timeline behind "About this era" on phones ---- */
+  /* The era color is a tint (from the theme's contrast-checked surfaces into the page background), not a frame. */
+  .era-hero {
+    --cover-size: 4.5rem;
+    --hero-gap: var(--space-3);
     display: grid;
-    grid-template-columns: clamp(9rem, 16vw, 13rem) minmax(0, 1fr);
-    grid-template-rows: auto 1fr;
-    grid-template-areas:
-      'cover text'
-      'cover about';
+    grid-template-columns: var(--cover-size) minmax(0, 1fr);
     align-items: start;
-    gap: 0.5rem 1.5rem;
-    padding: 1rem;
-    border: 4px solid var(--theme-accent);
-    border-radius: 16px;
-    background: var(--theme-background);
+    gap: var(--hero-gap);
+    padding: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(135deg, var(--theme-surface), var(--theme-background) 55%, var(--color-bg));
   }
-  .era-header :global(.era-header__cover) {
-    grid-area: cover;
-    border-radius: 12px;
+  .era-hero :global(.era-hero__cover) {
+    width: 100%;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
   }
-  .era-header__text {
-    grid-area: text;
+  .era-hero__text {
     min-width: 0;
   }
   h1 {
-    margin: 0.25rem 0 0;
-    font-size: clamp(1.6rem, 3.5vw, 2.5rem);
-    line-height: 1.15;
+    margin: 0;
+    font-size: var(--font-size-xl);
+    font-weight: 700;
+    line-height: var(--line-height-tight);
     overflow-wrap: anywhere;
+    text-wrap: balance;
   }
-  .era-header__subtitle {
-    margin: 0.35rem 0 0;
+  .era-hero__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-2);
+    margin: var(--space-1) 0 0;
     color: var(--theme-muted-text);
-    font-size: 1.05rem;
+    font-size: var(--font-size-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .era-hero__meta > * + *::before {
+    margin-right: var(--space-2);
+    content: '·';
+    content: '·' / '';
   }
 
   .era-about {
-    grid-area: about;
     min-width: 0;
   }
-  .era-about > summary {
+  .era-about__toggle {
     display: inline-flex;
-    min-height: 2.75rem;
+    min-height: var(--tap-size);
     align-items: center;
+    gap: var(--space-1);
+    /* The target reaches into the hero's padding instead of making the hero taller. */
+    margin-bottom: calc(-1 * var(--space-2));
     color: var(--theme-accent-text);
-    font-weight: 600;
     cursor: pointer;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    list-style: none;
+    user-select: none;
   }
+  .era-about__toggle::-webkit-details-marker {
+    display: none;
+  }
+  .era-about__toggle:focus-visible {
+    outline: 2px solid var(--theme-focus-ring);
+    outline-offset: 2px;
+  }
+  .era-about :global(.era-about__chevron) {
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+    transition: transform var(--duration-fast) var(--ease-standard);
+  }
+  .era-about[open] :global(.era-about__chevron) {
+    transform: rotate(180deg);
+  }
+  /* Opens under the cover across the whole hero, while the toggle stays where it was tapped. */
   .era-about__content {
     display: grid;
-    gap: 0.5rem 1.5rem;
+    gap: var(--space-4);
+    margin-left: calc(-1 * (var(--cover-size) + var(--hero-gap)));
+    padding-top: var(--space-4);
     color: var(--theme-text);
-    line-height: 1.55;
+    font-size: var(--font-size-sm);
+    line-height: var(--line-height-normal);
   }
   .era-about__description,
-  .era-about__notes p {
+  .era-about__notes {
+    max-width: 72ch;
     margin: 0;
-    white-space: pre-line;
     overflow-wrap: anywhere;
+    text-wrap: pretty;
+    white-space: pre-line;
   }
   .era-about__notes {
     color: var(--theme-muted-text);
-    font-size: 0.9rem;
   }
   .era-about__heading {
-    margin: 0 0 0.25rem;
+    margin: 0 0 var(--space-2);
     color: var(--theme-muted-text);
-    font-size: 0.8rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-size: var(--font-size-xs);
+    font-weight: 600;
   }
-
-  /* Wide screens always show the description: the disclosure is only there for phones. Browsers without
-     ::details-content keep the (closed) disclosure. */
-  @media (min-width: 48rem) {
-    @supports selector(::details-content) {
-      .era-about > summary {
-        display: none;
-      }
-      .era-about::details-content {
-        display: block;
-        content-visibility: visible;
-        block-size: auto;
-      }
-    }
-    .era-about__content:has(.era-about__notes) {
-      grid-template-columns: minmax(0, 2fr) minmax(12rem, 1fr);
-    }
+  .era-timeline {
+    display: grid;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .era-timeline__entry {
+    display: grid;
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+  .era-timeline__date {
+    color: var(--theme-accent-text);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .era-timeline__entry.is-undated .era-timeline__text {
+    grid-column: 1 / -1;
+    color: var(--theme-muted-text);
   }
 
   .era-songs {
-    --song-list-bleed: 0.75rem;
-    margin-top: 1rem;
-    padding: 0.75rem;
-    border: 4px solid var(--theme-accent);
-    border-radius: 16px;
-    background: var(--theme-background);
+    margin-top: var(--space-4);
   }
 
-  /* Phones: one toolbar row (the neighbouring eras become arrows; their names stay available to screen readers and
-     as tooltips), a small cover beside the title, and the description behind a disclosure, so the song list starts
-     near the top of the screen. */
-  @media (max-width: 47.99rem) {
-    .era-page {
-      padding-inline: 0.5rem;
-    }
-    .era-toolbar {
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-    .era-toolbar :global(.back-link) {
-      min-width: 0;
-    }
-    .era-nav {
-      flex: none;
-    }
+  /* Phones: the neighbouring eras become arrows (their names stay in the accessible names and tooltips). */
+  @media (max-width: 39.99rem) {
     .era-nav__link {
-      padding-inline: 0.5rem;
+      padding: 0;
     }
     .era-nav__name {
       position: absolute;
@@ -494,34 +597,57 @@ const pageStyle = era ? `${themeStyle(era.dominantColor)}; --dominantColor: ${co
       overflow: hidden;
       clip-path: inset(50%);
     }
-    .era-header {
-      grid-template-columns: 4.5rem minmax(0, 1fr);
-      grid-template-rows: auto auto;
-      align-items: center;
-      gap: 0 0.75rem;
-      padding: 0.75rem;
+  }
+
+  /* Tablets and up: a larger cover. From 64rem the description and timeline are always shown (browsers without
+     ::details-content keep the closed disclosure); a portrait tablet keeps it, so the songs start on the first screen. */
+  @media (min-width: 48rem) {
+    .era-page {
+      padding-top: var(--space-4);
     }
-    .era-header:has(.era-about[open]) {
-      grid-template-areas:
-        'cover text'
-        'about about';
+    .era-topbar {
+      margin-bottom: var(--space-4);
     }
-    .era-header :global(.era-header__cover) {
-      align-self: start;
-      border-radius: 8px;
+    .era-hero {
+      --cover-size: clamp(8rem, 14vw, 11rem);
+      --hero-gap: var(--space-5);
+      padding: var(--space-5);
     }
     h1 {
-      margin-top: 0;
+      font-size: var(--font-size-display);
     }
-    .era-header__subtitle {
-      font-size: 0.9rem;
+    .era-hero__meta {
+      margin-top: var(--space-2);
+      font-size: var(--font-size-md);
     }
-    .era-about > summary {
-      min-height: 2.25rem;
+    .era-about__toggle {
+      margin-bottom: 0;
+    }
+    .era-about__content {
+      margin-left: 0;
+      padding-top: var(--space-3);
     }
     .era-songs {
-      margin-top: 0.75rem;
-      padding: 0.5rem;
+      margin-top: var(--space-5);
+    }
+  }
+  @media (min-width: 64rem) {
+    @supports selector(::details-content) {
+      .era-about__toggle {
+        display: none;
+      }
+      .era-about::details-content {
+        display: block;
+        content-visibility: visible;
+        block-size: auto;
+      }
+      .era-about__content {
+        padding-top: var(--space-4);
+      }
+    }
+    .era-about__content:has(.era-about__timeline) {
+      grid-template-columns: minmax(0, 1.7fr) minmax(15rem, 1fr);
+      gap: var(--space-6);
     }
   }
 </style>

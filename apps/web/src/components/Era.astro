@@ -1,8 +1,8 @@
 ---
 /**
- * An era card for the home page grid: cover (or a placeholder tile), name as an <h3> under the "Eras" heading,
- * subtitle and song count, all linking to the era page. Colors come from `themeFor`, so text stays readable for
- * any era color.
+ * An era card for the home page grid: the cover (or a placeholder tile) full-bleed on top, then the name as an
+ * <h3> under the "Eras" heading, the subtitle and the song count, all one link to the era page. The frame stays
+ * neutral; the era's colors (from `themeFor`, readable for any era color) tint the card and mark hover and focus.
  */
 import type { Era } from '@yetracker/types';
 import { themeStyle } from '../utils/color';
@@ -38,9 +38,11 @@ const songsCount = typeof era.songsCount === 'number' && era.songsCount >= 0 ? e
     priority={priority}
     apiBaseUrl={apiBaseUrl}
   />
-  <h3 class="era-card__name">{era.name}</h3>
-  {era.subtitle ? <p class="era-card__subtitle">{era.subtitle}</p> : null}
-  {songsCount !== null ? <p class="era-card__count">{countLabel(songsCount, 'song')}</p> : null}
+  <span class="era-card__body">
+    <h3 class="era-card__name">{era.name}</h3>
+    {era.subtitle ? <p class="era-card__subtitle">{era.subtitle}</p> : null}
+    {songsCount !== null ? <p class="era-card__count">{countLabel(songsCount, 'song')}</p> : null}
+  </span>
 </a>
 
 <style>
@@ -48,63 +50,98 @@ const songsCount = typeof era.songsCount === 'number' && era.songsCount >= 0 ? e
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
     height: 100%;
     min-width: 0;
-    padding: 0.6rem;
-    border: 4px solid color-mix(in srgb, var(--era-accent) 55%, var(--era-background));
-    border-radius: 0.75rem;
-    container-type: inline-size;
+    /* Clips the full-bleed cover to the card's corners (the focus outline is drawn outside and stays visible). */
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
     color: var(--era-text);
-    background: var(--era-background);
+    /* A hint of the era's color on the neutral surface; the era's text colors stay readable on both. */
+    background: color-mix(in oklab, var(--era-background) 60%, var(--color-surface));
     text-decoration: none;
     transition:
-      transform 0.2s,
-      border-color 0.2s,
-      background-color 0.2s;
-  }
-  .era-card:hover {
-    border-color: var(--era-accent);
-    background: var(--era-surface);
-    transform: translateY(-0.2rem);
-  }
-  .era-card:focus-visible {
-    border-color: var(--era-accent);
-    background: var(--era-surface);
-    outline: 2px solid var(--focus-ring-color, #fff);
-    outline-offset: 2px;
+      transform var(--duration-base) var(--ease-standard),
+      border-color var(--duration-base) var(--ease-standard),
+      background-color var(--duration-base) var(--ease-standard),
+      box-shadow var(--duration-base) var(--ease-standard);
   }
   .era-card :global(.era-card__cover) {
-    margin-bottom: 0.2rem;
-    border-radius: 0.45rem;
+    flex: none;
+  }
+  .era-card :global(.era-card__cover img) {
+    transition: transform var(--duration-slow) var(--ease-standard);
+  }
+  .era-card__body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+    padding: var(--space-3) var(--space-3) var(--space-3);
   }
   .era-card__name {
     margin: 0;
     overflow-wrap: anywhere;
-    font-size: 1.1rem;
-    font-size: clamp(1rem, 9cqi, 1.45rem);
-    line-height: 1.15;
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    line-height: var(--line-height-snug);
     letter-spacing: -0.01em;
+    text-wrap: balance;
   }
   .era-card__subtitle {
+    display: -webkit-box;
     margin: 0;
+    overflow: hidden;
     overflow-wrap: anywhere;
     color: var(--era-muted-text);
-    font-size: 0.8rem;
-    line-height: 1.3;
+    font-size: var(--font-size-xs);
+    line-height: var(--line-height-snug);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
+  /* Pushed to the bottom, so counts line up across a row of cards with names of different lengths. */
   .era-card__count {
-    align-self: flex-end;
     margin: auto 0 0;
-    padding-top: 0.25rem;
+    padding-top: var(--space-1);
     color: var(--era-muted-text);
-    font-size: 0.85rem;
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
   }
-  @media (prefers-reduced-motion: reduce) {
-    .era-card,
+  .era-card:focus-visible {
+    border-color: var(--era-accent);
+    outline: 2px solid var(--focus-ring-color);
+    outline-offset: 3px;
+  }
+  .era-card:active {
+    background: var(--era-surface);
+  }
+  @media (hover: hover) and (pointer: fine) {
     .era-card:hover {
+      border-color: color-mix(in srgb, var(--era-accent) 70%, transparent);
+      background: var(--era-background);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-3px);
+    }
+    .era-card:hover :global(.era-card__cover img) {
+      transform: scale(1.04);
+    }
+    .era-card:active {
+      transform: translateY(-1px);
+    }
+  }
+  /* No lift or zoom: the hover still shows through the border, tint and shadow. */
+  @media (prefers-reduced-motion: reduce) {
+    .era-card:hover,
+    .era-card:active,
+    .era-card:hover :global(.era-card__cover img) {
       transform: none;
-      transition: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .era-card {
+      border-color: CanvasText;
     }
   }
 </style>

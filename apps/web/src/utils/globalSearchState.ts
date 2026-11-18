@@ -65,7 +65,13 @@ export function parseSearchState(params: URLSearchParams, eraIds: readonly numbe
 
 /** Whether the era range is narrower than "all eras" or "playable only" is on. */
 export function hasActiveFilters(state: GlobalSearchState, eraCount: number): boolean {
-  return state.playable || state.from > 0 || state.to < lastIndex(eraCount);
+  return activeFilterCount(state, eraCount) > 0;
+}
+
+/** How many filters are set (0–2): a narrowed era range counts once, "playable only" once. */
+export function activeFilterCount(state: GlobalSearchState, eraCount: number): number {
+  const narrowed = state.from > 0 || state.to < lastIndex(eraCount);
+  return (narrowed ? 1 : 0) + (state.playable ? 1 : 0);
 }
 
 export function searchMode(state: GlobalSearchState, eraCount: number): GlobalSearchMode {

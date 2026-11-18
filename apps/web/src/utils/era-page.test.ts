@@ -8,8 +8,10 @@ import {
   pageCountFor,
   parseId,
   parsePageParam,
+  parseTimeline,
   parseTotalCount,
   summarize,
+  timelineYears,
 } from './era-page.ts';
 
 describe('parseId', () => {
@@ -74,5 +76,41 @@ describe('text', () => {
     assert.ok(Array.from(summary).length <= 40);
     assert.ok(summary.endsWith('word…'));
     assert.equal(summarize('a'.repeat(50), 10), `${'a'.repeat(9)}…`);
+  });
+});
+
+describe('timeline', () => {
+  test('pairs each date with its event, at the precision the catalog gives', () => {
+    const entries = parseTimeline(
+      '(05/15/2018) (Kanye restarts the project) (12/??/2016) (Ye and Cudi have their first sessions) ' +
+        '(??/??/2019) (Kanye and Chance scrap the project) (Late 2013) (The project is scrapped)',
+    );
+    assert.deepEqual(entries, [
+      { date: '5/15/2018', iso: '2018-05-15', text: 'Kanye restarts the project' },
+      { date: 'Dec 2016', iso: '2016-12', text: 'Ye and Cudi have their first sessions' },
+      { date: '2019', iso: '2019', text: 'Kanye and Chance scrap the project' },
+      { date: 'Late 2013', iso: '2013', text: 'The project is scrapped' },
+    ]);
+  });
+
+  test('keeps nested parentheses and undated entries', () => {
+    assert.deepEqual(parseTimeline('(08/29/2021) (Donda (Deluxe) officially releases)\n(Ongoing)'), [
+      { date: '8/29/2021', iso: '2021-08-29', text: 'Donda (Deluxe) officially releases' },
+      { date: null, text: 'Ongoing' },
+    ]);
+  });
+
+  test('anything else is not a timeline', () => {
+    for (const notes of ['', 'Plain text', '(05/15/2018) trailing', '(05/15/2018)', '(1/1/2020) (a', 'a) (b', '()']) {
+      assert.equal(parseTimeline(notes), null, notes);
+    }
+    assert.equal(parseTimeline('(05/15/2018) (06/01/2018)'), null);
+  });
+
+  test('timelineYears spans the first and last dated entries', () => {
+    assert.equal(timelineYears(parseTimeline('(11/30/2016) (a) (05/15/2018) (b)')), '2016–2018');
+    assert.equal(timelineYears(parseTimeline('(05/15/2018) (a) (11/07/2018) (b)')), '2018');
+    assert.equal(timelineYears(parseTimeline('(Ongoing)')), null);
+    assert.equal(timelineYears(null), null);
   });
 });
